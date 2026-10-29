@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# pre-commit: two independent gates, both enforced (see CLAUDE.md).
+#   1. Dependency license governance -- every SHIPPED dependency the gate covers must carry a vetted,
+#      permissive, enterprise-free, redistributable license (or an owner-recorded exception), recorded
+#      in .githooks/licenses.allow against .githooks/licenses.approved. Two classes are gated here:
+#        a. NuGet packages pinned in Directory.Packages.props (or version-pinned directly in a .csproj).
+#        b. npm agent CLIs the studio image bakes and ships (the `name@${VERSION}` installs in the
+#           Dockerfile). Classes the gate does NOT cover, and why, are listed under CLASSES-NOT-GATED
+#           in .githooks/licenses.approved.
+#   2. No em dash / en dash (U+2014 / U+2013) in anything newly added -- code, docs, UI text. Use a
+#      plain hyphen, comma, colon, or parentheses instead.
+#
+# Gates are fix-only here too: this hook never rewrites your change, it only reports what to fix.
+
+repo_root="$(git rev-parse --show-toplevel)"
+manifest="${repo_root}/.githooks/licenses.allow"
+approved="${repo_root}/.githooks/licenses.approved"
+failed=0
+
+# Look up ONE dependency's recorded license and fail if it is missing or not approved. This is the
+# shared core of every dependency-class gate, so extending coverage to a new class means finding its
+# ids and calling this, never re-implementing the approved-list check (and never weakening it).
+#   $1 = dependency id, spelled exactly as its line begins in licenses.allow
+#   $2 = human label for the class, used only in the failure message
+check_one_license() {
+  local pkg="$1" klass="$2" license
+  [ -z "${pkg}" ] && return 0
+  license="$(grep -E "^${pkg}=" "${manifest}" 2>/dev/null | head -n1 | cut -d= -f2-)"
+  if [ -z "${license}" ]; then
+    echo "pre-commit: ${klass} '${pkg}' has no entry in .githooks/licenses.allow -- vet its actual license (nuspec / npm package.json / GitHub LICENSE, not a guess) and add 'Id=SPDX-Id' there before committing." >&2
+    failed=1
+    return 0
+  fi
+  if ! grep -qxF "${license}" "${approved}" 2>/dev/null; then
+    echo "pre-commit: ${klass} '${pkg}' is licensed '${license}', which is not on the approved list (.githooks/licenses.approved). Not MIT-or-similar and free for unrestricted enterprise use and redistribution, and not an owner-recorded exception -- resolve this (swap the dependency, or get an explicit decision recorded and add the license id to the approved list) before committing." >&2
+    failed=1
+  fi
+}
+
+check_licenses() {
+  local touched
+  touched="$(git diff --cached --name-only --diff-filter=ACM -- Directory.Packages.props '*.csproj')"
+  [ -z "${touched}" ] && return 0
+
+  local names
+  names="$(
+    {
+      git diff --cached --name-only --diff-filter=ACM -- Directory.Packages.props '*.csproj' | while IFS= read -r f; do
+        git show ":${f}" 2>/dev/null
+      done
+    } | grep -oE '<Package(Version|Reference) Include="[^"]+"' | sed -E 's/.*Include="([^"]+)"/\1/' | sort -u
+  )"
+
+  [ -z "${names}" ] && return 0
+
+  while IFS= read -r pkg; do
+    check_one_license "${pkg}" "NuGet package"
+  done <<< "${names}"
+}
+
+# npm agent CLIs the studio image bakes and ships (Claude Code / Codex / Copilot, backlog 61 / ADR
+# 0023). The image redistributes these binaries, so their REDISTRIBUTION license is a real gate: a new
+# CLI cannot be added to the `name@${VERSION}` installs without recording and vetting its license here.
+# (The vendor CLIs' SERVICE TERMS about automated use are a separate, commercial question this gate
+# deliberately does not touch -- see CLASSES-NOT-GATED in licenses.approved.) Triggered by the Dockerfile
+# being staged, which is where those pins live and what AgentCliPinTests reads. Comment lines are skipped:
+# a commented-out install is not something the image ships, and reading one as shipped gets the gate wrong
+# in both directions (it demands a manifest entry for a package nobody installs, and it would report a
+# package named only in prose as redistributed). DependencyLicenseGateTests does the same in C#.
+check_npm_licenses() {
+  git diff --cached --name-only --diff-filter=ACM -- Dockerfile | grep -q . || return 0
+
+  local names
+  names="$(
+    git show ":Dockerfile" 2>/dev/null \
+      | grep -v '^[[:space:]]*#' \
+      | grep -oE '(@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+@\$\{[A-Za-z_]+\}' \
+      | sed -E 's/@\$\{[A-Za-z_]+\}$//' | sort -u
+  )"
+
+  [ -z "${names}" ] && return 0
+
+  while IFS= read -r pkg; do
+    check_one_license "${pkg}" "npm agent CLI"
+  done <<< "${names}"
+}
+
+check_no_dashes() {
+  local files
+  files="$(git diff --cached --name-only --diff-filter=ACM)"
+  [ -z "${files}" ] && return 0
+
+  while IFS= read -r f; do
+    [ -z "${f}" ] && continue
+    # Vendored third-party assets (see wwwroot/vendor/VENDORED.md): the no-dash rule governs authored
+    # content, not upstream minified bundles -- and per-file diffing thousands of them is unusably slow.
+    # Captured agent-CLI protocol output (tests/*/Sessions/Fixtures): the parser tests replay these
+    # bytes verbatim, so editing the CLI's own punctuation would falsify the evidence. Same reasoning
+    # as vendored assets: the rule governs what we author.
+    case "${f}" in
+      */wwwroot/vendor/*) continue ;;
+      tests/*/Sessions/Fixtures/*) continue ;;
+    esac
+    # One pass per file (a per-line grep spawns thousands of processes on Windows and takes
+    # minutes on a large commit): added lines only, the +++ header excluded, same rule.
+    if git diff --cached -U0 -- "${f}" | grep -P '^\+' | grep -vP '^\+\+\+' | grep -qP '[\x{2013}\x{2014}]'; then
+      echo "pre-commit: ${f} adds an em dash or en dash -- use a plain hyphen (-), comma, colon, or parentheses instead." >&2
+      failed=1
+    fi
+  done <<< "${files}"
+}
+
+check_licenses
+check_npm_licenses
+check_no_dashes
+
+exit "${failed}"

@@ -1,0 +1,280 @@
+@page "/onboarding/board"
+@layout OnboardingLayout
+@using Fravashi.Application.Onboarding
+@using Fravashi.Application.Onboarding.Auth
+@using Fravashi.Application.Persistence
+@using Fravashi.Web.Services
+@inject IBoardAccessProbe Probe
+@inject ISecretStore Secrets
+@inject IProviderConnectionStore Connections
+@inject IConfigurationStore Config
+@inject IConfigurationReloader Reloader
+@inject IAuthConfigStore AuthConfig
+@inject NavigationManager Nav
+@inject OnboardingDraft Draft
+
+@* O11 - O14 - work board. Azure DevOps / Jira first, plus the in-app local board (O11) for users with none.
+   Access is authorized and tested: read + query run for real. For Jira, supplying a project key runs a real,
+   user-consented write round-trip (create → modify → transition → delete a labelled probe issue); without a
+   key, and for Azure DevOps, write / modify / status-change stay honestly "not verified" (the ADO round-trip
+   is not yet implemented - it can follow the Jira probe's pattern; see backlog). Choosing an external provider
+   records the tracker selection so the studio uses it after the app restarts. Field values live in the
+   wizard-scoped draft (F13); the token is circuit-only and never persisted. *@
+
+<div class="ob-step">
+    <h2>Your work board</h2>
+
+    <label class="ob-field">
+        <span class="ob-field-label">Provider</span>
+        <FluentSelect TOption="string" @bind-Value="Draft.BoardProvider" @bind-Value:after="OnProviderChanged" data-testid="board-provider">
+            <FluentOption Value="@OnboardingProviders.AzureDevOps">Azure DevOps</FluentOption>
+            <FluentOption Value="@OnboardingProviders.Jira">Jira</FluentOption>
+            <FluentOption Value="@OnboardingProviders.Local">Local (in-app) - I have no external board</FluentOption>
+        </FluentSelect>
+    </label>
+
+    @if (Draft.BoardProvider == OnboardingProviders.Local)
+    {
+        <p class="ob-note" data-testid="board-local">
+            @(ProductName.Short) will keep a <strong>local board</strong>. This choice is recorded. The in-app local board
+            store is not yet a working store - it is on the backlog - so the board starts empty until it is
+            built.
+        </p>
+    }
+    else
+    {
+        <label class="ob-field">
+            <span class="ob-field-label">@BaseUrlLabel</span>
+            <FluentTextField @bind-Value="Draft.BoardBaseUrl" @bind-Value:after="Draft.Save" data-testid="board-baseurl" />
+        </label>
+
+        <label class="ob-field">
+            <span class="ob-field-label">Project@(Draft.BoardProvider == OnboardingProviders.Jira ? " key (optional)" : "")</span>
+            <FluentTextField @bind-Value="Draft.BoardProject" @bind-Value:after="Draft.Save" data-testid="board-project" />
+            @if (Draft.BoardProvider == OnboardingProviders.Jira)
+            {
+                <span class="ob-field-hint" data-testid="board-project-help">
+                    The key of a Jira project you can create issues in (e.g. <code>ENG</code>). With it, "Test
+                    access" runs a real write test: it creates a clearly-labelled probe issue ("@(ProductName.Short) access
+                    probe - safe to delete"), edits it, transitions it, then deletes it.
+                    <strong>Leave it empty</strong> and write/modify/status-change cannot be tested - they stay
+                    honestly "not verified".
+                </span>
+            }
+        </label>
+
+        @if (Draft.BoardProvider == OnboardingProviders.Jira)
+        {
+            <label class="ob-field">
+                <span class="ob-field-label">Account email</span>
+                <FluentTextField @bind-Value="Draft.BoardEmail" @bind-Value:after="Draft.Save" data-testid="board-email" />
+            </label>
+        }
+
+        <ProviderSignIn Area="board" Provider="@Draft.BoardProvider" BaseUrl="@Draft.BoardBaseUrl"
+                        ConnectionId="board" CredentialRef="board:token"
+                        UseSso="_useSso" UseSsoChanged="OnUseSsoChanged" OnSignedIn="OnSignedInAsync"
+                        ReturnMode="@ReturnMode" />
+
+        @if (_signinReturn is not null)
+        {
+            <p class="ob-saved" data-testid="board-signin-return">@_signinReturn</p>
+        }
+
+        @if (!_useSso || !_ssoAvailable)
+        {
+            <label class="ob-field">
+                <span class="ob-field-label">API token / PAT</span>
+                <FluentTextField @bind-Value="Draft.BoardToken" TextFieldType="TextFieldType.Password" data-testid="board-token" />
+            </label>
+        }
+
+        <SavedConnectionNote Connection="_prior" TokenNeeded="TokenNeeded" Area="board" />
+
+        <div class="ob-actions">
+            <FluentButton Appearance="Appearance.Accent" OnClick="TestAsync" Disabled="_busy" data-testid="board-test">
+                @(_busy ? "Testing…" : "Test access")
+            </FluentButton>
+        </div>
+
+        <ProbeResultView Result="Draft.BoardResult" />
+    }
+
+    <div class="ob-actions">
+        <FluentButton OnClick="SaveAsync" Disabled="_busy" data-testid="board-save">Save connection</FluentButton>
+    </div>
+
+    @if (Draft.BoardSavedStatus is not null)
+    {
+        <p class="ob-saved" data-testid="board-saved">Saved as <code>@Draft.BoardSavedStatus</code>.</p>
+    }
+</div>
+
+@code {
+    private bool _busy;
+    private ProviderConnection? _prior;
+    private bool _useSso;
+    private bool _ssoAvailable;
+    private string? _signinReturn;
+
+    private bool TokenNeeded => _prior?.CredentialRef is not null && string.IsNullOrWhiteSpace(Draft.BoardToken) && Draft.BoardCredential is null;
+
+    // Settings-hosted when the URL carries the wizard re-entry flag OR the step is rendered under the Settings
+    // Environment tab (/settings/…). Either way an OAuth sign-in must round-trip back to Settings, not the wizard.
+    private string ReturnMode =>
+        Nav.Uri.Contains("mode=settings", StringComparison.OrdinalIgnoreCase)
+        || Nav.ToBaseRelativePath(Nav.Uri).StartsWith("settings/", StringComparison.OrdinalIgnoreCase)
+            ? "settings" : "wizard";
+
+    private bool BoardBearer =>
+        Draft.BoardProvider == OnboardingProviders.AzureDevOps
+        && Draft.BoardCredential is { Method: not AuthMethods.Pat };
+
+    protected override void OnInitialized()
+    {
+        _prior = Connections.Get("board");
+        _ssoAvailable = AuthConfig.StrategyFor(Draft.BoardProvider) != AuthStrategy.Pat;
+        _useSso = _ssoAvailable && AuthConfig.Get(Draft.BoardProvider).IsConfigured;
+        _signinReturn = SignInReturnMessage();
+    }
+
+    /// <summary>Feedback after the Atlassian 3LO callback redirects back here (?signin=ok / denied / error / csrf).</summary>
+    private string? SignInReturnMessage()
+    {
+        var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(new Uri(Nav.Uri).Query);
+        var signin = query.TryGetValue("signin", out var value) ? value.ToString() : null;
+        return signin switch
+        {
+            "ok" => $"Signed in - a token was acquired and stored{SiteSuffix()}.",
+            "ok-unverified" => "Signed in and the token was stored, but the accessible-resources check returned nothing - verify the scopes.",
+            "denied" => "Sign-in was cancelled or denied. You can try again or use an access token.",
+            "error" => "Sign-in did not complete - the token exchange failed. Check the client id / secret and try again.",
+            "csrf" => "Sign-in could not be verified (state mismatch) and was rejected. Start it again.",
+            _ => null,
+        };
+    }
+
+    private string SiteSuffix()
+    {
+        var site = Config.Get("Onboarding:board:CloudSite");
+        return string.IsNullOrEmpty(site) ? string.Empty : $" for {site}";
+    }
+
+    private void OnUseSsoChanged(bool useSso)
+    {
+        _useSso = useSso;
+        _ssoAvailable = AuthConfig.StrategyFor(Draft.BoardProvider) != AuthStrategy.Pat;
+    }
+
+    private Task OnSignedInAsync(StoredCredential credential)
+    {
+        Draft.BoardCredential = credential;
+        Draft.BoardToken = credential.AccessToken;
+        return Task.CompletedTask;
+    }
+
+    private void OnProviderChanged()
+    {
+        Draft.Save();
+        _ssoAvailable = AuthConfig.StrategyFor(Draft.BoardProvider) != AuthStrategy.Pat;
+        _useSso = _ssoAvailable && AuthConfig.Get(Draft.BoardProvider).IsConfigured;
+        StateHasChanged();
+    }
+
+    private string BaseUrlLabel => Draft.BoardProvider == OnboardingProviders.Jira
+        ? "Site URL (https://your-site.atlassian.net)"
+        : "Organization URL (https://dev.azure.com/org)";
+
+    private async Task TestAsync()
+    {
+        _busy = true;
+        Draft.BoardSavedStatus = null;
+        try
+        {
+            Draft.BoardResult = await Probe.ProbeAsync(BuildRequest());
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        _busy = true;
+        try
+        {
+            var isLocal = Draft.BoardProvider == OnboardingProviders.Local;
+            if (!isLocal)
+            {
+                Draft.BoardResult ??= await Probe.ProbeAsync(BuildRequest());
+            }
+
+            var status = isLocal ? "Local" : StatusFor(Draft.BoardResult!);
+            const string credentialRef = "board:token";
+            var method = AuthMethods.Pat;
+            if (!isLocal && Draft.BoardCredential is not null)
+            {
+                Secrets.Set(credentialRef, CredentialEnvelope.Serialize(Draft.BoardCredential));
+                method = Draft.BoardCredential.Method;
+            }
+            else if (!isLocal && !string.IsNullOrWhiteSpace(Draft.BoardToken))
+            {
+                Secrets.Set(credentialRef, Draft.BoardToken);
+            }
+
+            var hasCredential = !isLocal && (Draft.BoardCredential is not null || !string.IsNullOrWhiteSpace(Draft.BoardToken) || _prior?.CredentialRef is not null);
+            Connections.Upsert(new ProviderConnection(
+                Id: "board",
+                Kind: ProviderKind.Board,
+                BaseUrl: isLocal ? null : NullIfEmpty(Draft.BoardBaseUrl),
+                CredentialRef: hasCredential ? credentialRef : null,
+                Status: status,
+                UpdatedUtc: DateTimeOffset.UtcNow));
+
+            Config.Set("Onboarding:Board:Provider", Draft.BoardProvider);
+            if (!isLocal)
+            {
+                Config.Set(AuthSettings.AuthMethodKey("board"), method);
+
+                // Commit the non-secret coordinates the tracker adapter needs alongside its token. The
+                // coordinate bridge projects these (with the connection's BaseUrl) into the adapter keys -
+                // Jira: Atlassian:JiraEmail/JiraProject; Azure DevOps: AzureDevOps:Project - so the board is
+                // live after onboarding, not merely credentialled. Written as committed Onboarding:Board:*
+                // keys (not the wizard draft) so they survive independently of the draft scratch state.
+                Config.Set("Onboarding:Board:Project", NullIfEmpty(Draft.BoardProject));
+                Config.Set("Onboarding:Board:Email", NullIfEmpty(Draft.BoardEmail));
+            }
+
+            // Registration-time binding: selecting an external tracker changes Tracker:Provider, which the
+            // adapter selection reads once at DI build. The wizard's completion step restarts the app so the
+            // change takes effect. (Feeding the stored credential into the adapter is a follow-up - backlog.)
+            if (!isLocal)
+            {
+                Config.Set("Tracker:Provider", Draft.BoardProvider);
+            }
+
+            Draft.Save();
+            Draft.BoardSavedStatus = status;
+            _prior = Connections.Get("board");
+
+            // Saving is when the connection has to reach the adapters. The bridges re-project only on a reload,
+            // and the only one used to sit in the wizard's final Done, which a step re-opened from Settings
+            // never reaches: a verified connection stayed unwired until the container restarted (backlog 12).
+            // The board also wins the shared Atlassian coordinates, so this reload matters to the wiki as well.
+            Reloader.Reload();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private BoardAccessRequest BuildRequest() =>
+        new(Draft.BoardProvider, NullIfEmpty(Draft.BoardBaseUrl), NullIfEmpty(Draft.BoardProject), NullIfEmpty(Draft.BoardEmail), NullIfEmpty(Draft.BoardToken), BoardBearer);
+
+    private static string StatusFor(AccessProbeResult result) =>
+        result.AnyFailed ? "Failed" : result.ReadVerified ? "Verified" : "Recorded";
+
+    private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+}

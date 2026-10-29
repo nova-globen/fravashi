@@ -1,0 +1,395 @@
+@namespace Fravashi.Web.Components.Onboarding
+@inherits LayoutComponentBase
+@using System.Globalization
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Telemetry
+@using Fravashi.Domain.Telemetry
+@using Fravashi.Web.Services
+@inject IProductEventRecorder Telemetry
+@inject ThemeState Theme
+@inject OnboardingDraft Draft
+@inject IOnboardingState Onboarding
+@inject IConfigurationStore Config
+@inject IConfigurationReloader Reloader
+@inject IApplicationRestarter Restarter
+@inject NavigationManager Nav
+@implements IDisposable
+
+@* URL-driven wizard chrome (F4). FluentWizard was replaced with a routed step container: each step is its own
+   route (/onboarding/<slug>), so browser Back/Forward and refresh land on the right step. FluentWizard drives
+   step state internally and renders every step at once, which does not cooperate with one-route-per-step - see
+   docs/decision-log.md. The chrome is styled with the studio design tokens (F2) so the wizard reads as the same
+   product; the accent below flips the Fluent components to the studio green. Re-entry from Settings is carried
+   in the URL (?mode=settings) so it survives a refresh and the prerender redirect (a circuit-scoped flag would
+   not). *@
+
+<FluentDesignTheme @bind-Mode="Theme.Mode" StorageName="fravashi-theme" CustomColor="#00CC33" />
+
+<div class="ob-root">
+    @* Inside the studio window shell the wizard needs the web-drawn title bar too (drag + window buttons). *@
+    <Fravashi.Web.Components.Shell.WindowTitleBar />
+    @* Work item #350: the title bar's workspace button opens the start dialog over the wizard, never in its place. *@
+    <Fravashi.Web.Components.Shell.StartDialogHost Enforce="false" />
+    <header class="ob-header">
+        <img class="ob-logo" src="brand/favicon.svg" alt="" width="30" height="30" />
+        <span class="ob-brand">@(ProductName.Short)</span>
+        <span class="ob-subtitle">@(_reentry ? "Settings · Onboarding" : "First-run setup")</span>
+    </header>
+
+    @if (_currentIndex < 0)
+    {
+        <div class="ob-canvas"><p class="ob-note">Loading…</p></div>
+    }
+    else
+    {
+        <div class="ob-canvas">
+            <div class="ob-wizard">
+                <nav class="ob-stepper" aria-label="Onboarding steps">
+                    @for (var i = 0; i < Steps.Length; i++)
+                    {
+                        var index = i;
+                        var reachable = IsReachable(index);
+                        <button type="button"
+                                class="ob-stepper-item @StepStateClass(index)"
+                                disabled="@(!reachable)"
+                                data-testid="@($"step-nav-{Steps[index].Slug}")"
+                                @onclick="() => GoToAsync(index)">
+                            <span class="ob-stepper-marker">@(index < _currentIndex ? "✓" : (index + 1).ToString(CultureInfo.InvariantCulture))</span>
+                            <span class="ob-stepper-label">@Steps[index].Label</span>
+                        </button>
+                    }
+                </nav>
+
+                <section class="ob-card" data-testid="ob-card">
+                    <div class="ob-card-body">
+                        @Body
+                    </div>
+                    <footer class="ob-card-footer">
+                        <button type="button" class="studio-btn studio-btn-alt" disabled="@(_currentIndex == 0)"
+                                data-testid="wizard-prev" @onclick="PrevAsync">Previous</button>
+                        <div class="ob-footer-spacer"></div>
+                        @if (_currentIndex >= Steps.Length - 1)
+                        {
+                            <button type="button" class="studio-btn" data-testid="wizard-done" @onclick="Complete">Done</button>
+                        }
+                        else
+                        {
+                            <button type="button" class="studio-btn" disabled="@(!CanAdvance())"
+                                    data-testid="wizard-next" @onclick="NextAsync">Next</button>
+                        }
+                    </footer>
+                </section>
+            </div>
+        </div>
+    }
+</div>
+
+<FluentToastProvider />
+<FluentTooltipProvider />
+<FluentMenuProvider />
+
+@code {
+    private static readonly (string Slug, string Label)[] Steps =
+    [
+        ("runtimes", "Agent runtimes"),
+        ("data", "Data location"),
+        ("wiki", "Wiki"),
+        ("board", "Board"),
+        ("mapping", "Board mapping"),
+        ("review", "Review"),
+    ];
+
+    // One-time migration for installs that were mid-wizard when the "Agent runtimes" step was inserted at the
+    // front (S15). Their persisted furthest index pointed at the old ordering (data=0); shift it by one so it
+    // still points at the same step. Completed installs re-enter with every step unlocked, so they need no shift
+    // - but the marker is set for them too, so the migration runs exactly once.
+    private const string StepMigrationKey = "AgentRuntimes:StepIndexMigratedV1";
+
+    // One-time migration for installs that were mid-wizard when the "Git repository" step retired (plan 2c,
+    // decision 6; it sat at index 2 after the V1 shift). A furthest index past it moves DOWN by one so it keeps
+    // pointing at the same step; an index ON it stays put and now lands on "Wiki".
+    private const string SourceRemovalMigrationKey = "Onboarding:StepIndexMigratedV2";
+
+    private int _currentIndex = -1;
+    private bool _reentry;
+
+    protected override void OnInitialized()
+    {
+        Nav.LocationChanged += OnLocationChanged;
+        Theme.Changed += OnThemeChanged;
+        Draft.Changed += OnDraftChanged;
+
+        // Capture the tracker-provider baseline once per session, so completion knows whether the board step
+        // changed a registration-time setting and a restart is due. Survives circuit reconnects.
+        if (Config.Get("Onboarding:InitialTrackerProvider") is null)
+        {
+            Config.Set("Onboarding:InitialTrackerProvider", Config.Get("Tracker:Provider") ?? string.Empty);
+        }
+
+        MigrateFurthestIndex();
+        MigrateSourceRemoval();
+        ApplyGuards();
+    }
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => InvokeAsync(() =>
+    {
+        ApplyGuards();
+        StateHasChanged();
+    });
+
+    private void OnThemeChanged() => InvokeAsync(StateHasChanged);
+
+    private void OnDraftChanged() => InvokeAsync(StateHasChanged);
+
+    /// <summary>
+    /// Resolves the current step from the URL and enforces the guard rails: a completed wizard sends
+    /// /onboarding/* to the studio unless the URL carries the Settings re-entry flag; a first-run user cannot
+    /// jump past the furthest step they have reached; the bare /onboarding route dispatches to the right step.
+    /// </summary>
+    private void ApplyGuards()
+    {
+        var uri = new Uri(Nav.Uri);
+        var path = uri.AbsolutePath.TrimEnd('/');
+
+        // The layout only governs the onboarding routes. Once a guard sends the user to the studio (a full
+        // reload in the real app), do nothing further - this also stops a redirect loop under test where the
+        // component is not torn down.
+        if (!path.StartsWith("/onboarding", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var complete = Onboarding.IsComplete;
+        _reentry = complete && uri.Query.Contains("mode=settings", StringComparison.OrdinalIgnoreCase);
+
+        if (string.Equals(path, "/onboarding", StringComparison.OrdinalIgnoreCase))
+        {
+            if (complete)
+            {
+                if (_reentry)
+                {
+                    // Settings → "Re-run onboarding": unlock every step and re-baseline the tracker provider.
+                    Config.Set("Onboarding:InitialTrackerProvider", Config.Get("Tracker:Provider") ?? string.Empty);
+                    NavigateToStep(0);
+                }
+                else
+                {
+                    Nav.NavigateTo("/", forceLoad: true);
+                }
+            }
+            else
+            {
+                NavigateToStep(FurthestIndex());
+            }
+
+            return;
+        }
+
+        var index = IndexOfSlug(path);
+        if (index < 0)
+        {
+            NavigateToStep(0);
+            return;
+        }
+
+        if (complete && !_reentry)
+        {
+            // Back/Forward into the wizard after finishing → the studio owns these routes now.
+            _currentIndex = -1;
+            Nav.NavigateTo("/", forceLoad: true);
+            return;
+        }
+
+        if (!complete)
+        {
+            var furthest = FurthestIndex();
+            if (index > furthest)
+            {
+                NavigateToStep(furthest);
+                return;
+            }
+        }
+
+        _currentIndex = index;
+    }
+
+    private int FurthestIndex()
+    {
+        var current = Onboarding.Get().CurrentStep;
+        if (int.TryParse(current, NumberStyles.Integer, CultureInfo.InvariantCulture, out var saved))
+        {
+            return Math.Clamp(saved, 0, Steps.Length - 1);
+        }
+
+        return 0;
+    }
+
+    private static int IndexOfSlug(string path)
+    {
+        var slug = path.TrimEnd('/');
+        var lastSlash = slug.LastIndexOf('/');
+        if (lastSlash >= 0)
+        {
+            slug = slug[(lastSlash + 1)..];
+        }
+
+        return Array.FindIndex(Steps, s => string.Equals(s.Slug, slug, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool IsReachable(int index) => _reentry || index <= FurthestIndex();
+
+    private string StepStateClass(int index)
+    {
+        if (index == _currentIndex)
+        {
+            return "current";
+        }
+
+        return index < _currentIndex ? "done" : "upcoming";
+    }
+
+    /// <summary>
+    /// Shifts a mid-wizard install's persisted furthest index by one, once, now that "Agent runtimes" is the
+    /// new step 0. Idempotent via a marker setting. A completed or not-yet-started wizard is left untouched (a
+    /// completed one re-enters unlocked; a fresh one has no index yet), only the marker is written.
+    /// </summary>
+    private void MigrateFurthestIndex()
+    {
+        if (!string.IsNullOrEmpty(Config.Get(StepMigrationKey)))
+        {
+            return;
+        }
+
+        if (!Onboarding.IsComplete)
+        {
+            var current = Onboarding.Get().CurrentStep;
+            if (int.TryParse(current, NumberStyles.Integer, CultureInfo.InvariantCulture, out var saved))
+            {
+                var shifted = Math.Clamp(saved + 1, 0, Steps.Length - 1);
+                Onboarding.SetCurrentStep(shifted.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+
+        Config.Set(StepMigrationKey, "true");
+    }
+
+    private void MigrateSourceRemoval()
+    {
+        if (!string.IsNullOrEmpty(Config.Get(SourceRemovalMigrationKey)))
+        {
+            return;
+        }
+
+        if (!Onboarding.IsComplete)
+        {
+            var current = Onboarding.Get().CurrentStep;
+            if (int.TryParse(current, NumberStyles.Integer, CultureInfo.InvariantCulture, out var saved) && saved > 2)
+            {
+                var shifted = Math.Clamp(saved - 1, 0, Steps.Length - 1);
+                Onboarding.SetCurrentStep(shifted.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+
+        Config.Set(SourceRemovalMigrationKey, "true");
+    }
+
+    private bool CanAdvance()
+    {
+        // The data-location step (now index 1, after "Agent runtimes") must be confirmed before advancing - the
+        // only hard gate. The runtimes step itself does not block: a runtime can be added later from Settings.
+        if (string.Equals(Steps[_currentIndex].Slug, "data", StringComparison.Ordinal))
+        {
+            return string.Equals(Config.Get("Onboarding:DataLocationConfirmed"), "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return true;
+    }
+
+    private async Task NextAsync()
+    {
+        if (!CanAdvance())
+        {
+            return;
+        }
+
+        var target = Math.Min(_currentIndex + 1, Steps.Length - 1);
+        RecordFurthest(target);
+        Draft.Save();
+        await GoToAsync(target);
+    }
+
+    private Task PrevAsync()
+    {
+        var target = Math.Max(_currentIndex - 1, 0);
+        Draft.Save();
+        return GoToAsync(target);
+    }
+
+    private Task GoToAsync(int index)
+    {
+        if (!IsReachable(index))
+        {
+            return Task.CompletedTask;
+        }
+
+        NavigateToStep(index);
+        return Task.CompletedTask;
+    }
+
+    private void RecordFurthest(int index)
+    {
+        if (_reentry || Onboarding.IsComplete)
+        {
+            return;
+        }
+
+        var furthest = Math.Max(FurthestIndex(), index);
+        Onboarding.SetCurrentStep(furthest.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private void NavigateToStep(int index)
+    {
+        var suffix = _reentry ? "?mode=settings" : string.Empty;
+        Nav.NavigateTo($"/onboarding/{Steps[index].Slug}{suffix}");
+    }
+
+    private void Complete()
+    {
+        // Persist any last non-secret edits, then finish. A registration-time change (Tracker:Provider) needs a
+        // full restart; other values are picked up by a reload. See IConfigurationReloader / IApplicationRestarter.
+        Draft.Save();
+
+        var initial = Config.Get("Onboarding:InitialTrackerProvider") ?? string.Empty;
+        var current = Config.Get("Tracker:Provider");
+        var trackerChanged = !string.IsNullOrEmpty(current)
+            && !string.Equals(current, initial, StringComparison.OrdinalIgnoreCase);
+
+        // Backlog 74: read the start stamp BEFORE marking complete, so the duration is how long the user
+        // actually spent in the wizard. Recorded only if they opted in; the event carries the duration
+        // and nothing they typed into any step.
+        var startedUtc = Onboarding.Get().StartedUtc;
+
+        Onboarding.MarkComplete();
+        Config.Remove("Onboarding:InitialTrackerProvider");
+
+        var now = DateTimeOffset.UtcNow;
+        Telemetry.Record(ProductEvent.OnboardingCompleted(
+            now, startedUtc is { } started ? now - started : null));
+
+        Reloader.Reload();
+
+        if (trackerChanged)
+        {
+            Restarter.Restart();
+        }
+
+        Nav.NavigateTo("/", forceLoad: true);
+    }
+
+    public void Dispose()
+    {
+        Nav.LocationChanged -= OnLocationChanged;
+        Theme.Changed -= OnThemeChanged;
+        Draft.Changed -= OnDraftChanged;
+    }
+}

@@ -1,0 +1,404 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Application.Demo
+@using Fravashi.Application.Git
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.Git
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Web.Components.Git
+@using Fravashi.Web.Components.Shared
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@implements IDisposable
+@inject IGitService Git
+@inject INotificationHistory Notifications
+@inject NavigationManager Nav
+@inject BridgeWorkspaceContext Workspace
+@inject IWorkspaceStore Workspaces
+@inject IJSRuntime JS
+@inject StartDialogState StartDialog
+
+@* The web-drawn title bar for the borderless studio window shell (ADR 0014). Hidden outside the window
+   host (html.window-host gates it in CSS). Left: back/forward, editor undo/redo, the repository switcher
+   and the branch dropdown (no brand icon; the activity bar already shows it).
+   Center: the search/command box, which opens the editor's command palette. Right: the agent-panel
+   toggle (backlog 23) and the caption controls that drive the host over the WebView2 bridge. The bar
+   is an app-region drag surface (native move, snap, and double-click maximize come from the host's
+   non-client region support); interactive children opt out.
+   Window/editor buttons name an action in data-window-action, which windowShell.js's one document
+   listener runs (an inline onclick is refused by the Content-Security-Policy, backlog 287), so they
+   work even while the circuit is reconnecting; the repository and branch dropdowns are circuit-backed.
+
+   The branch dropdown is the house StudioDropdown (backlog 24 and 31): local branches with their
+   ahead/behind/not-published state, then the branches that exist only on a remote, with a badge saying
+   which kind each one is and a filter box, because a repository with a hundred branches has no usable
+   unfiltered list. Choosing a remote-only branch creates the local branch that tracks it. *@
+<div class="studio-titlebar" data-testid="window-titlebar">
+    <div class="studio-titlebar-menus" data-testid="window-titlebar-menus"></div>
+    <div class="studio-titlebar-nav" data-testid="window-titlebar-nav">
+        <button type="button" class="studio-titlebar-navbtn" title="Go back (Alt+Left)" aria-label="Go back"
+                data-window-action="back">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m9.5 4-4 4 4 4" />
+            </svg>
+        </button>
+        <button type="button" class="studio-titlebar-navbtn" title="Go forward (Alt+Right)" aria-label="Go forward"
+                data-window-action="forward">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m6.5 4 4 4-4 4" />
+            </svg>
+        </button>
+        <button type="button" class="studio-titlebar-navbtn" title="Undo (Ctrl+Z in the editor)" aria-label="Undo"
+                data-window-action="undo">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6.5h6.5a3.5 3.5 0 0 1 0 7H6" />
+                <path d="M5.8 3.7 3 6.5l2.8 2.8" />
+            </svg>
+        </button>
+        <button type="button" class="studio-titlebar-navbtn" title="Redo (Ctrl+Y in the editor)" aria-label="Redo"
+                data-window-action="redo">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M13 6.5H6.5a3.5 3.5 0 0 0 0 7H10" />
+                <path d="M10.2 3.7 13 6.5l-2.8 2.8" />
+            </svg>
+        </button>
+        @* Backlog 30: the repository switcher, immediately left of the branch dropdown so the pair reads
+           as "which repository, which branch". Since work item #350 it opens the start dialog, which only
+           ASKS the host over the window bridge, as backlog 29's menu did: the host owns which window shows
+           which folder (one window per folder, at most one home window), re-keys its map, re-titles the
+           caption and navigates. Closing is a window operation only; the folder keeps its host grant, its
+           synced copy and its agent session. *@
+        @* Backlog 71: a demo install says so, here, where it is in every screenshot of every page. Not for
+           safety, which the seams give (a demo has no provider, no publish target, no registered workspace
+           and no credential, so the refusals are the product's ordinary ones): this is so a screenshot of a
+           demo is never mistaken for a screenshot of somebody's real work. It takes NO new look, reusing the
+           branch chip's own classes, because there is no approved design for it and inventing one is the
+           owner's call, not a session's. If they want a design, this is the content it has to carry. *@
+        @if (DemoMode.IsEnabled)
+        {
+            <div class="studio-titlebar-branch studio-titlebar-workspace" data-testid="titlebar-demo"
+                 title="This is a demo install: its data is seeded and it is connected to nothing.">
+                <span>Demo</span>
+            </div>
+        }
+
+        @* Work item #350: the workspace button opens the start dialog (Shell/StartDialog.razor) instead of the
+           dropdown it was (6.png): recents with their paths and when each was opened, Open a folder, Clone a
+           repository and, with a folder open, Close workspace. It keeps the chip's look and place, left of the
+           branch selector, which is unchanged. With no folder open the dialog is already on screen in place of
+           the studio, so the button has nothing more to open there. *@
+        <div class="studio-titlebar-branch studio-titlebar-workspace" data-testid="titlebar-workspace-slot">
+            <button type="button" class="studio-titlebar-workspace-btn" data-testid="titlebar-workspace-trigger"
+                    aria-haspopup="dialog" aria-expanded="@(StartDialog.IsOpen ? "true" : "false")"
+                    aria-label="@(_activeName is null ? "No folder open; open the start dialog" : $"Repository {_activeName}; open the start dialog")"
+                    title="Open, switch or close a folder" @onclick="StartDialog.Open">
+                <span class="studio-dropdown-icon" aria-hidden="true">&#9635;</span>
+                <span class="studio-dropdown-value">@(_activeName ?? "No folder open")</span>
+                <span class="studio-dropdown-caret" aria-hidden="true">&#9662;</span>
+            </button>
+        </div>
+        @if (ShowBranchSwitcher && _currentBranch is { Length: > 0 } currentBranch)
+        {
+            <div class="studio-titlebar-branch">
+                <StudioDropdown TestId="titlebar-branch" Class="studio-titlebar-branch-picker" Compact="true"
+                                Opened="LoadBranchesAsync"
+                                Filterable="true" FilterPlaceholder="Filter branches"
+                                NoMatchText="No branch matches."
+                                EmptyText="No branches. Fetch first, or this repository has none."
+                                Options="BranchOptions()" Value="@LocalKey(currentBranch)"
+                                ValueChanged="ChooseBranchAsync"
+                                Placeholder="@currentBranch"
+                                AriaLabel="@($"Current branch {currentBranch}; open the branch list")"
+                                TitleText="Switch branch" />
+            </div>
+        }
+    </div>
+    <div class="studio-titlebar-center">
+        @* The center doubles as the window title: the search box's label names the active workspace
+           (the circuit's WorkspaceSelection is fixed for the window's life), so the bar reads
+           "<workspace> - Fravashi" (ProductName.Short) while staying the command-palette affordance. *@
+        <button type="button" class="studio-titlebar-search" title="Command palette (F1)"
+                aria-label="Open the command palette" data-testid="window-titlebar-search"
+                data-window-action="palette">
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+                 stroke-linecap="round" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.2" />
+                <path d="m10.3 10.3 3.2 3.2" />
+            </svg>
+            <span data-testid="window-titlebar-title">@_title</span>
+        </button>
+    </div>
+    <div class="studio-titlebar-controls">
+        @* Backlog 23: the agent-panel toggle sits immediately left of the window buttons, so it is
+           always in the same place and never covers editor content. It draws nothing while no
+           surface is showing the panel. *@
+        <AgentPanelToggle Class="studio-titlebar-agentbtn" TestId="titlebar-agent-toggle" />
+        @* Backlog 67: the scratchpad toggle, where the owner placed it: next to minimise. *@
+        <ScratchpadToggle />
+        <button type="button" class="studio-caption-btn" title="Minimize" aria-label="Minimize"
+                data-window-action="minimize">
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">
+                <path d="M1 6h10" />
+            </svg>
+        </button>
+        <button type="button" class="studio-caption-btn" title="Maximize" aria-label="Maximize or restore"
+                data-window-action="maximize">
+            <svg class="studio-caption-max" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                 stroke-width="1" aria-hidden="true">
+                <rect x="1.5" y="1.5" width="9" height="9" />
+            </svg>
+            <svg class="studio-caption-restore" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                 stroke-width="1" aria-hidden="true">
+                <rect x="1.5" y="3.5" width="7" height="7" />
+                <path d="M3.5 3.5v-2h7v7h-2" />
+            </svg>
+        </button>
+        <button type="button" class="studio-caption-btn studio-caption-close" title="Close" aria-label="Close"
+                data-window-action="close">
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">
+                <path d="m1.5 1.5 9 9M10.5 1.5l-9 9" />
+            </svg>
+        </button>
+    </div>
+</div>
+
+@code {
+    private const string LocalPrefix = "local:";
+    private const string RemotePrefix = "remote:";
+
+    // The native window caption (taskbar, Alt+Tab) once named the command the owner typed (backlog 32). Since the
+    // rename to Fravashi the command and the product share one word, so the caption and the in-page title bar both say
+    // ProductName.Short ("<workspace> - Fravashi"), and the two stay separate only so either can change alone.
+    private const string WindowChromeName = Fravashi.Domain.ProductName.Short;
+
+    private string? _currentBranch;
+    private string _title = Fravashi.Domain.ProductName.Short;
+    private IReadOnlyList<GitBranch> _branches = [];
+    private IReadOnlyList<GitRemoteBranch> _remoteOnly = [];
+    private string? _activeName;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _title = ComputeTitle();
+        if (Workspace.ActiveWorkspaceId is { Length: > 0 } activeId)
+        {
+            _activeName = Workspaces.Get(activeId)?.Name ?? activeId;
+        }
+
+        Nav.LocationChanged += OnLocationChanged;
+        StartDialog.Changed += OnStartDialogChanged;
+        await RefreshCurrentBranchAsync();
+    }
+
+    /// <summary>
+    /// "&lt;workspace&gt; - Fravashi" while a workspace is active, plain "Fravashi" otherwise. The
+    /// store row may predate this fravashi.exe run or be absent in the dev fallback, so the name degrades
+    /// to the id rather than to the bare product name (same rule as the home surface's lead).
+    /// </summary>
+    private string ComputeTitle() => ComposeTitle(Fravashi.Domain.ProductName.Short);
+
+    /// <summary>
+    /// The same shape for the NATIVE window caption (taskbar, Alt+Tab), with the chrome name (backlog 32), which
+    /// since the rename is the product's short name too.
+    /// </summary>
+    private string ComputeWindowTitle() => ComposeTitle(WindowChromeName);
+
+    private string ComposeTitle(string productWord)
+    {
+        if (Workspace.ActiveWorkspaceId is not { Length: > 0 } id)
+        {
+            return productWord;
+        }
+
+        var name = Workspaces.Get(id)?.Name ?? id;
+        return $"{name} - {productWord}";
+    }
+
+    /// <summary>
+    /// Keep the NATIVE caption honest too: the host window is created before it knows which
+    /// workspace the circuit will bind (and adoption can change it), so the studio pushes the
+    /// caption over the window bridge. It is the chrome-worded title, not the in-page
+    /// product-name title. Inert outside the studio window (windowShell.js checks hosting).
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiWindow.setTitle", ComputeWindowTitle());
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit went away between render and interop; the next window load re-sends.
+        }
+    }
+
+    /// <summary>Keep the chip honest after a switch made elsewhere (e.g. on the Git page).</summary>
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) =>
+        _ = InvokeAsync(async () =>
+        {
+            await RefreshCurrentBranchAsync();
+            StateHasChanged();
+        });
+
+    /// <summary>
+    /// Backlog 282: false on a page that must stay reachable while a gate is closed (MinimalWindowLayout). The branch
+    /// switcher is a git checkout on the host folder, run from the circuit and navigating nowhere, so no gate and no
+    /// navigation guard ever sees it; such a page does not offer it at all, and does not ask git for the branch.
+    /// </summary>
+    [Parameter]
+    public bool ShowBranchSwitcher { get; set; } = true;
+
+    private async Task RefreshCurrentBranchAsync()
+    {
+        if (!ShowBranchSwitcher || !Git.IsAvailable)
+        {
+            return;
+        }
+
+        try
+        {
+            _currentBranch = await Git.GetCurrentBranchAsync();
+        }
+        catch (InvalidOperationException)
+        {
+            _currentBranch = null;
+        }
+    }
+
+    /// <summary>
+    /// Load both sides of the list, on open rather than on every render: two git invocations that in
+    /// workspace mode are two round trips to the host bridge.
+    /// </summary>
+    private async Task LoadBranchesAsync()
+    {
+        try
+        {
+            _branches = await Git.GetBranchesAsync();
+        }
+        catch (InvalidOperationException)
+        {
+            _branches = [];
+        }
+
+        try
+        {
+            var remotes = await Git.GetRemoteBranchesAsync();
+            // Only the ones with no local branch of that name: a remote branch that is already checked
+            // out locally is the SAME branch, and listing it twice would make the user choose between
+            // two rows that do the same thing. Its ahead/behind state is on the local row already.
+            var local = _branches.Select(b => b.Name).ToHashSet(StringComparer.Ordinal);
+            _remoteOnly = [.. remotes.Where(r => !local.Contains(r.Name))];
+        }
+        catch (InvalidOperationException)
+        {
+            _remoteOnly = [];
+        }
+    }
+
+    private static string LocalKey(string name) => LocalPrefix + name;
+
+    private static string RemoteKey(GitRemoteBranch branch) => RemotePrefix + branch.FullName;
+
+    /// <summary>
+    /// Local branches first, then the remote-only ones. Both carry the state on a subtitle line and a
+    /// badge saying which kind they are; the state class is the Git page's own, so the colours are the
+    /// same rule rather than the same shade copied twice (backlog 31).
+    /// </summary>
+    private IReadOnlyList<StudioDropdownOption> BranchOptions()
+    {
+        var options = new List<StudioDropdownOption>(_branches.Count + _remoteOnly.Count + 1);
+
+        if (_currentBranch is { Length: > 0 } current && !_branches.Any(b => b.Name == current))
+        {
+            // The list is loaded when the panel opens, so until then the closed trigger would have no
+            // option to take its label from and would fall back to a placeholder. This IS that option.
+            options.Add(new StudioDropdownOption(LocalKey(current), current, null, "⎇"));
+        }
+
+        options.AddRange(_branches.Select(b => new StudioDropdownOption(
+            LocalKey(b.Name),
+            b.Name,
+            GitBranchDisplay.StateText(b),
+            "⎇",
+            GitBranchDisplay.StateClass(b))));
+
+        options.AddRange(_remoteOnly.Select(r => new StudioDropdownOption(
+            RemoteKey(r),
+            r.Name,
+            GitBranchDisplay.RemoteOnlyText(r),
+            "☁",
+            GitBranchDisplay.RemoteOnly,
+            r.FullName)));
+
+        return options;
+    }
+
+    private Task ChooseBranchAsync(string key)
+    {
+        if (key.StartsWith(RemotePrefix, StringComparison.Ordinal))
+        {
+            var full = key[RemotePrefix.Length..];
+            var remote = _remoteOnly.FirstOrDefault(r => r.FullName == full);
+            return remote is null ? Task.CompletedTask : CheckoutRemoteAsync(remote);
+        }
+
+        return SwitchBranchAsync(key[LocalPrefix.Length..]);
+    }
+
+    /// <summary>
+    /// Switch directly (VS Code's status-bar picker semantics: changes ride along). When git refuses
+    /// (e.g. the switch would overwrite local changes), the honest error lands in notifications and
+    /// the Git page's checkout dialog offers the stash-first path.
+    /// </summary>
+    private async Task SwitchBranchAsync(string name)
+    {
+        if (name == _currentBranch)
+        {
+            return;
+        }
+
+        try
+        {
+            await Git.CheckoutAsync(name);
+            _currentBranch = name;
+            Notifications.Add($"Switched to {name}.", NotificationSeverity.Success);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Notifications.Add(ex.Message, NotificationSeverity.Error);
+        }
+    }
+
+    /// <summary>Choosing a remote-only branch creates the local branch that tracks it, then switches.</summary>
+    private async Task CheckoutRemoteAsync(GitRemoteBranch branch)
+    {
+        try
+        {
+            await Git.CheckoutTrackingAsync(branch);
+            _currentBranch = branch.Name;
+            Notifications.Add($"Checked out {branch.Name} tracking {branch.FullName}.", NotificationSeverity.Success);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Notifications.Add(ex.Message, NotificationSeverity.Error);
+        }
+    }
+
+    /// <summary>Keeps the workspace button's aria-expanded honest while the start dialog opens and closes.</summary>
+    private void OnStartDialogChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Nav.LocationChanged -= OnLocationChanged;
+        StartDialog.Changed -= OnStartDialogChanged;
+    }
+}

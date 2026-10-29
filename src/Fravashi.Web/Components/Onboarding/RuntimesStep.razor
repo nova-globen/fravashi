@@ -1,0 +1,229 @@
+@page "/onboarding/runtimes"
+@layout OnboardingLayout
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.AgentSessions
+@inject IConfigurationStore Config
+@inject IAgentRuntimeService Runtimes
+@inject IAgentRuntimeStatusReport Report
+
+@* The FIRST onboarding step (S15). Choose which AI coding-agent runtimes Fravashi will use (S10), and
+   configure each one (S12): its install/version/auth state is observed live from this environment, a selected
+   runtime that is missing can be installed on demand (S11), and each selected runtime gets a sign-in panel
+   (S13/S14). Update-on-launch keeps the embedded CLIs current on every container start (N1/N2). *@
+
+@if (!EmbeddedInSettings)
+{
+    @* The Settings page also renders this component for Settings > Agents > Runtimes and sign-in, where
+       SettingsPage's own PageTitle (shared with every other Environment section) must stay in charge:
+       a later PageTitle in the render tree wins, so this one must not render there. *@
+    <PageTitle>@(ProductName.Short) · Agent runtimes</PageTitle>
+}
+
+<div class="ob-step ob-step-wide">
+    <h2>Agent runtimes</h2>
+
+    <div class="ob-policy" role="note">
+        <p>
+            @(ProductName.Short) drives <strong>coding-agent CLIs</strong> to do its work: planning, implementing, reviewing.
+            Choose the ones you want to use and sign each in. Each ships in the container at a version @(ProductName.Short)
+            <strong>pins</strong>, and every start reinstalls that pinned version rather than the
+            newest published one, so a vendor release can never change what the studio is driving without a
+            deliberate promotion. You only need to authenticate them.
+        </p>
+    </div>
+
+    @foreach (var descriptor in AgentRuntimeCatalog.All)
+    {
+        var tool = descriptor.Tool;
+        var status = _statuses.GetValueOrDefault(tool);
+        var selected = _selected.Contains(tool);
+        var update = Report.Latest(tool);
+        <section class="rt-card @(selected ? "rt-card-selected" : string.Empty)" data-testid="@($"runtime-card-{tool}")">
+            <header class="rt-card-head">
+                <label class="rt-select">
+                    <input type="checkbox" checked="@selected" data-testid="@($"runtime-select-{tool}")"
+                           @onchange="e => Toggle(tool, e)" />
+                    <span class="rt-name">@descriptor.DisplayName</span>
+                </label>
+                <div class="rt-badges">
+                    @if (status is null)
+                    {
+                        <span class="rt-badge rt-badge-muted" data-testid="@($"runtime-version-{tool}")">Checking…</span>
+                    }
+                    else if (!status.Installed)
+                    {
+                        <span class="rt-badge rt-badge-warn" data-testid="@($"runtime-version-{tool}")">Not installed</span>
+                    }
+                    else
+                    {
+                        <span class="rt-badge rt-badge-ok" data-testid="@($"runtime-version-{tool}")">v@(status.Version)</span>
+                        @if (descriptor.IsOffPin(status.Version))
+                        {
+                            <span class="rt-badge rt-badge-warn" data-testid="@($"runtime-pin-{tool}")"
+                                  title="@PinBadgeTitle(descriptor)">
+                                @* v@(...) not v@..., or Razor reads "v@descriptor" as an email literal. *@
+                                Pinned v@(descriptor.PinnedVersion)
+                            </span>
+                        }
+                        @RenderAuthBadge(status)
+                    }
+                </div>
+            </header>
+
+            <div class="rt-card-meta">
+                <span class="rt-npm"><code>@descriptor.PinnedSpecifier</code></span>
+                @if (update is not null)
+                {
+                    <span class="rt-update" data-testid="@($"runtime-update-{tool}")">@UpdateText(update)</span>
+                }
+            </div>
+
+            @if (status is not null && !status.Installed)
+            {
+                <div class="rt-install">
+                    <button type="button" class="studio-btn" disabled="@_installing.Contains(tool)"
+                            data-testid="@($"runtime-install-{tool}")" @onclick="() => InstallAsync(tool)">
+                        @(_installing.Contains(tool) ? "Installing…" : "Install now")
+                    </button>
+                    @if (_installMessages.TryGetValue(tool, out var msg))
+                    {
+                        <span class="rt-install-msg" data-testid="@($"runtime-install-msg-{tool}")">@msg</span>
+                    }
+                </div>
+            }
+
+            @if (selected && status is { Installed: true })
+            {
+                <AgentLoginPanel Tool="tool" Status="status" OnAuthChanged="() => RefreshStatusAsync(tool)" />
+            }
+            else if (selected && status is { Installed: false })
+            {
+                <p class="ob-hint" data-testid="@($"runtime-configure-blocked-{tool}")">
+                    Install @descriptor.DisplayName above to configure its sign-in.
+                </p>
+            }
+        </section>
+    }
+
+    @if (_selected.Count == 0)
+    {
+        <p class="ob-note" data-testid="runtime-none-selected">
+            No runtime selected yet. You can continue and add one later from Settings, but the AI-assisted steps
+            (like suggesting your board mapping) need at least one signed-in runtime.
+        </p>
+    }
+</div>
+
+@code {
+    /// <summary>Set by the Settings page, which hosts this step for Settings > Agents > Runtimes and sign-in
+    /// and owns the page title there.</summary>
+    [Parameter]
+    public bool EmbeddedInSettings { get; set; }
+
+    private readonly Dictionary<AgentTool, AgentRuntimeStatus?> _statuses = [];
+    private HashSet<AgentTool> _selected = [];
+    private readonly HashSet<AgentTool> _installing = [];
+    private readonly Dictionary<AgentTool, string> _installMessages = [];
+
+    protected override void OnInitialized()
+    {
+        _selected = AgentRuntimeSelection.Read(Config).ToHashSet();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        await Task.WhenAll(AgentRuntimeCatalog.Tools.Select(RefreshStatusAsync));
+    }
+
+    private async Task RefreshStatusAsync(AgentTool tool)
+    {
+        var status = await Runtimes.GetStatusAsync(tool);
+        _statuses[tool] = status;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private void Toggle(AgentTool tool, ChangeEventArgs e)
+    {
+        var on = e.Value is true || string.Equals(e.Value?.ToString(), "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(e.Value?.ToString(), "on", StringComparison.OrdinalIgnoreCase);
+        if (on)
+        {
+            _selected.Add(tool);
+        }
+        else
+        {
+            _selected.Remove(tool);
+        }
+
+        AgentRuntimeSelection.Write(Config, _selected);
+    }
+
+    private async Task InstallAsync(AgentTool tool)
+    {
+        if (!_installing.Add(tool))
+        {
+            return;
+        }
+
+        _installMessages.Remove(tool);
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Runtimes.InstallOrUpdateAsync(tool);
+            Report.Record(result);
+            _installMessages[tool] = result.Outcome == AgentRuntimeUpdateOutcome.Succeeded
+                ? $"Installed{(result.ToVersion is { } v ? $" v{v}" : string.Empty)}."
+                : $"Install failed: {result.Message}";
+            await RefreshStatusAsync(tool);
+        }
+        finally
+        {
+            _installing.Remove(tool);
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static RenderFragment RenderAuthBadge(AgentRuntimeStatus status) => builder =>
+    {
+        var (cls, text) = status.AuthState switch
+        {
+            AgentRuntimeAuthState.Authenticated => ("rt-badge-ok", "Authenticated"),
+            AgentRuntimeAuthState.SignedOut => ("rt-badge-warn", "Not signed in"),
+            AgentRuntimeAuthState.NotInstalled => ("rt-badge-warn", "Not installed"),
+            _ => ("rt-badge-muted", "Auth unknown"),
+        };
+        builder.OpenElement(0, "span");
+        builder.AddAttribute(1, "class", $"rt-badge {cls}");
+        builder.AddAttribute(2, "data-testid", $"runtime-auth-{status.Tool}");
+        builder.AddAttribute(3, "title", status.AuthDetail);
+        builder.AddContent(4, text);
+        builder.CloseElement();
+    };
+
+    /// <summary>
+    /// What the pin badge claims. Only Claude has a contract tier driven against its pinned binary
+    /// (ADR 0023), so only Claude's badge may say "verified": Codex and Copilot are pinned, and a tooltip
+    /// telling the user their protocol was checked would be a claim with nothing behind it.
+    /// </summary>
+    private static string PinBadgeTitle(AgentRuntimeDescriptor descriptor) =>
+        descriptor.ProtocolVerifiedVersion is { } verified
+            ? $"{ProductName.Short} verified its protocol against {verified}. Anything else is unverified."
+            : $"{ProductName.Short} pins {descriptor.PinnedVersion}. Anything else is untested here.";
+
+    private static string UpdateText(AgentRuntimeUpdateResult update) => update.Outcome switch
+    {
+        AgentRuntimeUpdateOutcome.Running => "Installing…",
+        AgentRuntimeUpdateOutcome.Succeeded when update.FromVersion != update.ToVersion =>
+            $"Reinstalled {update.FromVersion} → {update.ToVersion}",
+        AgentRuntimeUpdateOutcome.Succeeded => "At the pinned version",
+        AgentRuntimeUpdateOutcome.Failed => $"Install failed: {update.Message}",
+        AgentRuntimeUpdateOutcome.Skipped => "Install skipped",
+        _ => "Install pending",
+    };
+}

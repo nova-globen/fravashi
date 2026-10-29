@@ -1,0 +1,240 @@
+@using Fravashi.Application.AgentSync
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Infrastructure.Sessions
+@using Microsoft.JSInterop
+@inject DesignFromDrawingStarter Starter
+@inject BridgeWorkspaceContext Workspace
+@inject IWorkspaceAgentSync Sync
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+@* Backlog 52 (plan @43, ADR 0021 decision 4): a drawing is handed to an agent, which writes the tree and saves it as
+   a design document. The drawing goes into a conversation and stays there; nothing on this panel writes to the wiki,
+   so the design that results is the agent's tree and never the image. When the runtime conversations run on cannot
+   see images, the panel says so in place of the chooser rather than offering a Start that would produce a bad tree. *@
+<section class="work-item-section design-from-drawing" data-testid="design-from-drawing">
+    <h3 class="work-item-section-title">New design from a drawing</h3>
+
+    @if (Starter.Unavailable is { } unavailable)
+    {
+        <div class="work-item-empty" data-testid="drawing-unavailable">@unavailable</div>
+        <div class="work-item-form-actions">
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="drawing-cancel" @onclick="CancelAsync">
+                Close
+            </button>
+        </div>
+    }
+    else
+    {
+        <p class="studio-muted">
+            A photographed paper drawing, a paint sketch or a screenshot. An agent reads it, writes the mockup tree and
+            saves it as a design you then edit; the image stays in that conversation and never becomes the design.
+        </p>
+
+        <label class="work-item-field">
+            <span class="work-item-field-label">Drawing (PNG, JPEG, GIF or WebP)</span>
+            <InputFile OnChange="OnFileChosen" accept="image/png,image/jpeg,image/gif,image/webp"
+                       data-testid="drawing-file" />
+        </label>
+
+        @if (_drawing is { } drawing)
+        {
+            <div class="session-composer-images" data-testid="drawing-chosen">
+                <div class="session-composer-thumb">
+                    <img src="@drawing.DataUri" alt="The drawing" />
+                    <button type="button" class="session-composer-thumb-remove" data-testid="drawing-remove"
+                            title="Remove the drawing" aria-label="Remove the drawing" @onclick="Remove">&times;</button>
+                </div>
+            </div>
+        }
+
+        <label class="work-item-field">
+            <span class="work-item-field-label">About the screen (optional; you can also paste the drawing here)</span>
+            <textarea class="studio-input" rows="3" data-testid="drawing-note" @ref="_noteInput"
+                      maxlength="@Fravashi.Application.Mockups.DesignFromDrawing.MaxNoteCharacters"
+                      placeholder="What this screen is for, and anything the drawing cannot say."
+                      @oninput="e => _note = e.Value?.ToString() ?? string.Empty">@_note</textarea>
+        </label>
+
+        @if (_error is { Length: > 0 } error)
+        {
+            <div class="session-error" data-testid="drawing-error">
+                <span class="session-error-mark" aria-hidden="true">!</span>
+                <span class="session-error-text">@error</span>
+            </div>
+        }
+
+        <div class="work-item-form-actions">
+            <button type="button" class="studio-btn" data-testid="drawing-start" disabled="@(_drawing is null)"
+                    @onclick="Start">
+                Start
+            </button>
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="drawing-cancel" @onclick="CancelAsync">
+                Cancel
+            </button>
+        </div>
+    }
+</section>
+
+@code {
+    /// <summary>Raised when the person closes the panel without starting.</summary>
+    [Parameter]
+    public EventCallback OnCancel { get; set; }
+
+    private AgentImageAttachment? _drawing;
+    private string _note = string.Empty;
+    private string? _error;
+    private ElementReference _noteInput;
+    private DotNetObjectReference<DesignFromDrawingPanel>? _selfRef;
+
+    private Task CancelAsync() => OnCancel.InvokeAsync();
+
+    private void Remove()
+    {
+        _drawing = null;
+        _error = null;
+    }
+
+    private async Task OnFileChosen(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        if (file.Size > AgentImageAttachment.MaxBytes)
+        {
+            _error = AgentImageAttachment.TooLarge(file.Size);
+            return;
+        }
+
+        try
+        {
+            await using var stream = file.OpenReadStream(maxAllowedSize: AgentImageAttachment.MaxBytes);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+            Take(buffer.ToArray());
+        }
+        catch (IOException)
+        {
+            _error = "The chosen file could not be read.";
+        }
+    }
+
+    /// <summary>Keeps the bytes as the drawing, or says why they cannot be one, in the attachment's own words.</summary>
+    internal void Take(byte[] bytes)
+    {
+        if (AgentImageAttachment.TryCreate(bytes, out var error) is { } image)
+        {
+            _drawing = image;
+            _error = null;
+        }
+        else
+        {
+            _error = error;
+        }
+    }
+
+    private void Start()
+    {
+        var workspaceId = Workspace.ActiveWorkspaceId;
+        string? copy = null;
+        if (!string.IsNullOrWhiteSpace(workspaceId))
+        {
+            Sync.EnsureStarted(workspaceId);
+            copy = Sync.CopyPathFor(workspaceId);
+        }
+
+        var started = Starter.Start(workspaceId, copy, _drawing, _note);
+        if (started.Session is { } session)
+        {
+            Nav.NavigateTo($"/sessions/{session.Id.Value:D}");
+            return;
+        }
+
+        _error = started.Refusal;
+    }
+
+    // ---- a pasted drawing: the composer's own script (backlog 26), one image ------------------------
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || Starter.Unavailable is not null)
+        {
+            return;
+        }
+
+        _selfRef = DotNetObjectReference.Create(this);
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiImagePaste.attachComposer", _noteInput, _selfRef);
+        }
+        catch (JSException)
+        {
+            // The script is missing (a stale cached page): choosing a file still works.
+        }
+    }
+
+    /// <summary>The page saw an image pasted into the note. The size is checked before any bytes cross.</summary>
+    [JSInvokable]
+    public async Task ImagePasted(string id, long size)
+    {
+        if (size > AgentImageAttachment.MaxBytes)
+        {
+            await InvokeAsync(() =>
+            {
+                _error = AgentImageAttachment.TooLarge(size);
+                StateHasChanged();
+            });
+            return;
+        }
+
+        try
+        {
+            await using var reference = await JS.InvokeAsync<IJSStreamReference?>("fravashiImagePaste.take", id);
+            if (reference is null)
+            {
+                return;
+            }
+
+            await using var stream = await reference.OpenReadStreamAsync(maxAllowedSize: AgentImageAttachment.MaxBytes);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+            var bytes = buffer.ToArray();
+            await InvokeAsync(() =>
+            {
+                Take(bytes);
+                StateHasChanged();
+            });
+        }
+        catch (Exception ex) when (ex is JSException or IOException or InvalidOperationException)
+        {
+            await InvokeAsync(() =>
+            {
+                _error = "The pasted image could not be read.";
+                StateHasChanged();
+            });
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (_selfRef is not null)
+            {
+                await JS.InvokeVoidAsync("fravashiImagePaste.detach", _noteInput);
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit is gone, and the listener with it.
+        }
+        catch (InvalidOperationException)
+        {
+            // Prerendering: nothing was ever attached.
+        }
+        finally
+        {
+            _selfRef?.Dispose();
+        }
+    }
+}

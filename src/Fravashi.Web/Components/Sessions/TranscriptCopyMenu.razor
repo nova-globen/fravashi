@@ -1,0 +1,94 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Web.Components.Code
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
+
+@* The studio's own right-click menu for a conversation (backlog 110), and the one place a failed copy
+   from it can be reported.
+
+   It is a component rather than code on one page because there are TWO conversation surfaces: the live
+   transcript (SessionTranscript, shown in the Sessions area and in the Code page's panel) and the STORED
+   conversation the Sessions page reads back after a restart. The first one shipped with the menu and the
+   second one without it, so on the stored view a right-click was swallowed by the bubble and nothing
+   opened, which is the reported defect still exactly true on that surface. One component, used by both,
+   is what makes that impossible to get half right again.
+
+   The toast is positioned against the nearest positioned ancestor, so place this INSIDE the element that
+   frames the conversation. *@
+@if (_failure is { Length: > 0 } failure)
+{
+    <div class="session-copy-toast" data-testid="copy-status">Could not copy: @failure</div>
+}
+
+@if (_menu is { } menu)
+{
+    <CodeContextMenu Items="menu.Items" X="menu.X" Y="menu.Y" OnDismiss="Dismiss" />
+}
+
+@code {
+    private sealed record MenuState(double X, double Y, IReadOnlyList<CodeContextMenu.MenuItem> Items);
+
+    private MenuState? _menu;
+    private string? _failure;
+    private int _failureToken;
+
+    /// <summary>
+    /// Open the menu at the pointer. The selection is read from the browser HERE, at the moment of the
+    /// right-click, rather than when the item is chosen: opening the menu moves focus, and on the way the
+    /// reader's selection can be gone by the time they click Copy. So the text is captured up front and
+    /// the item copies THAT, and the same capture decides whether Copy is offered enabled at all.
+    /// </summary>
+    public async Task OpenAsync(TranscriptContextRequest request)
+    {
+        var selection = await TranscriptClipboard.SelectionAsync(JS);
+        var message = request.MessageText;
+
+        _menu = new MenuState(request.X, request.Y,
+        [
+            new CodeContextMenu.MenuItem("Copy", () => CopyAsync(selection),
+                Disabled: string.IsNullOrEmpty(selection)),
+            new CodeContextMenu.MenuItem("Copy message", () => CopyAsync(message),
+                Disabled: string.IsNullOrEmpty(message)),
+        ]);
+
+        StateHasChanged();
+    }
+
+    private void Dismiss()
+    {
+        _menu = null;
+        StateHasChanged();
+    }
+
+    private async Task CopyAsync(string? text)
+    {
+        var outcome = await TranscriptClipboard.CopyAsync(JS, text);
+        if (outcome.Ok)
+        {
+            _failure = null;
+            StateHasChanged();
+            return;
+        }
+
+        _failure = outcome.Reason is { Length: > 0 } reason ? reason : "the copy did not happen";
+        var token = ++_failureToken;
+        StateHasChanged();
+
+        await Task.Delay(TimeSpan.FromSeconds(4));
+        if (token != _failureToken)
+        {
+            return;
+        }
+
+        _failure = null;
+        try
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The pane closed while the message was still up.
+        }
+    }
+}

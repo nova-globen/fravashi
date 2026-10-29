@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The launcher orchestration LIBRARY (ADR 0003 V3, F9; merged-exe plan Phase 1): container runtime
+    detection/driving, image + container lifecycle, integrity pinning, VPN sidecar, updates, and the
+    `fravashi` verb parsing/dispatch. Consumed by src/Fravashi.Desktop (fravashi.exe), which owns the process
+    entry points (console verbs + GUI). Cross-platform net10.0 by design so a non-Windows host can
+    return later; only the Fravashi.Desktop WinExe is Windows-bound. The `fravashi` assembly name moved to
+    Fravashi.Desktop with the merge (NuGet refuses two projects named `fravashi` in one solution).
+  -->
+  <PropertyGroup>
+    <RootNamespace>Fravashi.Launcher</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fravashi.Launcher.Tests" />
+  </ItemGroup>
+
+  <!-- The data-folder move of the rename to Fravashi (DataFolderMove) backs the database up with SQLite's backup API
+       and verifies the moved copy with integrity_check, so the launcher reads SQLite too. The same package (MIT, and
+       already on the license allow-list) and the same central pin as Infrastructure's. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+  </ItemGroup>
+
+  <!-- Backlog 230: the ONE classifier of a network failure (backlog 228) is reused as linked SOURCE, because this
+       library takes no project references by design. It needs only the BCL. Two costs, both known: it brings a
+       Fravashi.Application namespace into fravashi.exe, where inside namespace Fravashi it shadows WinForms' Application
+       (write System.Windows.Forms.Application there); and Launcher.Tests sees this copy and Application's (through
+       Infrastructure), so a test there must not name the type. -->
+  <ItemGroup>
+    <Compile Include="..\Fravashi.Application\Network\NetworkFailure.cs" Link="Network\NetworkFailure.cs" />
+  </ItemGroup>
+
+  <!-- The rename to Nova Globen Fravashi: the product's name is said in ONE file, Domain's ProductName, linked here as
+       source for the same reason (the window, tray, splash and every verb's output name the product). -->
+  <ItemGroup>
+    <Compile Include="..\Fravashi.Domain\ProductName.cs" Link="ProductName.cs" />
+    <Compile Include="..\Fravashi.Domain\ServiceHost.cs" Link="ServiceHost.cs" />
+  </ItemGroup>
+
+  <!-- Backlog 242: the public half of the release key the update manifest is signed with, embedded from the ONE
+       committed file so fravashi.exe carries it and no second copy can drift (ReleaseManifestSignatureTests holds the
+       resource equal to the file). The private half is the forge secret RELEASE_MANIFEST_SIGNING_KEY. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\setup\release\manifest-signing-public.pem" LogicalName="Fravashi.Launcher.Releases.manifest-signing-public.pem" />
+  </ItemGroup>
+
+  <!-- The bridge release (docs/plans/rename-internal-names.md, phase 2): the former names an installed copy still carries
+       are read from ONE file, Domain's FormerNames, linked here as source and compiled internal (FORMER_NAMES_LINKED).
+       The cleanup release (phase 5) removes this link with the file. -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);FORMER_NAMES_LINKED</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Fravashi.Domain\FormerNames.cs" Link="FormerNames.cs" />
+  </ItemGroup>
+
+</Project>

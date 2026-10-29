@@ -1,0 +1,177 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Infrastructure.AgentRuntimes
+@inject WorkspaceNodeAdvisor Advisor
+@inject NodeProvisionCoordinator Installs
+@implements IDisposable
+
+@* Backlog 10: the workspace asked for a Node version and the agent is not going to get it. Until this
+   band existed the product ran the image Node and said nothing, which is the defect: a wrong version
+   that looks like the right one. So the band names both versions, the file that asked, and offers the
+   install as one click; nothing is downloaded unasked. It sits with the governance strip because it is
+   a fact about what this conversation runs on, and it is a warn band, not an error: the session still
+   works, on a Node the workspace did not ask for.
+
+   Nothing requested, or requested and provisioned, renders nothing at all. The one state shown after
+   the request is satisfied is the install this pane itself finished, and only until dismissed, because
+   the reader has to learn that the running conversation keeps its PATH and the next one gets the new
+   Node; a band that vanished the moment the download ended would leave them guessing. *@
+@if (Show)
+{
+    <div class="session-node @Tone" data-testid="node-banner" role="status">
+        @if (_job is { Running: true } running)
+        {
+            <div class="session-node-row">
+                <span class="session-node-text" data-testid="node-progress">
+                    Installing Node @(running.Progress?.Version ?? running.Requested): @PhaseText(running.Progress)
+                </span>
+            </div>
+            @if (running.Progress is { Phase: NodeProvisionPhase.Downloading, TotalBytes: > 0 } dl)
+            {
+                <div class="studio-progress-track session-node-track" aria-hidden="true">
+                    <span class="studio-progress-fill" style="width: @Percent(dl)%"></span>
+                </div>
+            }
+        }
+        else if (_job?.Result is { Succeeded: false } failed)
+        {
+            <div class="session-node-row">
+                <span class="session-node-mark" aria-hidden="true">!</span>
+                <span class="session-node-text" data-testid="node-error">@failed.Error</span>
+                <button type="button" class="studio-btn studio-btn-alt session-node-btn" data-testid="node-retry"
+                        @onclick="Install">
+                    Retry
+                </button>
+            </div>
+        }
+        else if (_job is { Result: { Succeeded: true } done, Dismissed: false })
+        {
+            <div class="session-node-row">
+                <span class="session-node-text" data-testid="node-installed">
+                    Node @done.Version is installed. A conversation started from now on runs on it; one already
+                    running keeps the Node it started with.
+                </span>
+                <button type="button" class="session-node-dismiss" data-testid="node-dismiss"
+                        aria-label="Dismiss" title="Dismiss" @onclick="Dismiss">
+                    &#10005;
+                </button>
+            </div>
+        }
+        else
+        {
+            <div class="session-node-row">
+                <span class="session-node-text">
+                    <span data-testid="node-requested">This workspace asks for Node <b>@Request.Version</b> (@Request.Source), which is not installed.</span>
+                    <span data-testid="node-actual">@ActualText</span>
+                </span>
+                <button type="button" class="studio-btn session-node-btn" data-testid="node-install" @onclick="Install">
+                    Install Node @Request.Version
+                </button>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    /// <summary>The workspace's contained copy, where the request is read from.</summary>
+    [Parameter]
+    public string? WorkingDirectory { get; set; }
+
+    private WorkspaceNodeStatus _status = new(null, null, null);
+    private NodeProvisionStatus? _job;
+    private string? _imageVersion;
+    private bool _imageVersionKnown;
+
+    private ProjectNodeRequest Request => _status.Request!;
+
+    // The dismissal is the coordinator's (per version, for the life of the process), not this pane's: a
+    // pane is created and thrown away as the reader moves between the Sessions area and the Code page.
+    private bool Show => _status.Request is not null
+        && (_status.IsMissing || _job is { Result.Succeeded: true, Dismissed: false });
+
+    private string Tone => _job switch
+    {
+        { Running: true } => "session-node-busy",
+        { Result.Succeeded: false } => "session-node-failed",
+        { Result.Succeeded: true, Dismissed: false } => "session-node-done",
+        _ => string.Empty,
+    };
+
+    private string ActualText => !_imageVersionKnown
+        ? "The agent runs on the studio image's Node instead."
+        : _imageVersion is null
+            ? "No runnable Node was found on the agent's PATH, so anything that needs one fails."
+            : $"The agent runs on Node {_imageVersion} (the studio image) instead.";
+
+    protected override void OnInitialized() => Installs.Changed += OnInstallsChanged;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        Refresh();
+        if (_status.IsMissing && !_imageVersionKnown)
+        {
+            _imageVersion = await Advisor.ImageNodeVersionAsync();
+            _imageVersionKnown = true;
+        }
+    }
+
+    /// <summary>Re-reads the copy and the layout; both are cheap and both can change under this pane.</summary>
+    private void Refresh()
+    {
+        _status = Advisor.Inspect(WorkingDirectory);
+        _job = _status.Request is null ? null : Installs.Find(_status.Request.Version);
+    }
+
+    private void Install()
+    {
+        if (_status.Request is null)
+        {
+            return;
+        }
+
+        _job = Installs.Start(_status.Request.Version);
+    }
+
+    private void Dismiss()
+    {
+        if (_status.Request is null)
+        {
+            return;
+        }
+
+        Installs.Dismiss(_status.Request.Version);
+        _job = Installs.Find(_status.Request.Version);
+    }
+
+    private void OnInstallsChanged() => InvokeAsync(() =>
+    {
+        Refresh();
+        StateHasChanged();
+    });
+
+    private static string PhaseText(NodeProvisionProgress? progress) => progress switch
+    {
+        null => "starting",
+        { Phase: NodeProvisionPhase.Resolving } => "finding the release",
+        { Phase: NodeProvisionPhase.Downloading, TotalBytes: > 0 } p =>
+            $"downloading, {Bytes(p.BytesReceived)} of {Bytes(p.TotalBytes!.Value)}",
+        { Phase: NodeProvisionPhase.Downloading } p => $"downloading, {Bytes(p.BytesReceived)}",
+        { Phase: NodeProvisionPhase.Verifying } => "verifying the download",
+        { Phase: NodeProvisionPhase.Unpacking } => "unpacking",
+        { Phase: NodeProvisionPhase.Installing } => "moving into place",
+        _ => progress.Phase.ToString().ToLowerInvariant(),
+    };
+
+    private static int Percent(NodeProvisionProgress p) =>
+        (int)Math.Clamp(p.BytesReceived * 100 / Math.Max(1, p.TotalBytes ?? 1), 0, 100);
+
+    /// <summary>Bytes as a human reads them; the same rounding at both ends of "x of y". Invariant: the
+    /// studio's own copy reads the same on a Swedish host as on an English one.</summary>
+    public static string Bytes(long value) => value switch
+    {
+        < 1024 => $"{value} B",
+        < 1024 * 1024 => (value / 1024.0).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " KB",
+        _ => (value / (1024.0 * 1024.0)).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + " MB",
+    };
+
+    public void Dispose() => Installs.Changed -= OnInstallsChanged;
+}

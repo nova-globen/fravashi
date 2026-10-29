@@ -1,0 +1,4 @@
+error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 3 seconds
+send-pack: unexpected disconnect while reading sideband packet
+fatal: the remote end hung up unexpectedly
+Everything up-to-date

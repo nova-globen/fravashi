@@ -1,0 +1,266 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Rendering
+@using Fravashi.Infrastructure.Sessions
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.JSInterop
+@inject MarkdownPreviewRenderer Markdown
+@inject IJSRuntime JS
+@implements IDisposable
+
+@* One turn in the transcript. The agent writes markdown, so its replies are rendered; the user's own
+   words are shown verbatim (rendering them would reinterpret what they typed).
+
+   The two roles are deliberately not the same shape (backlog 18). The user's turn is a bounded block
+   with the accent down its left edge, because it is the thing being answered and the eye needs to find
+   where each exchange starts. The agent's prose is unboxed body text, because it is the bulk of the
+   panel and boxing it makes a long turn read as a wall of cards. A card per paragraph was the reported
+   defect, not the fix for it.
+
+   Backlog 110: every message carries a copy control, and so does every code block inside it. What they
+   copy is the SOURCE this component was given, never the rendering, which is why the markdown is split
+   into segments here instead of being handed to the browser as one blob of HTML. The right-click is
+   forwarded to the transcript, which owns the studio's own context menu: the studio window removes the
+   browser's (ADR 0014), so without this a right-click in a conversation does nothing at all. *@
+<div class="session-turn session-turn-@RoleClass" data-testid="bubble-@RoleClass"
+     @oncontextmenu="RaiseContextMenuAsync" @oncontextmenu:preventDefault="true"
+     @oncontextmenu:stopPropagation="true">
+    <div class="session-turn-who">
+        <span class="session-turn-role">@RoleLabel</span>
+        <span class="session-turn-time"><LocalTime At="Timestamp" /></span>
+        @* Backlog 25 increment 5: a typed conversation's turn that came back as prose. Quiet on purpose:
+           the answer is usable and it is shown, it just is not the document the studio asked for, and the
+           reader is told that rather than alarmed by it. *@
+        @if (Untyped)
+        {
+            <span class="session-turn-untyped" data-testid="untyped-marker"
+                  title="The agent answered in prose instead of the typed document this conversation asks for.">untyped</span>
+        }
+        @if (_failedSlot == MessageSlot && _failure is { Length: > 0 } messageFailure)
+        {
+            <span class="session-copy-failed" data-testid="copy-failed">@messageFailure</span>
+        }
+        <button type="button" class="session-copy session-copy-message" data-testid="copy-message"
+                title="Copy this message" @onclick="() => CopyAsync(MessageSlot, ShownText)"
+                @onclick:stopPropagation="true">@Label(MessageSlot)</button>
+    </div>
+    @if (Role == TranscriptRole.Assistant)
+    {
+        <div class="session-turn-body session-markdown">
+            @foreach (var (segment, index) in Segments().Select((s, i) => (s, i)))
+            {
+                @if (segment.IsCode)
+                {
+                    <div class="session-code" data-testid="code-block">
+                        <div class="session-code-bar">
+                            <span class="session-code-lang">@(segment.Language ?? "code")</span>
+                            @if (_failedSlot == index && _failure is { Length: > 0 } codeFailure)
+                            {
+                                <span class="session-copy-failed" data-testid="copy-failed">@codeFailure</span>
+                            }
+                            <button type="button" class="session-copy session-copy-code" data-testid="copy-code"
+                                    title="Copy this code block"
+                                    @onclick="() => CopyAsync(index, segment.Source)"
+                                    @onclick:stopPropagation="true">@Label(index)</button>
+                        </div>
+                        <pre class="session-code-pre"><code>@segment.Source</code></pre>
+                    </div>
+                }
+                else
+                {
+                    @((MarkupString)segment.Html)
+                }
+            }
+        </div>
+    }
+    else
+    {
+        @* Backlog 26: the images pasted into this turn, above the words they came with. A click grows one to the
+           bubble's width in place and a second click shrinks it, because the studio window has no browser tab to
+           open an image in. One element per image, so each data URI is in the page once. *@
+        @if (Images is { Count: > 0 })
+        {
+            <div class="session-turn-images" data-testid="bubble-images">
+                @foreach (var (image, i) in Images.Select((im, i) => (im, i)))
+                {
+                    var position = i;
+                    var expanded = _expandedImages.Contains(position);
+                    <button type="button" class="session-turn-image @(expanded ? "expanded" : string.Empty)"
+                            data-testid="bubble-image" aria-pressed="@(expanded ? "true" : "false")"
+                            title="@(expanded ? "Show smaller" : "Show at full width")"
+                            @onclick="() => ToggleImage(position)" @onclick:stopPropagation="true">
+                        <img src="@image.DataUri" alt="Pasted image @(i + 1)" />
+                    </button>
+                }
+            </div>
+        }
+        @if (ShownText.Length > 0)
+        {
+            @* Work item #351: verbatim still, with each #N, @N and !N a link to its preview. *@
+            <div class="session-turn-body"><ReferencedText Text="@ShownText" /></div>
+        }
+    }
+    @if (Pending)
+    {
+        <span class="session-turn-caret" aria-hidden="true"></span>
+    }
+</div>
+
+@code {
+    /// <summary>
+    /// How long a control says "Copied". Long enough to be read next to the pointer that just clicked
+    /// it, short enough that it is gone before the reader looks at the next block.
+    /// </summary>
+    private static readonly TimeSpan Confirmation = TimeSpan.FromSeconds(1.6);
+
+    /// <summary>
+    /// The slot of the message-level control. Code blocks use their segment index, which is never
+    /// negative, so one field can hold whichever control was last used.
+    /// </summary>
+    private const int MessageSlot = -1;
+
+    [Parameter, EditorRequired]
+    public TranscriptRole Role { get; set; }
+
+    [Parameter, EditorRequired]
+    public string Text { get; set; } = string.Empty;
+
+    [Parameter]
+    public DateTimeOffset Timestamp { get; set; }
+
+    /// <summary>
+    /// True when this message is a typed session's untyped answer (ADR 0022 outcome ii): the turn ended
+    /// without the document it was asked for, so this prose is the answer and is marked as such.
+    /// </summary>
+    [Parameter]
+    public bool Untyped { get; set; }
+
+    /// <summary>Images the user pasted into this turn (backlog 26), shown above the words. User turns, and a studio prompt that carries a drawing (backlog 52).</summary>
+    [Parameter]
+    public IReadOnlyList<AgentImageAttachment>? Images { get; set; }
+
+    /// <summary>True while this message is still being written (the streamed partial).</summary>
+    [Parameter]
+    public bool Pending { get; set; }
+
+    /// <summary>
+    /// Raised when the reader right-clicks this message. The transcript renders the menu, because a menu
+    /// per bubble would be N backdrops stacked over the pane.
+    /// </summary>
+    [Parameter]
+    public EventCallback<TranscriptContextRequest> OnContextMenu { get; set; }
+
+    private readonly HashSet<int> _expandedImages = [];
+
+    private void ToggleImage(int position)
+    {
+        if (!_expandedImages.Remove(position))
+        {
+            _expandedImages.Add(position);
+        }
+    }
+
+    private int? _copiedSlot;
+    private int? _failedSlot;
+    private string? _failure;
+    private int _copyToken;
+    private bool _disposed;
+
+    private string? _segmentsFor;
+    private IReadOnlyList<MarkdownSegment> _segments = [];
+
+    /// <summary>
+    /// Backlog 102: what is RENDERED goes through the shared transcript redactor, so a row stored
+    /// before the persistence-side redaction existed still never shows a secret. Copying takes the same
+    /// text: a control that put the unredacted original on the clipboard would undo the redaction the
+    /// moment somebody pasted it.
+    /// </summary>
+    private string ShownText => TranscriptRedactor.Redact(Text);
+
+    /// <summary>
+    /// The message split at its code blocks, cached by the text it was built from. The cache is not an
+    /// optimisation detail to skip: a streaming turn re-renders this component once per token, and the
+    /// split parses the whole message each time.
+    /// </summary>
+    private IReadOnlyList<MarkdownSegment> Segments()
+    {
+        var text = ShownText;
+        if (_segmentsFor != text)
+        {
+            // Work item #351: every reference becomes a link before the split, by the wiki's own parser and
+            // rewriter, which leave code spans and fenced blocks alone (so a code block's copied source is untouched).
+            _segments = Markdown.ToSegments(SessionReferences.LinkMarkdown(text));
+            _segmentsFor = text;
+        }
+
+        return _segments;
+    }
+
+    private string Label(int slot) => _copiedSlot == slot ? "Copied" : "Copy";
+
+    private Task RaiseContextMenuAsync(MouseEventArgs e) =>
+        OnContextMenu.HasDelegate
+            ? OnContextMenu.InvokeAsync(new TranscriptContextRequest(e.ClientX, e.ClientY, ShownText))
+            : Task.CompletedTask;
+
+    /// <summary>
+    /// Copy, then SAY what happened. The confirmation is token-guarded so a second click while the
+    /// first is still showing does not have the first one's timer clear the second one's word.
+    /// </summary>
+    private async Task CopyAsync(int slot, string text)
+    {
+        var outcome = await TranscriptClipboard.CopyAsync(JS, text);
+        var token = ++_copyToken;
+
+        if (outcome.Ok)
+        {
+            _copiedSlot = slot;
+            _failedSlot = null;
+            _failure = null;
+        }
+        else
+        {
+            _copiedSlot = null;
+            _failedSlot = slot;
+            _failure = outcome.Reason is { Length: > 0 } reason ? reason : "the copy did not happen";
+        }
+
+        StateHasChanged();
+        await Task.Delay(Confirmation);
+
+        if (_disposed || token != _copyToken)
+        {
+            return;
+        }
+
+        _copiedSlot = null;
+        _failedSlot = null;
+        _failure = null;
+
+        try
+        {
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The pane closed while the confirmation was still on screen.
+        }
+    }
+
+    public void Dispose() => _disposed = true;
+
+    private string RoleClass => Role switch
+    {
+        TranscriptRole.User => "user",
+        TranscriptRole.Assistant => "assistant",
+        _ => "system",
+    };
+
+    private string RoleLabel => Role switch
+    {
+        TranscriptRole.User => "You",
+        TranscriptRole.Assistant => "Agent",
+        TranscriptRole.StudioPrompt => "Studio",
+        _ => "Studio",
+    };
+}

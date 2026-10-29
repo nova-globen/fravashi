@@ -1,0 +1,56 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Sandbox
+@inject ISandboxPosture Posture
+
+@* Honest sandbox-posture view (F4 / ADR 0007, assertion-gap rule). Shows, per the detected container runtime,
+   which hardening protections are ACTIVE vs UNAVAILABLE - the truth the launcher recorded in sandbox-posture.json,
+   derived from the very flags it passed to the engine. Never a blanket green "hardened": a protection the runtime
+   could not apply is shown as unavailable, with an honest recommendation to use Docker/Podman where weaker. *@
+
+<div class="settings-posture" data-testid="sandbox-posture">
+    @if (!State.Known)
+    {
+        <p class="studio-muted" data-testid="sandbox-posture-outside">@State.Recommendation</p>
+    }
+    else
+    {
+        <p class="studio-muted">
+            Container runtime: <strong data-testid="sandbox-posture-runtime">@State.Runtime</strong> -
+            <span data-testid="sandbox-posture-summary">@State.ActiveCount of @State.Controls.Count protections active</span>.
+        </p>
+
+        <ul class="settings-posture-list" data-testid="sandbox-posture-list">
+            @foreach (var control in State.Controls)
+            {
+                var active = control.Status == SandboxProtectionStatus.Active;
+                <li class="settings-posture-item @(active ? "is-active" : "is-unavailable")"
+                    data-testid="@($"sandbox-control-{control.Id}")"
+                    data-status="@(active ? "active" : "unavailable")">
+                    <span class="settings-posture-mark" aria-hidden="true">@(active ? "✓" : " - ")</span>
+                    <span class="settings-posture-body">
+                        <span class="settings-posture-title">
+                            @control.Title
+                            <span class="settings-posture-status">@(active ? "Active" : "Unavailable")</span>
+                        </span>
+                        <span class="settings-posture-desc studio-muted" data-testid="@($"sandbox-control-{control.Id}-desc")">@control.Description</span>
+                        @if (!string.IsNullOrWhiteSpace(control.Detail))
+                        {
+                            <span class="settings-posture-detail studio-muted" data-testid="@($"sandbox-control-{control.Id}-detail")">@control.Detail</span>
+                        }
+                    </span>
+                </li>
+            }
+        </ul>
+
+        @if (State.StrongerRuntimeRecommended && !string.IsNullOrWhiteSpace(State.Recommendation))
+        {
+            <p class="settings-posture-recommend" role="note" data-testid="sandbox-posture-recommend">
+                @State.Recommendation
+            </p>
+        }
+    }
+</div>
+
+@code {
+    private SandboxPosture State => Posture.Current;
+}

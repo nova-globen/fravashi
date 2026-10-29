@@ -1,0 +1,31 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+
+@* Dispatches the Skills CRUD routes under Settings › Framework › Skills:
+   /settings/framework/skills            → list
+   /settings/framework/skills/new        → create form
+   /settings/framework/skills/edit/{id}  → edit form
+   /settings/framework/skills/view/{id}  → read-only view (+ SKILL.md preview + delete) *@
+
+@switch (Action?.ToLowerInvariant())
+{
+    case "new":
+        <SkillForm />
+        break;
+    case "edit":
+        <SkillForm Id="@Id" />
+        break;
+    case "view":
+        <SkillView Id="@Id" />
+        break;
+    default:
+        <SkillList />
+        break;
+}
+
+@code {
+    /// <summary>new | edit | view; null for the list.</summary>
+    [Parameter] public string? Action { get; set; }
+
+    /// <summary>The artifact id for edit/view.</summary>
+    [Parameter] public string? Id { get; set; }
+}

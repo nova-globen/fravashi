@@ -1,0 +1,2515 @@
+@page "/code"
+@page "/code/{*FilePath}"
+@namespace Fravashi.Web.Components.Code
+@using System.Text.Json
+@using Fravashi.Application.Git
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Repository
+@using Fravashi.Domain.Git
+@using Fravashi.Domain.Repository
+@using Fravashi.Infrastructure.Rendering
+@using Fravashi.Web.Components.Shell
+@using Fravashi.Web.Services
+@inject IServiceProvider ServiceLookup
+@using Microsoft.JSInterop
+@inject TimeProvider Clock
+@inject IRepositoryReader Reader
+@inject IRepositoryWriter Writer
+@inject IRepositoryTrash Trash
+@inject IGitService Git
+@inject IRepositoryChangeNotifier ChangeNotifier
+@inject Fravashi.Infrastructure.Bridge.WorkspaceSelection Selection
+@inject Fravashi.Infrastructure.Bridge.BridgeClient Bridge
+@inject Fravashi.Application.Persistence.IWorkspaceStore WorkspaceStore
+@inject Fravashi.Application.AgentSync.IWorkspaceAgentSync AgentSync
+@inject CodeWorkspace Workspace
+@inject AgentPanelState AgentPanel
+@inject FileIconCatalog Icons
+@inject MarkdownPreviewRenderer MarkdownPreview
+@inject INotificationHistory Notifications
+@inject NavigationManager Nav
+@inject CircuitConnection Connection
+@inject IJSRuntime JS
+@inject ILogger<CodePage> Logger
+@implements IAsyncDisposable
+
+<PageTitle>@(ProductName.Short) · Code</PageTitle>
+
+@* No PageBar here, deliberately: the Code page gives every vertical pixel to the editor. The title is
+   redundant with the activity-bar selection, and notifications/theme live in the rail's bottom group.
+   Without the bar the page still needs its one level-one heading (backlog 291), drawn for assistive
+   technology only. It is a role, not an h1, on purpose: Routes.razor's FocusOnNavigate focuses the
+   first h1 on arrival, and here that would take focus away from the editor. *@
+<div class="studio-workitems code-page">
+    <div class="code-page-heading" role="heading" aria-level="1" data-testid="code-page-heading">Code</div>
+    <PageSplit SidebarLabel="Code sections" SidebarTestId="code-sidebar" BodyTestId="code-editor-pane"
+               SidebarCssClass="code-sidebar" BodyCssClass="code-body">
+        <Sidebar>
+            <PageSidebarSection Title="Open Editors" TestId="code-open-editors" InitiallyCollapsed="true">
+                <HeaderActions>
+                    <button type="button" class="code-section-action" title="Save All (Ctrl+Shift+S, unsaved: @UnsavedCount)"
+                            aria-label="Save all files" data-testid="code-save-all"
+                            disabled="@(UnsavedCount == 0)" @onclick="SaveAllAsync">
+                        <CodeIcon Kind="CodeIcon.IconKind.SaveAll" />
+                    </button>
+                    <button type="button" class="code-section-action" title="Close All"
+                            aria-label="Close all editors" data-testid="code-close-all"
+                            disabled="@(Workspace.Open.Count == 0)" @onclick="CloseAllGuardedAsync">
+                        <CodeIcon Kind="CodeIcon.IconKind.CloseAll" />
+                    </button>
+                </HeaderActions>
+                <ChildContent>
+                    @if (Workspace.Open.Count == 0)
+                    {
+                        <p class="page-sidebar-empty">No open editors.</p>
+                    }
+                    else
+                    {
+                        @foreach (var file in Workspace.Open)
+                        {
+                            <div class="code-open-editor @(file.Path == Workspace.ActivePath ? "active" : string.Empty) @(IsUnsaved(file.Path) ? "dirty" : string.Empty)"
+                                 @onclick="() => NavigateToFile(file.Path)">
+                                <button type="button" class="code-tab-close" title="Close" aria-label="@($"Close {file.Name}")"
+                                        @onclick="() => CloseAsync(file.Path)" @onclick:stopPropagation="true">
+                                    <CodeIcon Kind="CodeIcon.IconKind.Close" />
+                                </button>
+                                <img class="code-icon" src="@Icons.FileIconUrl(file.Name)" alt="" aria-hidden="true" />
+                                <span class="code-name">@file.Name</span>
+                                <span class="code-open-editor-dir">@DirectoryOf(file.Path)</span>
+                            </div>
+                        }
+                    }
+                </ChildContent>
+            </PageSidebarSection>
+
+            <PageSidebarSection Title="Search" TestId="code-search" InitiallyCollapsed="true" @ref="_searchSection">
+                <HeaderActions>
+                    <button type="button" class="code-section-action" data-testid="code-search-view-toggle"
+                            title="@(_searchPanel?.TreeView != false ? "View as list" : "View as tree")"
+                            aria-label="@(_searchPanel?.TreeView != false ? "View results as a list" : "View results as a tree")"
+                            @onclick="ToggleSearchViewAsync">
+                        <CodeIcon Kind="@(_searchPanel?.TreeView != false ? CodeIcon.IconKind.ListFlat : CodeIcon.IconKind.ListTree)" />
+                    </button>
+                    <button type="button" class="code-section-action" title="Clear the search"
+                            aria-label="Clear the search inputs and results" data-testid="code-search-refresh"
+                            @onclick="ResetSearch">
+                        <CodeIcon Kind="CodeIcon.IconKind.Refresh" />
+                    </button>
+                    <button type="button" class="code-section-action" title="Clear and close"
+                            aria-label="Clear the search and collapse the section" data-testid="code-search-close"
+                            @onclick="CloseSearch">
+                        <CodeIcon Kind="CodeIcon.IconKind.Close" />
+                    </button>
+                </HeaderActions>
+                <ChildContent>
+                    @if (Reader.IsConfigured)
+                    {
+                        <CodeSearchPanel @ref="_searchPanel" OnOpenMatch="OpenMatchAsync" IsBufferDirty="IsUnsaved" ReplaceInBuffer="ReplaceInBufferAsync" />
+                    }
+                    else
+                    {
+                        <p class="page-sidebar-empty">Search needs a configured repository.</p>
+                    }
+                </ChildContent>
+            </PageSidebarSection>
+
+            <PageSidebarSection Title="@TreeTitle" TestId="code-tree">
+                <HeaderActions>
+                    <button type="button" class="code-section-action" data-testid="code-undo-fileop"
+                            title="@(_lastFileOp is { } lastOp ? $"Undo: {lastOp.Label}" : "Nothing to undo (rename or delete first)")"
+                            aria-label="Undo the last file operation" disabled="@(_lastFileOp is null)"
+                            @onclick="UndoLastFileOpAsync">
+                        <CodeIcon Kind="CodeIcon.IconKind.Undo" />
+                    </button>
+                    <button type="button" class="code-section-action" title="Refresh" aria-label="Refresh the tree"
+                            data-testid="code-tree-refresh" @onclick="RefreshTreeAsync">
+                        <CodeIcon Kind="CodeIcon.IconKind.Refresh" />
+                    </button>
+                    <button type="button" class="code-section-action" title="Collapse All" aria-label="Collapse all folders"
+                            data-testid="code-tree-collapse-all" @onclick="CollapseAll">
+                        <CodeIcon Kind="CodeIcon.IconKind.CollapseAll" />
+                    </button>
+                </HeaderActions>
+                <ChildContent>
+                    @if (!Reader.IsConfigured)
+                    {
+                        <p class="page-sidebar-empty" data-testid="code-tree-unconfigured">
+                            No repository is configured yet. Open a folder or clone a repository; its working
+                            copy appears here.
+                        </p>
+                    }
+                    else if (_treeError is not null)
+                    {
+                        <p class="studio-error" data-testid="code-tree-error">@_treeError</p>
+                    }
+                    else if (_rootChildren is null)
+                    {
+                        <p class="page-sidebar-empty">Loading…</p>
+                    }
+                    else
+                    {
+                        <div class="code-tree-body" @oncontextmenu="OpenRootMenu" @oncontextmenu:preventDefault="true">
+                            @foreach (var child in _rootChildren)
+                            {
+                                <CodeTreeNode Node="child" Expanded="_expanded" ChildrenCache="_childrenCache"
+                                              OnToggle="ToggleDirectoryAsync" OnSelect="n => NavigateToFile(n.RelativePath)"
+                                              OnContextMenu="OpenNodeMenu" SelectedPath="@Workspace.ActivePath" />
+                            }
+                        </div>
+                    }
+                </ChildContent>
+            </PageSidebarSection>
+        </Sidebar>
+        <Body>
+            @* Plan 2e Task 7: the editor and, beside it, the agent working in the same workspace. The
+               panel is opened from AgentPanelToggle in the window chrome (backlog 23), so nothing in
+               this split has to reserve width for a control while the panel is hidden. *@
+            <div class="code-body-split @(AgentPanel.IsOpen ? "with-session" : string.Empty)">
+            <div class="code-editor-area">
+                @* Work item #366: the editor's own header. The tab rows on the left, and a labelled Agent toggle on
+                   the right, because the title bar's unlabelled icon alone was a control the owner did not know was
+                   there. Both drive the same AgentPanelState. *@
+                <div class="code-editor-head">
+                <div class="code-editor-head-tabs">
+                @if (Workspace.Open.Count > 0)
+                {
+                    @if (Workspace.Pinned.Count > 0)
+                    {
+                        <div class="code-tabs-wrap code-tabs-pinned-row">
+                            <button type="button" class="code-tab-scroll left" title="Scroll tabs" aria-label="Scroll tabs left"
+                                    @onclick="() => ScrollTabsAsync(_pinnedRow, -1)"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></button>
+                            <div class="code-tabs" role="tablist" @ref="_pinnedRow">
+                                @foreach (var file in Workspace.Pinned)
+                                {
+                                    @TabTemplate(file)
+                                }
+                            </div>
+                            <button type="button" class="code-tab-scroll right" title="Scroll tabs" aria-label="Scroll tabs right"
+                                    @onclick="() => ScrollTabsAsync(_pinnedRow, 1)"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></button>
+                        </div>
+                    }
+                    @if (Workspace.Unpinned.Count > 0)
+                    {
+                        <div class="code-tabs-wrap">
+                            <button type="button" class="code-tab-scroll left" title="Scroll tabs" aria-label="Scroll tabs left"
+                                    @onclick="() => ScrollTabsAsync(_unpinnedRow, -1)"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></button>
+                            <div class="code-tabs" role="tablist" @ref="_unpinnedRow">
+                                @foreach (var file in Workspace.Unpinned)
+                                {
+                                    @TabTemplate(file)
+                                }
+                            </div>
+                            <button type="button" class="code-tab-scroll right" title="Scroll tabs" aria-label="Scroll tabs right"
+                                    @onclick="() => ScrollTabsAsync(_unpinnedRow, 1)"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></button>
+                        </div>
+                    }
+                }
+                </div>
+                <button type="button" class="code-agent-toggle @(AgentPanel.IsOpen ? "is-open" : string.Empty)"
+                        data-testid="code-agent-toggle" aria-pressed="@(AgentPanel.IsOpen ? "true" : "false")"
+                        title="@(AgentPanel.IsOpen ? "Hide the agent panel" : "Show the agent beside the code")"
+                        @onclick="AgentPanel.Toggle">
+                    Agent
+                </button>
+                </div>
+                @if (Workspace.Open.Count > 0)
+                {
+                    @if (Workspace.Active is { } active)
+                    {
+                        <div class="code-breadcrumbs" data-testid="code-breadcrumbs">
+                            @foreach (var (segment, index) in active.Path.Split('/').Select((s, i) => (s, i)))
+                            {
+                                @if (index > 0)
+                                {
+                                    <span class="code-breadcrumb-sep" aria-hidden="true">›</span>
+                                }
+                                <span class="code-breadcrumb">@segment</span>
+                            }
+                            <span class="code-breadcrumb-spacer"></span>
+                            @if (_blame is { } blame && blame.Path == active.Path)
+                            {
+                                @* Line blame (VS Code style): who last touched the cursor line, with
+                                   jumps to the commit and, when the message names one, the PR. *@
+                                <span class="code-blame-chip" data-testid="code-blame-chip">
+                                    @if (blame.Info is { } info)
+                                    {
+                                        <button type="button" class="code-blame-link" data-testid="code-blame-commit"
+                                                title="@($"{info.Subject} ({info.ShortSha}). Click to view the commit.")"
+                                                @onclick='() => Nav.NavigateTo($"/git/commit/{info.Sha}")'>
+                                            @info.Author, @Relative(info.When) · @info.ShortSha
+                                        </button>
+                                        @if (info.PullRequestNumber is { } prNumber)
+                                        {
+                                            <button type="button" class="code-blame-link" data-testid="code-blame-pr"
+                                                    title="View the pull request"
+                                                    @onclick='() => Nav.NavigateTo($"/git/pr/{prNumber}")'>
+                                                !@prNumber
+                                            </button>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <span class="code-blame-uncommitted">Line @blame.Line: not committed yet</span>
+                                    }
+                                </span>
+                            }
+                            @if (_view.PreviewMode != PreviewMode.None)
+                            {
+                                <button type="button" class="code-section-action code-preview-toggle" data-testid="code-preview-toggle"
+                                        title="@(_previewActive ? "Show source" : "Open preview")"
+                                        aria-label="@(_previewActive ? "Show source" : "Open preview")"
+                                        @onclick="TogglePreview">
+                                    <CodeIcon Kind="@(_previewActive ? CodeIcon.IconKind.Code : CodeIcon.IconKind.Preview)" />
+                                </button>
+                            }
+                        </div>
+                    }
+                }
+                @if (ActiveAlert is { } alert && Workspace.ActivePath is { } alertPath)
+                {
+                    @* External-change conflict surface (ADR 0016): never resolved silently. *@
+                    <div class="code-file-alert" data-testid="code-file-alert" role="alert">
+                        <span>
+                            @(alert == FileAlert.ChangedOnDisk
+                                ? "This file changed on disk (outside this editor)."
+                                : "This file was deleted on disk.")
+                        </span>
+                        <span class="code-file-alert-actions">
+                            @if (alert == FileAlert.ChangedOnDisk)
+                            {
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="code-alert-reload"
+                                        @onclick="() => ReloadFromDiskAsync(alertPath)">Reload from disk</button>
+                                <button type="button" class="studio-btn" data-testid="code-alert-overwrite"
+                                        @onclick="() => OverwriteDiskAsync(alertPath)">Overwrite with my version</button>
+                            }
+                            else
+                            {
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="code-alert-close"
+                                        @onclick="() => CloseAfterDeleteAsync(alertPath)">Close tab</button>
+                                <button type="button" class="studio-btn" data-testid="code-alert-keep"
+                                        @onclick="() => KeepDeletedAsync(alertPath)">Keep my copy (save recreates it)</button>
+                            }
+                        </span>
+                    </div>
+                }
+                @if (FollowBandVisible)
+                {
+                    @* Work item #366: what follow did not do and why, and the pause after the person acted. *@
+                    <div class="code-follow-band" data-testid="code-follow-band" role="status">
+                        @if (_followNotice is { } notice)
+                        {
+                            <span class="code-follow-notice" data-testid="code-follow-notice">@notice.Text</span>
+                            <span class="code-follow-band-actions">
+                                @if (notice.Path is { } noticePath)
+                                {
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="code-follow-notice-show"
+                                            @onclick="() => ShowNoticedFile(noticePath)">Show it</button>
+                                }
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="code-follow-notice-dismiss"
+                                        @onclick="() => _followNotice = null">Dismiss</button>
+                            </span>
+                        }
+                        @if (FollowPaused)
+                        {
+                            <button type="button" class="code-follow-paused" data-testid="code-follow-paused"
+                                    title="Following is paused because you used the editor; click to follow the agent again"
+                                    @onclick="ResumeFollowAsync">
+                                Following paused, resume
+                            </button>
+                        }
+                    </div>
+                }
+                @if (_diff is { } diff)
+                {
+                    @* Work item #366: the change waiting on approval, as a read-only Monaco diff of the host file
+                       against the proposed text. Approve and Deny here decide the SAME pending approval as the
+                       card in the panel, through the same resolution, bound to this request id.
+                       Work item #369: this header is a row of the editor column ABOVE the Monaco host, never laid
+                       over it. Overlaid, the editor's minimap drew over Approve at the right edge (measured in a
+                       1424 px window with the agent panel open), and the buttons wrap onto their own line when narrow. *@
+                    <div class="code-follow-diff" data-testid="code-follow-diff" data-request="@diff.RequestId">
+                        <div class="code-follow-diff-head" data-testid="code-follow-diff-head">
+                            <span class="code-follow-diff-title">
+                                Proposed change to <span class="code-follow-diff-path">@diff.Path</span>
+                            </span>
+                            @if (diff.Problem is null)
+                            {
+                                <span class="code-follow-diff-actions">
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="code-follow-deny"
+                                            disabled="@_deciding" @onclick="() => DecideFromDiff(false)">Deny</button>
+                                    <button type="button" class="studio-btn" data-testid="code-follow-approve"
+                                            disabled="@_deciding" @onclick="() => DecideFromDiff(true)">Approve</button>
+                                </span>
+                            }
+                        </div>
+                    </div>
+                }
+                <div class="code-editor-host-wrap">
+                    <div class="code-editor-host @(_view.Kind == ViewKind.Text && !_previewActive ? string.Empty : "code-editor-host-hidden")"
+                         @ref="_editorHost"></div>
+                    @if (_diff is { } diffBody)
+                    {
+                        @* The diff itself covers the editor; its header is above the wrap (#369). The editor host is
+                           its own stacking context (studio.css), so Monaco's minimap cannot draw over this either. *@
+                        <div class="code-follow-diff-body" data-testid="code-follow-diff-body">
+                            @if (diffBody.Problem is { } problem)
+                            {
+                                <p class="code-follow-diff-problem" data-testid="code-follow-diff-problem">
+                                    @problem Decide on the card in the agent panel, which shows the change as the agent sent it.
+                                </p>
+                            }
+                            else
+                            {
+                                <div class="code-follow-diff-host" data-testid="code-follow-diff-host" @ref="_diffHost"></div>
+                            }
+                        </div>
+                    }
+                    @if (_previewActive && _view.PreviewMode == PreviewMode.Markdown)
+                    {
+                        <div class="code-md-preview" data-testid="code-md-preview">@((MarkupString)_previewHtml)</div>
+                    }
+                    else if (_previewActive && _view.PreviewMode == PreviewMode.Svg)
+                    {
+                        <div class="code-image-preview" data-testid="code-image-preview">
+                            <img src="@_previewDataUrl" alt="@Workspace.Active?.Name" />
+                        </div>
+                    }
+                    else if (_view.Kind == ViewKind.Image)
+                    {
+                        <div class="code-image-preview" data-testid="code-image-preview">
+                            <img src="@_view.ImageDataUrl" alt="@Workspace.Active?.Name" />
+                        </div>
+                    }
+                    else if (_view.Kind == ViewKind.Binary)
+                    {
+                        <div class="code-editor-empty" data-testid="code-binary-notice">
+                            <p>@Workspace.Active?.Name is binary or too large, so it is not shown in the editor.</p>
+                        </div>
+                    }
+                    else if (_view.Kind == ViewKind.Missing)
+                    {
+                        <div class="code-editor-empty" data-testid="code-missing-notice">
+                            <p>@Workspace.Active?.Path could not be read; it may have been moved or deleted.</p>
+                        </div>
+                    }
+                    else if (Workspace.Open.Count == 0)
+                    {
+                        <div class="code-editor-empty" data-testid="code-editor-empty">
+                            @if (Reader.IsConfigured)
+                            {
+                                <p>Select a file from the tree to open it.</p>
+                                <p class="studio-muted">Edits save with Ctrl+S; changes made on disk sync into open files.</p>
+                            }
+                            else
+                            {
+                                <p>No repository is configured yet.</p>
+                                <p class="studio-muted">
+                                    Open a folder or clone a repository; its working copy opens here.
+                                </p>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+
+            @if (AgentPanel.IsOpen)
+            {
+                @* The panel's header is the pane's own now (backlog 18): New conversation has to be in
+                   the same place here as it is in the Sessions area, and a second bar above the pane's
+                   would have put it in two. What belongs to THIS surface rides in HeaderActions. *@
+                <div class="code-session-panel" data-testid="code-session-panel">
+                    <SessionPane WorkspaceId="@SessionWorkspaceId" WorkingDirectory="@SessionWorkingDirectory"
+                                 SessionId="@PanelSessionId"
+                                 SessionStarted="id => AgentPanel.Choose(id)"
+                                 NewConversation="() => AgentPanel.Choose(null)"
+                                 Compact="true" CopyStateChanged="StateHasChanged">
+                        <HeaderActions>
+                            @* Work item #366: the editor follows what the agent reads and changes while this is on. *@
+                            <button type="button" class="session-head-action code-follow-toggle @(AgentPanel.FollowAgent ? "is-on" : string.Empty)"
+                                    data-testid="code-follow-toggle" aria-pressed="@(AgentPanel.FollowAgent ? "true" : "false")"
+                                    title="@(AgentPanel.FollowAgent ? "Following the agent in the editor; click to stop" : "Follow the agent in the editor")"
+                                    @onclick="ToggleFollow">
+                                Follow
+                            </button>
+                            @* "Open in Sessions": the conversation moves back to the Sessions area, and the panel closes
+                               so it is not shown live in both places. *@
+                            <a class="session-head-action" href="@OpenInSessionsHref" data-testid="code-session-open-area"
+                               title="Open in Sessions" aria-label="Open in Sessions"
+                               @onclick="AgentPanel.ReturnToSessions">&#8599;</a>
+                            <button type="button" class="session-head-action" data-testid="code-session-close"
+                                    title="Hide the agent panel" aria-label="Hide the agent panel"
+                                    @onclick="AgentPanel.Close">
+                                <CodeIcon Kind="CodeIcon.IconKind.Close" />
+                            </button>
+                        </HeaderActions>
+                    </SessionPane>
+                </div>
+            }
+            </div>
+        </Body>
+    </PageSplit>
+</div>
+
+@if (_menu is { } menu)
+{
+    <CodeContextMenu Items="menu.Items" X="menu.X" Y="menu.Y" OnDismiss="() => _menu = null" />
+}
+
+@if (_switcherOpen)
+{
+    @* The Ctrl+Tab quick switcher (VS style): most-recently-used order, selection follows repeated
+       Tab presses while Ctrl is held, releasing Ctrl commits (wired in codeEditor.js). *@
+    <div class="code-switcher" data-testid="code-switcher">
+        <div class="code-switcher-title">Open editors</div>
+        @foreach (var (file, index) in Workspace.RecentFirst.Select((f, i) => (f, i)))
+        {
+            <div class="code-switcher-item @(index == _switcherIndex ? "active" : string.Empty)">
+                <img class="code-icon" src="@Icons.FileIconUrl(file.Name)" alt="" aria-hidden="true" />
+                <span class="code-name">@file.Name</span>
+                <span class="code-switcher-dir">@DirectoryOf(file.Path)</span>
+            </div>
+        }
+    </div>
+}
+
+@if (_prompt is { } prompt)
+{
+    @* Backlog 27: the box is focused on open and owns Enter (create) and Escape (dismiss); the
+       handler sits on the modal so it still fires once focus has moved to one of the buttons. *@
+    <div class="studio-modal-backdrop" @onclick="() => _prompt = null">
+        <div class="studio-modal" @onclick:stopPropagation="true" @onkeydown="NamePromptKeyDownAsync">
+            <h2>@(prompt.IsFile ? "New file" : "New folder")</h2>
+            <label class="studio-modal-field">
+                <span>@(prompt.TargetDirectory.Length == 0 ? "At the repository root" : $"Inside {prompt.TargetDirectory}")</span>
+                <input class="studio-input" placeholder="@(prompt.IsFile ? "name.ext" : "name")" @bind="_promptName"
+                       @bind:event="oninput" data-testid="code-prompt-name" />
+            </label>
+            @if (_promptError is not null)
+            {
+                <p class="studio-error">@_promptError</p>
+            }
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _prompt = null">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="code-prompt-create"
+                        disabled="@string.IsNullOrWhiteSpace(_promptName)" @onclick="ConfirmPromptAsync">Create</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_rename is { } rename)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _rename = null">
+        <div class="studio-modal" @onclick:stopPropagation="true" @onkeydown="RenamePromptKeyDownAsync">
+            <h2>Rename @(rename.IsDirectory ? "folder" : "file")</h2>
+            <label class="studio-modal-field">
+                <span>@rename.Path</span>
+                <input class="studio-input" @bind="_renameName" @bind:event="oninput" data-testid="code-rename-name" />
+            </label>
+            @if (_renameError is not null)
+            {
+                <p class="studio-error">@_renameError</p>
+            }
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _rename = null">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="code-rename-confirm"
+                        disabled="@string.IsNullOrWhiteSpace(_renameName)" @onclick="ConfirmRenameAsync">Rename</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_deleteTarget is { } deleteTarget)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _deleteTarget = null">
+        <div class="studio-modal" data-testid="code-delete-confirm" @onclick:stopPropagation="true">
+            <h2>Delete @(deleteTarget.IsDirectory ? "folder" : "file")</h2>
+            <p class="studio-muted">
+                @deleteTarget.Path will be removed from the working tree. A zip copy goes to the data
+                directory's trash folder first (trash/date_[branch].zip), so this can be recovered by hand.
+            </p>
+            @if (OpenTabsUnder(deleteTarget.Path).Any(IsUnsaved))
+            {
+                <p class="studio-error">
+                    Unsaved changes in the open editor@(OpenTabsUnder(deleteTarget.Path).Count(IsUnsaved) == 1 ? "" : "s")
+                    for this path are discarded; only the on-disk content reaches the trash zip.
+                </p>
+            }
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _deleteTarget = null">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="code-delete-confirm-go"
+                        @onclick="ConfirmDeleteAsync">Delete</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_pendingClose is { } pendingClose)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _pendingClose = null">
+        <div class="studio-modal" data-testid="code-close-confirm" @onclick:stopPropagation="true">
+            <h2>Unsaved changes</h2>
+            <p class="studio-muted">
+                @(pendingClose.DirtyPaths.Count == 1
+                    ? $"{pendingClose.DirtyPaths[0]} has unsaved changes."
+                    : $"{pendingClose.DirtyPaths.Count} files have unsaved changes.")
+            </p>
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _pendingClose = null">Cancel</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="code-close-discard"
+                        @onclick="() => ResolvePendingCloseAsync(save: false)">Don't save</button>
+                <button type="button" class="studio-btn" data-testid="code-close-save"
+                        @onclick="() => ResolvePendingCloseAsync(save: true)">Save and close</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private enum ViewKind { None, Text, Image, Binary, Missing }
+
+    private enum PreviewMode { None, Markdown, Svg }
+
+    private sealed record ActiveView(
+        ViewKind Kind,
+        string? ImageDataUrl = null,
+        string? TextContent = null,
+        PreviewMode PreviewMode = PreviewMode.None);
+
+    private sealed record MenuState(double X, double Y, IReadOnlyList<CodeContextMenu.MenuItem> Items);
+
+    private sealed record NamePrompt(string TargetDirectory, bool IsFile);
+
+    private sealed record RenamePrompt(string Path, bool IsDirectory);
+
+    private sealed record DeleteTarget(string Path, bool IsDirectory);
+
+    /// <summary>The last explorer file operation, undoable once (VS Code's explorer-undo shape).</summary>
+    private sealed record LastFileOp(string Label, Func<Task<string?>> UndoAsync);
+
+    private enum FileAlert { ChangedOnDisk, DeletedOnDisk }
+
+    /// <summary>A close (single or bulk) held back because it would discard unsaved changes.</summary>
+    private sealed record PendingClose(IReadOnlyList<string> DirtyPaths, Func<Task> Proceed);
+
+    /// <summary>What fravashiCode.open reports back: hot-exit restore state (ADR 0016 addendum).</summary>
+    public sealed record BackupOpenResult(bool BackupApplied, string? BaseStamp);
+
+    /// <summary>One entry of fravashiCode.listBackups(): a file whose unsaved buffer survived hot exit.</summary>
+    public sealed record BackupEntry(string Path, string? BaseStamp);
+
+    private static readonly Dictionary<string, string> ImageMimeTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".png"] = "image/png",
+        [".jpg"] = "image/jpeg",
+        [".jpeg"] = "image/jpeg",
+        [".gif"] = "image/gif",
+        [".webp"] = "image/webp",
+        [".ico"] = "image/x-icon",
+        [".bmp"] = "image/bmp",
+        [".avif"] = "image/avif",
+    };
+
+    [Parameter]
+    public string? FilePath { get; set; }
+
+    private ElementReference _editorHost;
+    private ElementReference _pinnedRow;
+    private ElementReference _unpinnedRow;
+    private IReadOnlyList<RepositoryNode>? _rootChildren;
+    private readonly HashSet<string> _expanded = [];
+    private readonly Dictionary<string, IReadOnlyList<RepositoryNode>> _childrenCache = [];
+    private string _rootName = string.Empty;
+    private string? _treeError;
+    private bool _editorInitialized;
+    private bool _restoreAttempted;
+    private int _openSequence; // the latest OpenFromPathAsync request (backlog 265)
+    private ActiveView _view = new(ViewKind.None);
+    private bool _previewActive;
+    private string _previewHtml = string.Empty;
+    private string? _previewDataUrl;
+    private (string Path, string Content, string? Stamp)? _pendingMonacoOpen;
+    private bool _pendingPersist;
+    private MenuState? _menu;
+    private NamePrompt? _prompt;
+    private string _promptName = string.Empty;
+    private string? _promptError;
+    private RenamePrompt? _rename;
+    private string _renameName = string.Empty;
+    private string? _renameError;
+    private DeleteTarget? _deleteTarget;
+
+    /// <summary>
+    /// An input to focus once the render that shows it has run (backlog 27). A modal box cannot be
+    /// focused when it is opened: it is not in the DOM yet.
+    /// </summary>
+    private (string Selector, bool SelectAll)? _pendingFocus;
+
+    private LastFileOp? _lastFileOp;
+    private (string Path, bool IsCut)? _clipboard;
+    private bool _switcherOpen;
+    private int _switcherIndex;
+    private string? _lastRevealedTab;
+    private DotNetObjectReference<CodePage>? _selfRef;
+
+    // ---- Phase 2 state (editing/save/external sync, ADR 0016) ----
+    private readonly HashSet<string> _dirty = [];                      // unsaved Monaco buffers (client-reported)
+    private readonly HashSet<string> _forceSave = [];                  // next save overwrites/recreates deliberately
+    private readonly Dictionary<string, DateTimeOffset> _known = [];   // disk mtime the buffer content is based on
+    private readonly Dictionary<string, FileAlert> _alerts = [];
+    private PendingClose? _pendingClose;
+    private (string Path, string Content, string? Stamp)? _pendingStaleApply;
+    private IDisposable? _changeSubscription;
+    private bool _treeRefreshQueued;
+    private bool _lookAgainQueued;
+    private bool _disposed;
+    private PageSidebarSection? _searchSection;
+    private CodeSearchPanel? _searchPanel;
+    private (string Path, int Line, int Column, int Length)? _pendingMatchReveal;
+    private (string Path, int Line, GitLineBlame? Info)? _blame;
+
+    private int UnsavedCount => _dirty.Union(_forceSave).Count();
+
+    private bool IsUnsaved(string path) => _dirty.Contains(path) || _forceSave.Contains(path);
+
+    private FileAlert? ActiveAlert =>
+        Workspace.ActivePath is { } p && _alerts.TryGetValue(p, out var alert) ? alert : null;
+
+    private string TreeTitle => Reader.IsConfigured && _rootName.Length > 0 ? _rootName : "Code Tree";
+
+    // One tab, rendered identically in the pinned and unpinned rows.
+    private RenderFragment<CodeWorkspace.OpenFile> TabTemplate => file =>
+        @<div class="code-tab @(file.Path == Workspace.ActivePath ? "active" : string.Empty) @(file.IsPinned ? "pinned" : string.Empty) @(IsUnsaved(file.Path) ? "dirty" : string.Empty) @(file.IsPreview ? "preview" : string.Empty)"
+              role="tab" aria-selected="@(file.Path == Workspace.ActivePath ? "true" : "false")"
+              title="@(file.IsPreview ? "Preview: opened by following the agent; double-click to keep it open" : null)"
+              @onclick="() => NavigateToFile(file.Path)"
+              @ondblclick="() => Workspace.Promote(file.Path)"
+              @oncontextmenu="e => OpenTabMenu(file, e)" @oncontextmenu:preventDefault="true">
+            <img class="code-icon" src="@Icons.FileIconUrl(file.Name)" alt="" aria-hidden="true" />
+            <span class="code-name">@file.Name</span>
+            @if (file.IsPinned)
+            {
+                <span class="code-tab-pin" aria-hidden="true" title="Pinned"><CodeIcon Kind="CodeIcon.IconKind.Pin" /></span>
+            }
+            <button type="button" class="code-tab-close" title="@(IsUnsaved(file.Path) ? "Unsaved changes; click to close" : "Close")"
+                    aria-label="@($"Close {file.Name}")"
+                    @onclick="() => CloseAsync(file.Path)" @onclick:stopPropagation="true">
+                <CodeIcon Kind="CodeIcon.IconKind.Close" />
+            </button>
+        </div>;
+
+    private string? SessionWorkspaceId => Selection.WorkspaceId;
+
+    /// <summary>
+    /// The workspace's contained copy, which is the ONLY place an agent is run (plan 2d decision 2).
+    /// Null on a dev host without the workspaces volume; the panel then says so instead of running
+    /// anything against the host tree.
+    /// </summary>
+    private string? SessionWorkingDirectory =>
+        SessionWorkspaceId is { Length: > 0 } id ? AgentSync.CopyPathFor(id) : null;
+
+    /// <summary>
+    /// Plan 2e Task 7: the agent panel beside the editor, closed until the user opens it. The open
+    /// state lives in <see cref="AgentPanelState"/> rather than in a field here, because the control
+    /// that toggles it is in the window title bar, a component tree this page never contains
+    /// (backlog 23). Whatever opens it, this handler is where the workspace's contained copy is
+    /// warmed, so the panel never comes up in front of a copy nobody has started syncing.
+    /// </summary>
+    private void OnAgentPanelChanged()
+    {
+        if (AgentPanel.IsOpen && SessionWorkspaceId is { Length: > 0 } id)
+        {
+            AgentSync.EnsureStarted(id);
+        }
+
+        // Work item #366: the panel opened, closed, changed conversation or follow was switched.
+        _ = InvokeAsync(async () =>
+        {
+            await AttachFollowAsync();
+            StateHasChanged();
+        });
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Workspace.Changed += OnWorkspaceChanged;
+        AgentPanel.Changed += OnAgentPanelChanged;
+        AgentPanel.Attach();
+        StartFollow();
+        TouchRecents();
+        // Plan 2d: opening a workspace warms its contained-agent copy (idempotent; inert
+        // without the workspaces volume or the bridge).
+        if (Selection.WorkspaceId is { Length: > 0 } activeWorkspace)
+        {
+            AgentSync.EnsureStarted(activeWorkspace);
+        }
+
+        if (!Reader.IsConfigured)
+        {
+            return;
+        }
+
+        _changeSubscription = ChangeNotifier.Subscribe(OnRepositoryChanged);
+        Connection.Reconnected += OnReconnected;
+        await LoadRootAsync();
+    }
+
+    /// <summary>
+    /// Records the window's workspace in the recents (plan 2b-ii): fire-and-forget, so the welcome
+    /// page's list stays current for windows opened straight from `fravashi --open` or Explorer.
+    /// </summary>
+    private void TouchRecents()
+    {
+        if (Selection.WorkspaceId is not { Length: > 0 } workspaceId)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var workspace = (await Bridge.ListWorkspacesAsync(CancellationToken.None))
+                    .FirstOrDefault(w => w.Id == workspaceId);
+                if (workspace is not null)
+                {
+                    WorkspaceStore.Touch(workspace.Id, workspace.Name, workspace.RootPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Recents touch skipped for workspace {WorkspaceId}.", workspaceId);
+            }
+        });
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // The URL is the source of truth for the active file (browser back/forward navigates open files).
+        if (!string.IsNullOrEmpty(FilePath) && FilePath != Workspace.ActivePath)
+        {
+            await OpenFromPathAsync(FilePath);
+        }
+    }
+
+    private void OnWorkspaceChanged() => InvokeAsync(StateHasChanged);
+
+    // ---- Tree state (page-owned so refresh / collapse-all / mutations can reach all of it) ----
+
+    private async Task LoadRootAsync()
+    {
+        try
+        {
+            var root = await Reader.GetTreeAsync(string.Empty);
+            _rootName = root.Name;
+            _rootChildren = root.Children;
+            _treeError = null;
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            // Backlog 14: the host bridge does not know this workspace (its grant list is per
+            // fravashi.exe process). An HTTP status string on screen taught the user nothing.
+            Logger.LogWarning(ex, "The host bridge does not know workspace {WorkspaceId}.", Selection.WorkspaceId);
+            _treeError = $"This folder is not open on the host any more (the {ProductName.Short} window may have "
+                + "restarted, or the folder moved). Reopen it from the welcome page, or right-click "
+                + $"it in Explorer and choose \"Open with {ProductName.Short}\".";
+        }
+        catch (Exception ex)
+        {
+            _treeError = ex.Message;
+        }
+    }
+
+    private async Task ToggleDirectoryAsync(RepositoryNode node)
+    {
+        if (_expanded.Remove(node.RelativePath))
+        {
+            return;
+        }
+
+        _expanded.Add(node.RelativePath);
+        if (!_childrenCache.ContainsKey(node.RelativePath))
+        {
+            var loaded = await Reader.GetTreeAsync(node.RelativePath);
+            _childrenCache[node.RelativePath] = loaded.Children;
+        }
+    }
+
+    private async Task RefreshTreeAsync()
+    {
+        await LoadRootAsync();
+        foreach (var path in _expanded.OrderBy(p => p.Length).ToList())
+        {
+            var loaded = await Reader.GetTreeAsync(path);
+            _childrenCache[path] = loaded.Children;
+        }
+    }
+
+    private void CollapseAll() => _expanded.Clear();
+
+    // ---- Context menus ----
+
+    private void OpenTabMenu(CodeWorkspace.OpenFile file, MouseEventArgs e)
+    {
+        var isRightmostUnpinned = !file.IsPinned && Workspace.Unpinned.LastOrDefault()?.Path == file.Path;
+        _menu = new MenuState(e.ClientX, e.ClientY,
+        [
+            file.IsPinned
+                ? new CodeContextMenu.MenuItem("Unpin", () => PinAsync(file.Path, false))
+                : new CodeContextMenu.MenuItem("Pin", () => PinAsync(file.Path, true)),
+            CodeContextMenu.MenuItem.Separator,
+            new CodeContextMenu.MenuItem("Close", () => CloseAsync(file.Path)),
+            new CodeContextMenu.MenuItem("Close Others", () => CloseOthersGuardedAsync(file.Path)),
+            new CodeContextMenu.MenuItem("Close to the Right", () => CloseToTheRightGuardedAsync(file.Path),
+                Disabled: file.IsPinned || isRightmostUnpinned),
+            new CodeContextMenu.MenuItem("Close All But Pinned", CloseAllButPinnedGuardedAsync),
+            CodeContextMenu.MenuItem.Separator,
+            new CodeContextMenu.MenuItem("History", () => OpenHistory(file.Path)),
+        ]);
+    }
+
+    /// <summary>Open the Git page's file-history view for a file (phase 7).</summary>
+    private Task OpenHistory(string path)
+    {
+        Nav.NavigateTo($"/git/history/{path}");
+        return Task.CompletedTask;
+    }
+
+    private void OpenNodeMenu(CodeTreeContextRequest request)
+    {
+        var node = request.Node;
+        var items = new List<CodeContextMenu.MenuItem>();
+        if (node.IsDirectory)
+        {
+            items.Add(new CodeContextMenu.MenuItem("New File…", () => OpenPrompt(node.RelativePath, isFile: true)));
+            items.Add(new CodeContextMenu.MenuItem("New Folder…", () => OpenPrompt(node.RelativePath, isFile: false)));
+            items.Add(CodeContextMenu.MenuItem.Separator);
+        }
+
+        items.Add(new CodeContextMenu.MenuItem("Cut", () => SetClipboard(node.RelativePath, isCut: true)));
+        items.Add(new CodeContextMenu.MenuItem("Copy", () => SetClipboard(node.RelativePath, isCut: false)));
+        if (node.IsDirectory)
+        {
+            items.Add(new CodeContextMenu.MenuItem("Paste", () => PasteIntoAsync(node.RelativePath), Disabled: _clipboard is null));
+        }
+
+        items.Add(CodeContextMenu.MenuItem.Separator);
+        items.Add(new CodeContextMenu.MenuItem("Copy Path", () => CopyToClipboardAsync(AbsolutePathOf(node.RelativePath))));
+        items.Add(new CodeContextMenu.MenuItem("Copy Relative Path", () => CopyToClipboardAsync(node.RelativePath)));
+        if (!node.IsDirectory)
+        {
+            items.Add(CodeContextMenu.MenuItem.Separator);
+            items.Add(new CodeContextMenu.MenuItem("History", () => OpenHistory(node.RelativePath)));
+        }
+
+        items.Add(CodeContextMenu.MenuItem.Separator);
+        items.Add(new CodeContextMenu.MenuItem("Rename…", () => OpenRenamePrompt(node)));
+        items.Add(new CodeContextMenu.MenuItem("Delete", () => OpenDeleteConfirm(node)));
+        _menu = new MenuState(request.X, request.Y, items);
+    }
+
+    private void OpenRootMenu(MouseEventArgs e)
+    {
+        _menu = new MenuState(e.ClientX, e.ClientY,
+        [
+            new CodeContextMenu.MenuItem("New File…", () => OpenPrompt(string.Empty, isFile: true)),
+            new CodeContextMenu.MenuItem("New Folder…", () => OpenPrompt(string.Empty, isFile: false)),
+            new CodeContextMenu.MenuItem("Paste", () => PasteIntoAsync(string.Empty), Disabled: _clipboard is null),
+            CodeContextMenu.MenuItem.Separator,
+            new CodeContextMenu.MenuItem("Copy Path", () => CopyToClipboardAsync(Reader.RootPath)),
+        ]);
+    }
+
+    // ---- Tab operations ----
+
+    private Task PinAsync(string path, bool pinned)
+    {
+        Workspace.SetPinned(path, pinned);
+        _pendingPersist = true;
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Run a bulk workspace change, then reconcile Monaco models, the URL, and persistence.</summary>
+    private async Task ApplyTabOperationAsync(Action operation)
+    {
+        var before = Workspace.Open.Select(f => f.Path).ToList();
+        var activeBefore = Workspace.ActivePath;
+        operation();
+        var after = Workspace.Open.Select(f => f.Path).ToHashSet();
+        foreach (var closed in before.Where(p => !after.Contains(p)))
+        {
+            await JS.InvokeVoidAsync("fravashiCode.close", closed);
+            ForgetFileState(closed);
+        }
+
+        _pendingPersist = true;
+        if (Workspace.ActivePath != activeBefore)
+        {
+            if (Workspace.ActivePath is { } next)
+            {
+                await OpenFromPathAsync(next);
+                Nav.NavigateTo($"/code/{next}");
+            }
+            else
+            {
+                _view = new ActiveView(ViewKind.None);
+                Nav.NavigateTo("/code");
+            }
+        }
+
+        StateHasChanged();
+    }
+
+    /// <summary>Bulk closes stop at a confirm dialog when they would discard unsaved buffers.</summary>
+    private Task CloseOthersGuardedAsync(string keep) =>
+        GuardedBulkAsync(
+            Workspace.Unpinned.Where(f => f.Path != keep).Select(f => f.Path).ToList(),
+            () => Workspace.CloseOthers(keep));
+
+    private Task CloseToTheRightGuardedAsync(string from)
+    {
+        var unpinned = Workspace.Unpinned.ToList();
+        var index = unpinned.FindIndex(f => f.Path == from);
+        var doomed = index < 0 ? [] : unpinned.Skip(index + 1).Select(f => f.Path).ToList();
+        return GuardedBulkAsync(doomed, () => Workspace.CloseToTheRight(from));
+    }
+
+    private Task CloseAllButPinnedGuardedAsync() =>
+        GuardedBulkAsync(Workspace.Unpinned.Select(f => f.Path).ToList(), Workspace.CloseAllButPinned);
+
+    private Task CloseAllGuardedAsync() =>
+        GuardedBulkAsync(Workspace.Open.Select(f => f.Path).ToList(), Workspace.CloseAll);
+
+    private async Task GuardedBulkAsync(IReadOnlyList<string> doomed, Action operation)
+    {
+        var unsaved = doomed.Where(IsUnsaved).ToList();
+        if (unsaved.Count > 0)
+        {
+            _pendingClose = new PendingClose(unsaved, () => ApplyTabOperationAsync(operation));
+            StateHasChanged();
+            return;
+        }
+
+        await ApplyTabOperationAsync(operation);
+    }
+
+    private async Task ResolvePendingCloseAsync(bool save)
+    {
+        if (_pendingClose is not { } pending)
+        {
+            return;
+        }
+
+        _pendingClose = null;
+        if (save)
+        {
+            foreach (var path in pending.DirtyPaths)
+            {
+                await SaveAsync(path);
+            }
+
+            // A save that conflicted or failed leaves its file unsaved; abort so nothing is lost.
+            if (pending.DirtyPaths.Any(IsUnsaved))
+            {
+                StateHasChanged();
+                return;
+            }
+        }
+        else
+        {
+            foreach (var path in pending.DirtyPaths)
+            {
+                _dirty.Remove(path);
+                _forceSave.Remove(path);
+            }
+        }
+
+        await pending.Proceed();
+    }
+
+    private void ForgetFileState(string path)
+    {
+        _dirty.Remove(path);
+        _forceSave.Remove(path);
+        _known.Remove(path);
+        _alerts.Remove(path);
+    }
+
+    // ---- Clipboard / file operations ----
+
+    private Task SetClipboard(string path, bool isCut)
+    {
+        _clipboard = (path, isCut);
+        return Task.CompletedTask;
+    }
+
+    private async Task CopyToClipboardAsync(string text)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.copyText", text);
+        }
+        catch (JSException)
+        {
+            Notifications.Add("Could not write to the clipboard.", NotificationSeverity.Warning);
+        }
+    }
+
+    private string AbsolutePathOf(string relativePath) =>
+        System.IO.Path.Combine(Reader.RootPath, relativePath.Replace('/', System.IO.Path.DirectorySeparatorChar));
+
+    private async Task PasteIntoAsync(string targetDirectory)
+    {
+        if (_clipboard is not { } clip)
+        {
+            return;
+        }
+
+        var result = clip.IsCut
+            ? await Writer.MoveAsync(clip.Path, targetDirectory)
+            : await Writer.CopyAsync(clip.Path, targetDirectory);
+        if (!result.Succeeded)
+        {
+            Notifications.Add(result.Error ?? "The paste failed.", NotificationSeverity.Warning);
+            return;
+        }
+
+        if (clip.IsCut)
+        {
+            _clipboard = null;
+        }
+
+        await RefreshTreeAsync();
+        StateHasChanged();
+    }
+
+    private Task OpenPrompt(string targetDirectory, bool isFile)
+    {
+        _prompt = new NamePrompt(targetDirectory, isFile);
+        _promptName = string.Empty;
+        _promptError = null;
+        // The box starts empty, so there is nothing to select.
+        _pendingFocus = ("[data-testid=code-prompt-name]", false);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Enter creates, Escape dismisses: the new-file/new-folder prompt needs no mouse.</summary>
+    private async Task NamePromptKeyDownAsync(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter")
+        {
+            await ConfirmPromptAsync();
+        }
+        else if (args.Key == "Escape")
+        {
+            _prompt = null;
+        }
+    }
+
+    private async Task ConfirmPromptAsync()
+    {
+        if (_prompt is not { } prompt || string.IsNullOrWhiteSpace(_promptName))
+        {
+            return;
+        }
+
+        var name = _promptName.Trim();
+        var result = prompt.IsFile
+            ? await Writer.CreateFileAsync(prompt.TargetDirectory, name)
+            : await Writer.CreateDirectoryAsync(prompt.TargetDirectory, name);
+        if (!result.Succeeded)
+        {
+            _promptError = result.Error;
+            return;
+        }
+
+        _prompt = null;
+        if (prompt.TargetDirectory.Length > 0)
+        {
+            _expanded.Add(prompt.TargetDirectory);
+        }
+
+        await RefreshTreeAsync();
+        if (prompt.IsFile)
+        {
+            var newPath = prompt.TargetDirectory.Length == 0 ? name : $"{prompt.TargetDirectory}/{name}";
+            NavigateToFile(newPath);
+        }
+
+        StateHasChanged();
+    }
+
+    // ---- Rename and delete-to-trash (owner batch 2026-07-26) ----
+
+    private Task OpenRenamePrompt(RepositoryNode node)
+    {
+        _rename = new RenamePrompt(node.RelativePath, node.IsDirectory);
+        _renameName = node.Name;
+        _renameError = null;
+        // Pre-filled with the current name: select it, so typing replaces rather than appends.
+        _pendingFocus = ("[data-testid=code-rename-name]", true);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Enter renames, Escape dismisses (the same keyboard contract as the name prompt).</summary>
+    private async Task RenamePromptKeyDownAsync(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter")
+        {
+            await ConfirmRenameAsync();
+        }
+        else if (args.Key == "Escape")
+        {
+            _rename = null;
+        }
+    }
+
+    private async Task ConfirmRenameAsync()
+    {
+        if (_rename is not { } rename || string.IsNullOrWhiteSpace(_renameName))
+        {
+            return;
+        }
+
+        var newName = _renameName.Trim();
+        var result = await Writer.RenameAsync(rename.Path, newName);
+        if (!result.Succeeded)
+        {
+            _renameError = result.Error;
+            return;
+        }
+
+        _rename = null;
+        var parent = DirectoryOf(rename.Path);
+        var newPath = parent.Length == 0 ? newName : $"{parent}/{newName}";
+        await RemapAfterRenameAsync(rename.Path, newPath, rename.IsDirectory);
+        _lastFileOp = new LastFileOp(
+            $"rename {newName} back to {FileNameOf(rename.Path)}",
+            () => UndoRenameAsync(newPath, rename.Path, rename.IsDirectory));
+        await RefreshTreeAsync();
+        StateHasChanged();
+    }
+
+    /// <summary>Reverses a rename: the file (or folder) goes back to its previous name, buffers follow.</summary>
+    private async Task<string?> UndoRenameAsync(string currentPath, string originalPath, bool isDirectory)
+    {
+        var result = await Writer.RenameAsync(currentPath, FileNameOf(originalPath));
+        if (!result.Succeeded)
+        {
+            return result.Error;
+        }
+
+        await RemapAfterRenameAsync(currentPath, originalPath, isDirectory);
+        return null;
+    }
+
+    private async Task UndoLastFileOpAsync()
+    {
+        if (_lastFileOp is not { } op)
+        {
+            return;
+        }
+
+        _lastFileOp = null; // one level deep, and never retried against a changed tree
+        var error = await op.UndoAsync();
+        Notifications.Add(
+            error is null ? $"Undone: {op.Label}." : $"Undo failed: {error}",
+            error is null ? NotificationSeverity.Success : NotificationSeverity.Error);
+        await RefreshTreeAsync();
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Carry every open tab under a renamed path over to its new identity: the Monaco model re-keys
+    /// client-side (content, dirty state, and hot-exit backup survive), and the server-side dirty /
+    /// timestamp / alert tracking moves with it. The tree's expansion state follows for folders.
+    /// </summary>
+    private async Task RemapAfterRenameAsync(string oldPath, string newPath, bool isDirectory)
+    {
+        if (isDirectory)
+        {
+            var oldPrefix = oldPath + "/";
+            foreach (var key in _expanded.Where(p => p == oldPath || p.StartsWith(oldPrefix, StringComparison.Ordinal)).ToList())
+            {
+                _expanded.Remove(key);
+                _expanded.Add(newPath + key[oldPath.Length..]);
+            }
+
+            // Cached child listings hold stale RelativePaths; drop them and let expansion re-load.
+            foreach (var key in _childrenCache.Keys.Where(p => p == oldPath || p.StartsWith(oldPrefix, StringComparison.Ordinal)).ToList())
+            {
+                _childrenCache.Remove(key);
+            }
+        }
+
+        var activeBefore = Workspace.ActivePath;
+        foreach (var file in Workspace.Open.ToList())
+        {
+            string? mapped = null;
+            if (!isDirectory && file.Path == oldPath)
+            {
+                mapped = newPath;
+            }
+            else if (isDirectory && file.Path.StartsWith(oldPath + "/", StringComparison.Ordinal))
+            {
+                mapped = newPath + file.Path[oldPath.Length..];
+            }
+
+            if (mapped is null)
+            {
+                continue;
+            }
+
+            await JS.InvokeVoidAsync("fravashiCode.rename", file.Path, mapped);
+            MoveFileState(file.Path, mapped);
+            Workspace.Remap(file.Path, mapped, FileNameOf(mapped));
+        }
+
+        _pendingPersist = true;
+        if (activeBefore is not null && Workspace.ActivePath is { } active && active != activeBefore)
+        {
+            Nav.NavigateTo($"/code/{active}", replace: true);
+        }
+    }
+
+    private void MoveFileState(string oldPath, string newPath)
+    {
+        if (_dirty.Remove(oldPath))
+        {
+            _dirty.Add(newPath);
+        }
+
+        if (_forceSave.Remove(oldPath))
+        {
+            _forceSave.Add(newPath);
+        }
+
+        if (_known.Remove(oldPath, out var stamp))
+        {
+            _known[newPath] = stamp;
+        }
+
+        if (_alerts.Remove(oldPath, out var alert))
+        {
+            _alerts[newPath] = alert;
+        }
+    }
+
+    private Task OpenDeleteConfirm(RepositoryNode node)
+    {
+        _deleteTarget = new DeleteTarget(node.RelativePath, node.IsDirectory);
+        return Task.CompletedTask;
+    }
+
+    private IReadOnlyList<string> OpenTabsUnder(string path) =>
+        Workspace.Open.Select(f => f.Path)
+            .Where(p => p == path || p.StartsWith(path + "/", StringComparison.Ordinal))
+            .ToList();
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (_deleteTarget is not { } target)
+        {
+            return;
+        }
+
+        _deleteTarget = null;
+        var result = await Trash.DeleteToTrashAsync([target.Path]);
+        if (!result.Succeeded)
+        {
+            Notifications.Add(result.Error ?? $"Deleting {target.Path} failed.", NotificationSeverity.Error);
+            StateHasChanged();
+            return;
+        }
+
+        // The zip holds the on-disk content; buffer state is discarded so the closes never prompt.
+        var affected = OpenTabsUnder(target.Path);
+        foreach (var path in affected)
+        {
+            ForgetFileState(path);
+        }
+
+        await ApplyTabOperationAsync(() =>
+        {
+            foreach (var path in affected)
+            {
+                Workspace.Close(path);
+            }
+        });
+
+        if (target.IsDirectory)
+        {
+            var prefix = target.Path + "/";
+            _expanded.RemoveWhere(p => p == target.Path || p.StartsWith(prefix, StringComparison.Ordinal));
+            foreach (var key in _childrenCache.Keys.Where(p => p == target.Path || p.StartsWith(prefix, StringComparison.Ordinal)).ToList())
+            {
+                _childrenCache.Remove(key);
+            }
+        }
+
+        if (result.ZipFileName is { } zipName)
+        {
+            _lastFileOp = new LastFileOp(
+                $"restore {target.Path} from trash",
+                async () => (await Trash.RestoreAsync(zipName)) is { Succeeded: false } restore ? restore.Error : null);
+        }
+
+        Notifications.Add($"{target.Path} moved to trash ({result.ZipFileName}).", NotificationSeverity.Info);
+        await RefreshTreeAsync();
+        StateHasChanged();
+    }
+
+    // ---- Search section header actions ----
+
+    private async Task ToggleSearchViewAsync()
+    {
+        if (_searchPanel is not null)
+        {
+            await _searchPanel.ToggleViewAsync();
+            StateHasChanged(); // the header icon flips with the mode
+        }
+    }
+
+    private void ResetSearch() => _searchPanel?.Reset();
+
+    private void CloseSearch()
+    {
+        _searchPanel?.Reset();
+        _searchSection?.Collapse();
+    }
+
+    // ---- Hotkeys (bound in codeEditor.js at document level so the browser never sees them) ----
+
+    [JSInvokable]
+    public async Task HotkeyCycleTab(int direction)
+    {
+        if (Workspace.Cycle(direction) is { } next && next != Workspace.ActivePath)
+        {
+            await InvokeAsync(() => Nav.NavigateTo($"/code/{next}"));
+        }
+    }
+
+    [JSInvokable]
+    public async Task HotkeyCloseActiveTab()
+    {
+        if (Workspace.ActivePath is { } active)
+        {
+            await InvokeAsync(() => CloseAsync(active));
+        }
+    }
+
+    [JSInvokable]
+    public async Task HotkeySwitcherStep(int direction)
+    {
+        var count = Workspace.RecentFirst.Count;
+        if (count < 2)
+        {
+            return;
+        }
+
+        if (!_switcherOpen)
+        {
+            _switcherOpen = true;
+            _switcherIndex = 0;
+        }
+
+        _switcherIndex = ((_switcherIndex + direction) % count + count) % count;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    [JSInvokable]
+    public async Task HotkeySwitcherCommit()
+    {
+        if (!_switcherOpen)
+        {
+            return;
+        }
+
+        _switcherOpen = false;
+        var list = Workspace.RecentFirst;
+        var target = _switcherIndex >= 0 && _switcherIndex < list.Count ? list[_switcherIndex] : null;
+        await InvokeAsync(() =>
+        {
+            if (target is not null && target.Path != Workspace.ActivePath)
+            {
+                Nav.NavigateTo($"/code/{target.Path}");
+            }
+
+            StateHasChanged();
+        });
+    }
+
+    [JSInvokable]
+    public async Task HotkeySwitcherCancel()
+    {
+        if (_switcherOpen)
+        {
+            _switcherOpen = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    // ---- Pasting an image into a markdown buffer (backlog 26) ----
+
+    /// <summary>
+    /// codeEditor.js caught an image pasted into a markdown buffer and holds its bytes under <paramref name="id"/>.
+    /// The image is pulled as a stream (never through invokeMethodAsync's 32 KB cap), saved beside the file
+    /// through the root-bounded writer, and its relative link replaces the selection the paste was made on.
+    /// Nothing happens to the buffer when the save fails: the reader is told why instead.
+    /// </summary>
+    [JSInvokable]
+    public async Task EditorImagePasted(string path, string id, long size)
+    {
+        if (!MarkdownImagePaster.IsMarkdown(path))
+        {
+            await ForgetPastedImageAsync(id);
+            return;
+        }
+
+        if (size > MarkdownImagePaster.MaxBytes)
+        {
+            await ForgetPastedImageAsync(id);
+            await InvokeAsync(() => Notifications.Add("The pasted image is larger than 25 MB.", NotificationSeverity.Warning));
+            return;
+        }
+
+        byte[] bytes;
+        try
+        {
+            await using var reference = await JS.InvokeAsync<IJSStreamReference?>("fravashiImagePaste.take", id);
+            if (reference is null)
+            {
+                await ForgetPastedImageAsync(id);
+                return;
+            }
+
+            await using var stream = await reference.OpenReadStreamAsync(maxAllowedSize: MarkdownImagePaster.MaxBytes);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+            bytes = buffer.ToArray();
+        }
+        catch (Exception ex) when (ex is JSException or IOException or InvalidOperationException)
+        {
+            Logger.LogWarning(ex, "Reading an image pasted into {Path} failed.", path);
+            await ForgetPastedImageAsync(id);
+            await InvokeAsync(() => Notifications.Add("The pasted image could not be read.", NotificationSeverity.Warning));
+            return;
+        }
+
+        var result = await new MarkdownImagePaster(Writer).PasteAsync(path, bytes);
+        await InvokeAsync(async () =>
+        {
+            if (!result.Succeeded)
+            {
+                await ForgetPastedImageAsync(id);
+                Notifications.Add(result.Error ?? "The pasted image could not be saved.", NotificationSeverity.Warning);
+                return;
+            }
+
+            await JS.InvokeAsync<bool>("fravashiCode.insertPastedImage", id, result.Markdown);
+            await RefreshTreeAsync();
+        });
+    }
+
+    private async Task ForgetPastedImageAsync(string id)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.forgetPastedImage", id);
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit is gone and the page's pending paste with it.
+        }
+    }
+
+    // ---- Editing, save, and external-change sync (phase 2, ADR 0016) ----
+
+    /// <summary>Client-side dirty transitions land here (Monaco content vs its last saved version).</summary>
+    [JSInvokable]
+    public Task SetDirty(string path, bool isDirty) => InvokeAsync(() =>
+    {
+        var changed = isDirty ? _dirty.Add(path) : _dirty.Remove(path);
+        if (isDirty)
+        {
+            // Work item #366: an edited preview tab is the person's now, so the next follow never replaces it.
+            Workspace.Promote(path);
+        }
+
+        if (changed)
+        {
+            StateHasChanged();
+        }
+    });
+
+    [JSInvokable]
+    public Task HotkeySave() => InvokeAsync(async () =>
+    {
+        if (Workspace.ActivePath is { } active)
+        {
+            await SaveAsync(active);
+        }
+    });
+
+    [JSInvokable]
+    public Task HotkeySaveAll() => InvokeAsync(SaveAllAsync);
+
+    /// <summary>
+    /// The cursor settled on a line (debounced client-side): ask git blame who changed it last and
+    /// surface the answer inline in the editor plus as clickable chips in the breadcrumb row.
+    /// </summary>
+    [JSInvokable]
+    public Task CursorLineChanged(string path, int line) => InvokeAsync(async () =>
+    {
+        if (!Git.IsAvailable)
+        {
+            return;
+        }
+
+        GitLineBlame? info;
+        try
+        {
+            info = await Git.GetLineBlameAsync(path, line);
+        }
+        catch (InvalidOperationException)
+        {
+            return; // outside the repository or blame failed; no chrome for this line
+        }
+
+        _blame = (path, line, info);
+        var text = info is null
+            ? "You, not committed yet"
+            : $"{info.Author}, {Relative(info.When)} · {info.Subject}";
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.showLineBlame", path, line, text);
+        }
+        catch (JSException)
+        {
+            // The buffer moved on; the next cursor stop retries.
+        }
+
+        StateHasChanged();
+    });
+
+    private string Relative(DateTimeOffset when) =>
+        Fravashi.Web.Services.RelativeTime.Since(when, Clock.GetUtcNow(), zone: PersonTimeZone.Of(ServiceLookup)?.Zone);
+
+    private async Task SaveAllAsync()
+    {
+        foreach (var path in _dirty.Union(_forceSave).ToList())
+        {
+            await SaveAsync(path);
+        }
+    }
+
+    /// <summary>
+    /// Persist a buffer: stream the model's bytes from the client (no 32 KB SignalR cap) and write
+    /// through the root-bounded writer with a timestamp conflict check. A force-marked file (the user
+    /// chose Overwrite / Keep-my-copy on the conflict banner) writes unconditionally.
+    /// </summary>
+    private async Task SaveAsync(string path)
+    {
+        var force = _forceSave.Contains(path);
+        if (!force && !_dirty.Contains(path))
+        {
+            return;
+        }
+
+        IJSStreamReference? content;
+        try
+        {
+            content = await JS.InvokeAsync<IJSStreamReference?>("fravashiCode.getContent", path);
+        }
+        catch (JSException)
+        {
+            content = null;
+        }
+
+        if (content is null)
+        {
+            return;
+        }
+
+        await using (content)
+        {
+            await using var stream = await content.OpenReadStreamAsync(maxAllowedSize: 32L * 1024 * 1024);
+            var expected = !force && _known.TryGetValue(path, out var known) ? known : (DateTimeOffset?)null;
+            var result = await Writer.SaveFileAsync(path, stream, expected);
+            if (result.Conflict)
+            {
+                _alerts[path] = FileAlert.ChangedOnDisk;
+            }
+            else if (!result.Succeeded)
+            {
+                Notifications.Add(result.Error ?? $"Saving {path} failed.", NotificationSeverity.Error);
+            }
+            else
+            {
+                if (result.LastWriteUtc is { } written)
+                {
+                    _known[path] = written;
+                }
+
+                _dirty.Remove(path);
+                _forceSave.Remove(path);
+                _alerts.Remove(path);
+                await JS.InvokeVoidAsync("fravashiCode.markSaved", path, result.LastWriteUtc?.ToString("O"));
+            }
+        }
+
+        StateHasChanged();
+    }
+
+    private void OnRepositoryChanged(RepositoryChange change)
+    {
+        _ = InvokeAsync(async () =>
+        {
+            try
+            {
+                await HandleRepositoryChangeAsync(change);
+            }
+            catch (JSDisconnectedException)
+            {
+                // Circuit going away; the next circuit re-reads from disk anyway.
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Handling a repository change for {Path} failed.", change.RelativePath);
+            }
+        });
+    }
+
+    private async Task HandleRepositoryChangeAsync(RepositoryChange change)
+    {
+        // Empty path = anything may have changed: a watcher overflowed, or the bridge's stream came back after a gap in
+        // which the bridge kept nothing (backlog 257). Refresh the tree, and check every open buffer against its file by
+        // the same rules as one external edit (ADR 0016): a clean one reloads, an unsaved one gets the banner and is
+        // never replaced. The bridge subscriber sends this at most once per 30 s.
+        if (change.RelativePath.Length == 0)
+        {
+            QueueTreeRefresh();
+            await LookAgainAtOpenBuffersAsync();
+            return;
+        }
+
+        var path = change.RelativePath;
+        var parent = DirectoryOf(path);
+        if (parent.Length == 0 || _expanded.Contains(parent))
+        {
+            QueueTreeRefresh();
+        }
+
+        if (Workspace.Open.All(f => f.Path != path))
+        {
+            // Work item #366: a file the agent was shown creating has appeared on the host.
+            await OpenLandedNewFileAsync(path, change.Kind);
+            return;
+        }
+
+        await CheckOpenFileAsync(path, change.Kind);
+    }
+
+    /// <summary>Checks every loaded open buffer against its file, by the rules of one external edit (ADR 0016).</summary>
+    private async Task LookAgainAtOpenBuffersAsync()
+    {
+        // A tab with no known disk stamp was never loaded in this circuit: nothing is based on the disk yet, and it is
+        // compared when activated (OpenFromPathAsync).
+        foreach (var open in Workspace.Open.Select(f => f.Path).Where(_known.ContainsKey).ToList())
+        {
+            await CheckOpenFileAsync(open, RepositoryChangeKind.ChangedOrCreated);
+        }
+    }
+
+    /// <summary>
+    /// The window connected again (backlog 264). A reload sent while it was away was never delivered (Blazor Server does
+    /// not replay a JavaScript call to a reconnected window, measured on v0.9.69), and its buffer's disk stamp was left as it was, so looking again
+    /// finds that file changed and sends it now. A buffer already in step sends nothing.
+    /// </summary>
+    private void OnReconnected()
+    {
+        RunLookAgain("after the window connected again");
+
+        // Work item #366: a diff or a highlight pushed while the window was away was never delivered either.
+        FollowReconnected();
+    }
+
+    private void RunLookAgain(string reason)
+    {
+        _ = InvokeAsync(async () =>
+        {
+            try
+            {
+                await LookAgainAtOpenBuffersAsync();
+            }
+            catch (JSDisconnectedException)
+            {
+                // Circuit going away; the next circuit re-reads from disk anyway.
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Checking the open buffers {Reason} failed.", reason);
+            }
+        });
+    }
+
+    /// <summary>How long the window has to confirm a reload before it counts as not delivered (backlog 264).</summary>
+    internal static readonly TimeSpan ApplyTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Sends a file's new text to its editor buffer; false when the window did not confirm it within
+    /// <see cref="ApplyTimeout"/> (Blazor's own bound is one minute, which is what the look-again waited on v0.9.69). The
+    /// caller then leaves the buffer's disk stamp alone, so the next look finds the file changed again. That next look is
+    /// the reconnection's when the window is known to be away, or one scheduled here when it is not (the server notices a
+    /// dead connection only later, or the window is slow).
+    /// </summary>
+    private async Task<bool> TryApplyExternalContentAsync(string path, string content, string? stamp)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.applyExternalContent", ApplyTimeout, path, content, stamp);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected while the window is disconnected: one line, no stack trace.
+            Logger.LogInformation(
+                "The window did not confirm the reload of {Path} within {Seconds} s; it is sent again when the window is reachable.",
+                path, ApplyTimeout.TotalSeconds);
+            if (Connection.IsUp)
+            {
+                QueueLookAgain();
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>One delayed look-again at a time, for a reload that failed while the connection was reported up.</summary>
+    private void QueueLookAgain()
+    {
+        if (_lookAgainQueued)
+        {
+            return;
+        }
+
+        _lookAgainQueued = true;
+        _ = InvokeAsync(async () =>
+        {
+            await Task.Delay(ApplyTimeout);
+            _lookAgainQueued = false;
+            if (!_disposed)
+            {
+                RunLookAgain("after a reload was not confirmed");
+            }
+        });
+    }
+
+    /// <summary>Brings one open buffer in step with its file on disk, or raises the banner when it cannot (ADR 0016).</summary>
+    private async Task CheckOpenFileAsync(string path, RepositoryChangeKind kind)
+    {
+        if (kind == RepositoryChangeKind.Deleted)
+        {
+            if (await DropMissingPreviewAsync(path, _previewActive))
+            {
+                StateHasChanged(); // work item #371: a deleted file's preview tab closes itself
+                return;
+            }
+
+            _known.Remove(path);
+            _alerts[path] = FileAlert.DeletedOnDisk;
+            StateHasChanged();
+            return;
+        }
+
+        // An open image re-renders directly; text goes through the clean/dirty split.
+        if (ImageMimeTypes.ContainsKey(System.IO.Path.GetExtension(path)))
+        {
+            if (path == Workspace.ActivePath)
+            {
+                await OpenFromPathAsync(path);
+                StateHasChanged();
+            }
+
+            return;
+        }
+
+        var file = await Reader.ReadFileAsync(path);
+        if (file is null)
+        {
+            if (await DropMissingPreviewAsync(path, _previewActive))
+            {
+                StateHasChanged(); // work item #371: a deleted file's preview tab closes itself
+                return;
+            }
+
+            _alerts[path] = FileAlert.DeletedOnDisk;
+            StateHasChanged();
+            return;
+        }
+
+        if (file.IsTruncated || (_known.TryGetValue(path, out var known) && file.LastWriteUtc == known))
+        {
+            return; // grew past the edit cap (leave the buffer alone), or our own write echoing back
+        }
+
+        if (IsUnsaved(path))
+        {
+            _alerts[path] = FileAlert.ChangedOnDisk;
+        }
+        else
+        {
+            if (!await TryApplyExternalContentAsync(path, file.Content, file.LastWriteUtc?.ToString("O")))
+            {
+                return; // not delivered: the stamp stays, so the next look-again sends it
+            }
+
+            if (file.LastWriteUtc is { } stamp)
+            {
+                _known[path] = stamp;
+            }
+
+            _alerts.Remove(path);
+            if (path == Workspace.ActivePath)
+            {
+                RefreshActiveText(file.Content);
+            }
+
+            // Work item #366: a change follow showed (or opened the file for) has landed on the host.
+            FollowedFileLanded(path, file.Content);
+        }
+
+        StateHasChanged();
+    }
+
+    /// <summary>Coalesce watcher bursts into one tree reload.</summary>
+    private void QueueTreeRefresh()
+    {
+        if (_treeRefreshQueued)
+        {
+            return;
+        }
+
+        _treeRefreshQueued = true;
+        _ = InvokeAsync(async () =>
+        {
+            try
+            {
+                await Task.Delay(400);
+                _treeRefreshQueued = false;
+                await RefreshTreeAsync();
+                StateHasChanged();
+            }
+            catch (Exception ex)
+            {
+                _treeRefreshQueued = false;
+                Logger.LogWarning(ex, "Refreshing the tree after a repository change failed.");
+            }
+        });
+    }
+
+    /// <summary>Keep the server-side copy of the active text (previews) in step with an external reload.</summary>
+    private void RefreshActiveText(string content)
+    {
+        if (_view.Kind != ViewKind.Text)
+        {
+            return;
+        }
+
+        _view = _view with { TextContent = _view.PreviewMode == PreviewMode.None ? null : content };
+        if (!_previewActive)
+        {
+            return;
+        }
+
+        if (_view.PreviewMode == PreviewMode.Markdown)
+        {
+            _previewHtml = MarkdownPreview.ToHtml(content);
+        }
+        else if (_view.PreviewMode == PreviewMode.Svg)
+        {
+            _previewDataUrl = "data:image/svg+xml;base64,"
+                + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(content));
+        }
+    }
+
+    private async Task ReloadFromDiskAsync(string path)
+    {
+        var file = await Reader.ReadFileAsync(path);
+        if (file is null)
+        {
+            _alerts[path] = FileAlert.DeletedOnDisk;
+            StateHasChanged();
+            return;
+        }
+
+        if (!await TryApplyExternalContentAsync(path, file.Content, file.LastWriteUtc?.ToString("O")))
+        {
+            return; // not delivered: the banner and the unsaved state stay, so the person can press it again
+        }
+
+        if (file.LastWriteUtc is { } stamp)
+        {
+            _known[path] = stamp;
+        }
+
+        _dirty.Remove(path);
+        _forceSave.Remove(path);
+        _alerts.Remove(path);
+        if (path == Workspace.ActivePath)
+        {
+            RefreshActiveText(file.Content);
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task OverwriteDiskAsync(string path)
+    {
+        _forceSave.Add(path);
+        await SaveAsync(path);
+    }
+
+    private Task KeepDeletedAsync(string path)
+    {
+        // The buffer becomes the only copy; the next save (forced) recreates the file on disk.
+        _alerts.Remove(path);
+        _forceSave.Add(path);
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    private async Task CloseAfterDeleteAsync(string path)
+    {
+        ForgetFileState(path);
+        await DoCloseAsync(path);
+    }
+
+    // ---- Search integration (phase 3, ADR 0015) ----
+
+    [JSInvokable]
+    public Task HotkeyOpenSearch() => InvokeAsync(async () =>
+    {
+        _searchSection?.Expand();
+        StateHasChanged();
+        await Task.Yield(); // let the expanded section render before focusing its input
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.focusElement", "[data-testid=code-search-query]", false);
+        }
+        catch (JSException)
+        {
+            // Focus is best-effort.
+        }
+    });
+
+    /// <summary>A search result was clicked: open the file, then select the match in the editor.</summary>
+    private async Task OpenMatchAsync(CodeSearchPanel.OpenMatchRequest request)
+    {
+        _pendingMatchReveal = (request.Path, request.Line, request.Column, request.Length);
+        if (Workspace.ActivePath == request.Path)
+        {
+            // Already active: no navigation happens, reveal directly.
+            await JS.InvokeVoidAsync("fravashiCode.revealMatch", request.Path, request.Line, request.Column, request.Length);
+            _pendingMatchReveal = null;
+            return;
+        }
+
+        await OpenFromPathAsync(request.Path);
+        Nav.NavigateTo($"/code/{request.Path}");
+        StateHasChanged();
+    }
+
+    /// <summary>Replace inside an open dirty buffer (the model is the truth; disk writes would clobber it).</summary>
+    private async Task<int> ReplaceInBufferAsync(CodeSearchPanel.BufferReplaceRequest request)
+    {
+        var replaced = await JS.InvokeAsync<int>(
+            "fravashiCode.replaceInBuffer",
+            request.Path, request.Pattern, request.IsRegex, request.CaseSensitive, request.WholeWord,
+            request.Replacement, request.Line ?? 0, request.Column ?? 0);
+        if (replaced > 0)
+        {
+            _dirty.Add(request.Path);
+            StateHasChanged();
+        }
+
+        return replaced;
+    }
+
+    // ---- Open / close / preview ----
+
+    private void NavigateToFile(string path)
+    {
+        // Work item #366: a tab, tree or editors-list click is the person switching files, which pauses follow.
+        NotePersonActivity();
+        Nav.NavigateTo($"/code/{path}");
+    }
+
+    /// <summary>Open a file (from the URL): read it fresh, classify text/image/binary, and stage the render.</summary>
+    private async Task OpenFromPathAsync(string path)
+    {
+        var name = path.Contains('/', StringComparison.Ordinal) ? path[(path.LastIndexOf('/') + 1)..] : path;
+        var extension = System.IO.Path.GetExtension(path);
+        // Backlog 265: two opens can be in flight at once (the first render's session restore and
+        // OnParametersSet both open a file), and each reads before it stages. The open requested LAST
+        // decides the view, so an earlier one that finishes later gives up rather than staging over it.
+        var ticket = ++_openSequence;
+        var wasPreviewActive = _previewActive;
+        _previewActive = false;
+        _blame = null; // the chip belongs to the previous buffer's cursor
+        await RevealInTreeAsync(path);
+        if (ticket != _openSequence || _disposed)
+        {
+            return;
+        }
+
+        if (ImageMimeTypes.TryGetValue(extension, out var mime))
+        {
+            var bytes = await Reader.ReadBytesAsync(path);
+            if (ticket != _openSequence || _disposed)
+            {
+                return;
+            }
+
+            if (bytes is null && await DropMissingPreviewAsync(path, wasPreviewActive))
+            {
+                return; // work item #371: a missing file's preview tab closes itself
+            }
+
+            _view = bytes is null
+                ? new ActiveView(ViewKind.Missing)
+                : new ActiveView(ViewKind.Image, $"data:{mime};base64,{Convert.ToBase64String(bytes)}");
+            OpenTab(path, name);
+            _pendingPersist = true;
+            return;
+        }
+
+        var file = await Reader.ReadFileAsync(path);
+        if (ticket != _openSequence || _disposed)
+        {
+            return;
+        }
+
+        if (file is null)
+        {
+            if (await DropMissingPreviewAsync(path, wasPreviewActive))
+            {
+                return; // work item #371: a missing file's preview tab closes itself
+            }
+
+            _view = new ActiveView(ViewKind.Missing);
+            OpenTab(path, name);
+            _pendingPersist = true;
+            return;
+        }
+
+        // Null bytes mean binary content ReadAllText already mangled, and a truncated read is a
+        // placeholder, not the file; neither must ever reach an editable buffer (a save would
+        // destroy the real content).
+        if (file.IsTruncated || file.Content.Contains('\0', StringComparison.Ordinal))
+        {
+            _view = new ActiveView(ViewKind.Binary);
+            OpenTab(path, name);
+            _pendingPersist = true;
+            return;
+        }
+
+        // Focus-time staleness check (ADR 0016): the watcher can miss events on exotic mounts, so
+        // compare the disk timestamp against the one the buffer is based on every activation.
+        if (file.LastWriteUtc is { } diskStamp)
+        {
+            if (_known.TryGetValue(path, out var basedOn) && basedOn != diskStamp)
+            {
+                if (IsUnsaved(path))
+                {
+                    _alerts[path] = FileAlert.ChangedOnDisk;
+                }
+                else
+                {
+                    _pendingStaleApply = (path, file.Content, diskStamp.ToString("O"));
+                    _known[path] = diskStamp;
+                    _alerts.Remove(path);
+                }
+            }
+            else if (!_known.ContainsKey(path))
+            {
+                _known[path] = diskStamp;
+            }
+        }
+
+        var previewMode = extension.ToLowerInvariant() switch
+        {
+            ".md" or ".markdown" => PreviewMode.Markdown,
+            ".svg" => PreviewMode.Svg,
+            _ => PreviewMode.None,
+        };
+        _view = new ActiveView(ViewKind.Text,
+            TextContent: previewMode == PreviewMode.None ? null : file.Content,
+            PreviewMode: previewMode);
+        OpenTab(path, name);
+        _pendingMonacoOpen = (path, file.Content, file.LastWriteUtc?.ToString("O"));
+        _pendingPersist = true;
+    }
+
+    /// <summary>
+    /// Expand every ancestor folder of <paramref name="path"/> (loading children as needed) so the
+    /// active file is visible in the tree even after Collapse All, VS Code's reveal behavior.
+    /// </summary>
+    private async Task RevealInTreeAsync(string path)
+    {
+        if (!Reader.IsConfigured || !path.Contains('/', StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var segments = path.Split('/');
+        var current = string.Empty;
+        for (var i = 0; i < segments.Length - 1; i++)
+        {
+            current = current.Length == 0 ? segments[i] : $"{current}/{segments[i]}";
+            _expanded.Add(current);
+            if (!_childrenCache.ContainsKey(current))
+            {
+                var loaded = await Reader.GetTreeAsync(current);
+                _childrenCache[current] = loaded.Children;
+            }
+        }
+    }
+
+    private void TogglePreview()
+    {
+        _previewActive = !_previewActive;
+        if (!_previewActive)
+        {
+            return;
+        }
+
+        if (_view.PreviewMode == PreviewMode.Markdown)
+        {
+            _previewHtml = MarkdownPreview.ToHtml(_view.TextContent);
+        }
+        else if (_view.PreviewMode == PreviewMode.Svg)
+        {
+            _previewDataUrl = "data:image/svg+xml;base64,"
+                + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(_view.TextContent ?? string.Empty));
+        }
+    }
+
+    private Task CloseAsync(string path)
+    {
+        if (IsUnsaved(path))
+        {
+            _pendingClose = new PendingClose([path], () => DoCloseAsync(path));
+            StateHasChanged();
+            return Task.CompletedTask;
+        }
+
+        return DoCloseAsync(path);
+    }
+
+    private async Task DoCloseAsync(string path)
+    {
+        var wasActive = Workspace.ActivePath == path;
+        Workspace.Close(path);
+        await JS.InvokeVoidAsync("fravashiCode.close", path);
+        ForgetFileState(path);
+        _pendingPersist = true;
+        if (!wasActive)
+        {
+            return;
+        }
+
+        if (Workspace.ActivePath is { } next)
+        {
+            // Load the neighbor directly: OnParametersSet skips it (it is already the active path).
+            await OpenFromPathAsync(next);
+            Nav.NavigateTo($"/code/{next}");
+        }
+        else
+        {
+            _view = new ActiveView(ViewKind.None);
+            Nav.NavigateTo("/code");
+        }
+    }
+
+    private async Task ScrollTabsAsync(ElementReference row, int direction)
+    {
+        await JS.InvokeVoidAsync("fravashiCode.scrollTabs", row, direction);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _selfRef = DotNetObjectReference.Create(this);
+            await JS.InvokeVoidAsync("fravashiCode.bindHotkeys", _selfRef);
+            await RestoreSessionAsync();
+        }
+
+        // Item #373 (the v0.9.100 check): a page left while its first render was still restoring (the window moved to
+        // the setup) carries on in the background once its awaits return. The editor is ONE per window in codeEditor.js,
+        // so an abandoned page that went on to init and open would take the editor from the page now on screen, and
+        // its restore would navigate the window back to its file. Past this point it does nothing.
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (_pendingMonacoOpen is { } pending)
+        {
+            _pendingMonacoOpen = null;
+            if (!_editorInitialized)
+            {
+                await JS.InvokeVoidAsync("fravashiCode.init", _editorHost);
+                _editorInitialized = true;
+            }
+
+            // Work item #366: a file follow opens never takes focus (the person may be typing in the composer).
+            var opened = _openWithoutFocus.Remove(pending.Path)
+                ? await JS.InvokeAsync<BackupOpenResult?>(
+                    "fravashiCode.open", pending.Path, pending.Content, pending.Stamp, true)
+                : await JS.InvokeAsync<BackupOpenResult?>(
+                    "fravashiCode.open", pending.Path, pending.Content, pending.Stamp);
+            if (opened is { BackupApplied: true })
+            {
+                // Hot exit restored unsaved edits into this buffer. The buffer is based on the disk
+                // state recorded at backup time; if the file moved on since, surface the conflict
+                // banner instead of letting a save clobber the newer disk content.
+                _dirty.Add(pending.Path);
+                if (DateTimeOffset.TryParse(opened.BaseStamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out var basedOn))
+                {
+                    _known[pending.Path] = basedOn;
+                    if (pending.Stamp is { } diskStampText
+                        && DateTimeOffset.TryParse(diskStampText, null, System.Globalization.DateTimeStyles.RoundtripKind, out var diskStamp)
+                        && diskStamp != basedOn)
+                    {
+                        _alerts[pending.Path] = FileAlert.ChangedOnDisk;
+                    }
+                }
+
+                StateHasChanged();
+            }
+
+            if (_pendingStaleApply is { } stale)
+            {
+                // The disk moved on while this tab was inactive and the buffer is clean: sync it now.
+                _pendingStaleApply = null;
+                await JS.InvokeVoidAsync("fravashiCode.applyExternalContent", stale.Path, stale.Content, stale.Stamp);
+            }
+
+            if (_pendingMatchReveal is { } reveal && reveal.Path == pending.Path)
+            {
+                _pendingMatchReveal = null;
+                await JS.InvokeVoidAsync("fravashiCode.revealMatch", reveal.Path, reveal.Line, reveal.Column, reveal.Length);
+            }
+        }
+
+        // Work item #366: what following the agent still has to push to the editor (bounded, re-sent on reconnect).
+        await PushFollowAsync();
+
+        if (_pendingFocus is { } focus)
+        {
+            // A modal box just appeared: focus it now that it exists in the DOM (backlog 27).
+            _pendingFocus = null;
+            try
+            {
+                await JS.InvokeVoidAsync("fravashiCode.focusElement", focus.Selector, focus.SelectAll);
+            }
+            catch (JSException)
+            {
+                // Focus is best-effort.
+            }
+        }
+
+        if (_pendingPersist)
+        {
+            _pendingPersist = false;
+            await PersistSessionAsync();
+        }
+
+        // Section sizing (defaults: search 50%, open editors 30%, tree the rest; user drags win) is
+        // re-applied after every render since expand/collapse changes the visible set.
+        await JS.InvokeVoidAsync("fravashiSections.apply", "[data-testid=code-sidebar]", "fravashi-sections-code",
+            new Dictionary<string, double> { ["code-open-editors"] = 30, ["code-search"] = 50 });
+
+        // Tab rows re-render on every tab change; re-evaluate their overflow state each time, and
+        // bring a newly activated tab into view when its row is scrolled.
+        await JS.InvokeVoidAsync("fravashiCode.updateTabStrips");
+        if (Workspace.ActivePath is { } activeTab && activeTab != _lastRevealedTab)
+        {
+            _lastRevealedTab = activeTab;
+            await JS.InvokeVoidAsync("fravashiCode.revealActiveTab");
+            await JS.InvokeVoidAsync("fravashiCode.revealTreeSelection");
+        }
+    }
+
+    /// <summary>Rehydrate the tab session from localStorage (refresh survival, VS Code style).</summary>
+    private async Task RestoreSessionAsync()
+    {
+        if (_restoreAttempted)
+        {
+            return;
+        }
+
+        _restoreAttempted = true;
+        if (!Reader.IsConfigured)
+        {
+            return;
+        }
+
+        try
+        {
+            // Plan 2b-ii: sessions and hot-exit backups are per workspace (one origin serves
+            // several windows now). Must be set before loadWorkspace/listBackups.
+            await JS.InvokeVoidAsync("fravashiCode.setWorkspaceScope", Selection.WorkspaceId ?? "local");
+            var json = await JS.InvokeAsync<string?>("fravashiCode.loadWorkspace");
+            if (!string.IsNullOrWhiteSpace(json))
+            {
+                var saved = JsonSerializer.Deserialize<SavedSession>(json);
+                if (saved?.Open is { Count: > 0 } open)
+                {
+                    Workspace.Hydrate(
+                        open.Select(f => new CodeWorkspace.OpenFile(f.P ?? string.Empty, f.N ?? string.Empty, f.Pi == true)).ToList(),
+                        saved.Active);
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // A corrupt saved session is not worth failing the page over; start clean.
+        }
+
+        // Hot exit (ADR 0016 addendum): tabs whose unsaved buffers survived the last session come back
+        // dirty immediately (their content applies lazily when each tab is opened; Save All can persist
+        // them straight from the backup). The recorded base timestamp seeds the conflict tracking so a
+        // file that moved on while the app was closed still hits the banner, never a silent overwrite.
+        try
+        {
+            var backups = await JS.InvokeAsync<BackupEntry[]?>("fravashiCode.listBackups") ?? [];
+            foreach (var backup in backups)
+            {
+                if (Workspace.Open.All(f => f.Path != backup.Path))
+                {
+                    // The tab was closed after the backup was written (rare crash-window orphan).
+                    await JS.InvokeVoidAsync("fravashiCode.clearBackup", backup.Path);
+                    continue;
+                }
+
+                _dirty.Add(backup.Path);
+                if (DateTimeOffset.TryParse(backup.BaseStamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out var basedOn))
+                {
+                    _known[backup.Path] = basedOn;
+                }
+            }
+        }
+        catch (JSException)
+        {
+            // No backups restorable; the session still opens with disk content.
+        }
+
+        if (_disposed)
+        {
+            return; // item #373: the page was left while it restored; see OnAfterRenderAsync
+        }
+
+        // The URL wins over the restored active tab; without one, surface the session's active file. Both
+        // load directly here because OnParametersSet skips a path that is already the active tab (page
+        // return and refresh both land in that case, with the Monaco models long gone). Backlog 265: this
+        // runs from the FIRST render, which comes before OnParametersSet whenever OnInitializedAsync awaits
+        // (the root listing goes to the bridge), so the route's file must be opened here by name. Opening
+        // the stored active tab instead put a second open in flight beside OnParametersSet's, and the
+        // one that finished last decided the editor.
+        if (!string.IsNullOrEmpty(FilePath))
+        {
+            if (_view.Kind == ViewKind.None || Workspace.ActivePath != FilePath)
+            {
+                await OpenFromPathAsync(FilePath);
+            }
+        }
+        else if (Workspace.ActivePath is { } active && _view.Kind == ViewKind.None)
+        {
+            await OpenFromPathAsync(active);
+            if (_disposed)
+            {
+                return; // item #373: never navigate the window from a page it has already left
+            }
+
+            Nav.NavigateTo($"/code/{active}", replace: true);
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task PersistSessionAsync()
+    {
+        var session = new SavedSession
+        {
+            Open = Workspace.Open.Select(f => new SavedFile { P = f.Path, N = f.Name, Pi = f.IsPinned ? true : null }).ToList(),
+            Active = Workspace.ActivePath,
+        };
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.saveWorkspace", JsonSerializer.Serialize(session));
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit gone mid-persist; the next page load restores whatever was last saved.
+        }
+    }
+
+    private sealed class SavedSession
+    {
+        public List<SavedFile>? Open { get; set; }
+        public string? Active { get; set; }
+    }
+
+    private sealed class SavedFile
+    {
+        public string? P { get; set; }
+        public string? N { get; set; }
+        public bool? Pi { get; set; }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        Workspace.Changed -= OnWorkspaceChanged;
+        AgentPanel.Changed -= OnAgentPanelChanged;
+        AgentPanel.Detach();
+        _changeSubscription?.Dispose();
+        Connection.Reconnected -= OnReconnected;
+        _disposed = true;
+        StopFollow();
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.unbindHotkeys");
+            // Work item #366: the follow diff's models go before dispose takes every model with it.
+            await JS.InvokeVoidAsync("fravashiCode.disposeDiff");
+            await JS.InvokeVoidAsync("fravashiCode.dispose");
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit already gone; nothing to clean client-side.
+        }
+        catch (InvalidOperationException)
+        {
+            // The PRERENDER instance disposing: it never had a JS runtime to clean up.
+        }
+        finally
+        {
+            _selfRef?.Dispose();
+        }
+    }
+
+    private static string DirectoryOf(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash <= 0 ? string.Empty : path[..slash];
+    }
+
+    private static string FileNameOf(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash < 0 ? path : path[(slash + 1)..];
+    }
+}

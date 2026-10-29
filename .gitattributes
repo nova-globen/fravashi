@@ -1,0 +1,9 @@
+# Shell scripts that run INSIDE the Linux container must stay LF: a CRLF shebang
+# (#!/bin/sh<CR>) makes exec fail with "No such file or directory" and the container
+# crash-loops (incident 2026-08-02, a Windows-side edit converted the entrypoint).
+*.sh text eol=lf
+.githooks/* text eol=lf
+# Same reason, one level up: a CI workflow's `run:` blocks ARE shell scripts, and the
+# Linux runner would execute them with a CR on the end of every line. This does not
+# depend on a developer's core.autocrlf, which is why it is stated here.
+.forgejo/workflows/* text eol=lf

@@ -1,0 +1,135 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using Fravashi.Application.Git
+@using Fravashi.Application.Persistence
+@using Fravashi.Infrastructure.Bridge
+@inherits InsightCard
+@inject IGitService Git
+@inject BridgeWorkspaceContext BridgeContext
+@inject IWorkspaceStore Workspaces
+@inject ILogger<RepositoryHealthCard> Logger
+
+@* Backlog 36, card 4. The OPEN workspace's repository, read through the same IGitService every other
+   git surface uses, which in a studio window is the bridge-backed runner against the host folder. It is
+   the one card bound to a workspace, so with no folder open it says that instead of showing the
+   numbers of whatever repository happened to be reachable. *@
+
+<section class="dash-panel insight-card" aria-label="Repository health" data-testid="insight-repo">
+    <div class="dash-panel-head">
+        <span>Repository health</span>
+        @if (_period is { Length: > 0 })
+        {
+            <span class="insight-period" data-testid="insight-repo-period">@_period</span>
+        }
+    </div>
+
+    @if (_unavailable is { Length: > 0 } reason)
+    {
+        <p class="studio-muted insight-empty" data-testid="insight-repo-unavailable">@reason</p>
+    }
+    else if (_recent == 0 && _month == 0)
+    {
+        <p class="studio-muted insight-empty" data-testid="insight-repo-empty">
+            Nothing yet: no commit in @_name in the last @MonthDays days.
+        </p>
+    }
+    else
+    {
+        <dl class="insight-figures" data-testid="insight-repo-figures">
+            <div class="insight-figure">
+                <dt>Commits, last @RecentDays days</dt>
+                <dd><span class="insight-value">@Number(_recent)</span></dd>
+            </div>
+            <div class="insight-figure">
+                <dt>Commits, last @MonthDays days</dt>
+                <dd><span class="insight-value">@MonthText</span></dd>
+            </div>
+            <div class="insight-figure">
+                <dt>Authors, last @MonthDays days</dt>
+                <dd><span class="insight-value">@Number(_authors)</span></dd>
+            </div>
+        </dl>
+        <p class="studio-muted insight-note" data-testid="insight-repo-name">
+            @_name, on @_branch.
+            @if (_capped)
+            {
+                <span>
+                    Counted over the @Number(CommitCap) most recent commits, which this period fills,
+                    so the @MonthDays day figure is a floor rather than a total.
+                </span>
+            }
+        </p>
+    }
+</section>
+
+@code {
+    /// <summary>The two windows the item decided on.</summary>
+    public const int RecentDays = 7;
+
+    public const int MonthDays = 30;
+
+    /// <summary>
+    /// How far back the log is read. It is the ceiling <c>GitCliService</c> already clamps to, so asking
+    /// for more would quietly return this many anyway; the card detects the cap rather than hiding it.
+    /// </summary>
+    public const int CommitCap = 500;
+
+    private string? _unavailable;
+    private string _name = "the open folder";
+    private string _branch = string.Empty;
+    private string _period = string.Empty;
+    private int _recent;
+    private int _month;
+    private int _authors;
+    private bool _capped;
+
+    private string MonthText => _capped ? Number(_month) + "+" : Number(_month);
+
+    protected override async Task LoadAsync()
+    {
+        _unavailable = null;
+        _capped = false;
+
+        var workspaceId = BridgeContext.ActiveWorkspaceId;
+        _name = workspaceId is { Length: > 0 } id
+            ? Workspaces.Get(id)?.Name ?? id
+            : "the open folder";
+
+        if (!Git.IsAvailable)
+        {
+            _period = string.Empty;
+            _unavailable = workspaceId is { Length: > 0 }
+                ? $"{_name} is open, but it is not a git repository, so there is nothing to report here."
+                : "No folder is open, so there is no repository to report on. Open one above.";
+            return;
+        }
+
+        var now = Clock.GetUtcNow();
+        _period = PeriodText(
+            DateOnly.FromDateTime(now.AddDays(-MonthDays).UtcDateTime),
+            DateOnly.FromDateTime(now.UtcDateTime));
+
+        try
+        {
+            _branch = await Git.GetCurrentBranchAsync();
+            var commits = await Git.GetCommitsAsync("HEAD", CommitCap);
+            var month = commits.Where(c => c.When >= now.AddDays(-MonthDays)).ToList();
+
+            _recent = commits.Count(c => c.When >= now.AddDays(-RecentDays));
+            _month = month.Count;
+            _authors = month.Select(c => c.Author.Trim())
+                .Where(author => author.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+
+            // Every commit the log returned is inside the window, so the window may well hold more that
+            // the cap cut off. Saying "412 commits" there would be a number the data cannot support.
+            _capped = commits.Count >= CommitCap && month.Count == commits.Count;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Reading the repository health figures failed.");
+            _unavailable = "The repository could not be read just now. If the folder is on a network "
+                + "drive or the studio window has gone away, that is the first thing to check.";
+        }
+    }
+}

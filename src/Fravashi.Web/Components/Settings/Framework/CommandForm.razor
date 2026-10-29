@@ -1,0 +1,180 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Create / edit a Command (UI11) - a Claude slash command. Name is the invocation (/name); frontmatter carries
+   description, an optional argument-hint, an optional allowed-tools grant, and an optional model; the body is
+   the prompt template. *@
+
+<div class="skill-form" data-testid="command-form">
+    <div class="skill-form-header">
+        <h2>@(IsEdit ? "Edit command" : "New command")</h2>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/commands" data-testid="command-form-cancel">Cancel</a>
+    </div>
+
+    @if (_saveError is not null)
+    {
+        <div class="studio-error" data-testid="command-form-error">@_saveError</div>
+    }
+
+    <div class="skill-form-grid">
+        <label class="skill-field">
+            <span class="skill-field-label">Name (kebab-case, unique - invoked as /name)</span>
+            <input class="studio-input" @bind="_name" @bind:event="oninput" placeholder="review-pr"
+                   data-testid="command-name" disabled="@IsEdit" />
+            <span class="ob-field-hint">Invoked as <code>/@(string.IsNullOrWhiteSpace(_name) ? "name" : _name)</code>. @(IsEdit ? "The name is fixed after creation." : string.Empty)</span>
+            @FieldError("name")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Description</span>
+            <input class="studio-input" @bind="_description" @bind:event="oninput"
+                   placeholder="Review the open pull request for correctness and style." data-testid="command-description" />
+            @FieldError("description")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Argument hint (optional)</span>
+            <input class="studio-input" @bind="_argumentHint" @bind:event="oninput"
+                   placeholder="[pr-number]" data-testid="command-arg-hint" />
+            <span class="ob-field-hint">Autocomplete hint for the expected arguments.</span>
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Allowed tools (optional, comma-separated)</span>
+            <input class="studio-input" @bind="_allowedToolsText" @bind:event="oninput"
+                   placeholder="Bash(git *), Read" data-testid="command-allowed-tools" />
+            <span class="ob-field-hint">A permission grant (Claude's rule syntax) while the command runs - not an availability allowlist.</span>
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Model (optional)</span>
+            <input class="studio-input" @bind="_model" @bind:event="oninput"
+                   placeholder="inherit" data-testid="command-model" />
+            <span class="ob-field-hint">A model alias, a full id, or <code>inherit</code>. Leave blank to omit.</span>
+        </label>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Prompt body (Markdown - supports $ARGUMENTS / $N)</span>
+            <textarea class="studio-input skill-textarea-lg" @bind="_body" @bind:event="oninput"
+                      data-testid="command-body"
+                      placeholder="Review the pull request $ARGUMENTS and summarise the risks."></textarea>
+            @FieldError("body")
+        </label>
+    </div>
+
+    <div class="skill-form-actions">
+        <button class="studio-btn" @onclick="Save" disabled="@_saving" data-testid="command-save">
+            @(_saving ? "Saving…" : IsEdit ? "Save changes" : "Create command")
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private bool IsEdit => !string.IsNullOrWhiteSpace(Id);
+
+    private string _name = string.Empty;
+    private string _description = string.Empty;
+    private string _argumentHint = string.Empty;
+    private string _allowedToolsText = string.Empty;
+    private string? _model;
+    private string _body = string.Empty;
+
+    private IReadOnlyList<SkillValidationError> _errors = [];
+    private string? _saveError;
+    private bool _saving;
+
+    protected override void OnInitialized()
+    {
+        if (IsEdit && Store.Get(Id!) is { } artifact)
+        {
+            var command = FrameworkPayload<CommandDefinition>.From(artifact);
+            _name = command.Name;
+            _description = command.Description;
+            _argumentHint = command.ArgumentHint;
+            _allowedToolsText = string.Join(", ", command.AllowedTools);
+            _model = command.Model;
+            _body = command.Body;
+        }
+    }
+
+    private CommandDefinition BuildDefinition() => new()
+    {
+        Name = _name.Trim(),
+        Description = _description.Trim(),
+        ArgumentHint = _argumentHint.Trim(),
+        AllowedTools = _allowedToolsText.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        Model = string.IsNullOrWhiteSpace(_model) ? null : _model.Trim(),
+        Body = _body,
+    };
+
+    private void Save()
+    {
+        _saveError = null;
+        var definition = BuildDefinition();
+        _errors = CommandValidation.Validate(definition);
+
+        var clash = Store.GetByName(FrameworkArtifactKind.Command, definition.Name);
+        if (clash is not null && clash.Id != Id)
+        {
+            _errors = [.. _errors, new SkillValidationError("name", $"A command named '{definition.Name}' already exists.")];
+        }
+
+        if (_errors.Count > 0)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var payload = FrameworkPayload<CommandDefinition>.Serialize(definition);
+            string artifactId;
+
+            if (IsEdit && Store.Get(Id!) is { } existing)
+            {
+                artifactId = existing.Id;
+                Store.Update(existing with { Name = definition.Name, PayloadJson = payload, UpdatedUtc = now });
+            }
+            else
+            {
+                artifactId = Guid.NewGuid().ToString("N");
+                Store.Add(new FrameworkArtifact(
+                    artifactId, FrameworkArtifactKind.Command, definition.Name, payload, now, now));
+            }
+
+            Nav.NavigateTo($"/settings/framework/commands/view/{artifactId}");
+        }
+        catch (DuplicateArtifactNameException ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private RenderFragment? FieldError(string field)
+    {
+        var error = _errors.FirstOrDefault(e => e.Field == field);
+        if (error is null)
+        {
+            return null;
+        }
+
+        return builder =>
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "skill-field-error");
+            builder.AddAttribute(2, "data-testid", $"command-error-{field}");
+            builder.AddContent(3, error.Message);
+            builder.CloseElement();
+        };
+    }
+}

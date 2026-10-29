@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+@* data-former-storage: the prefix of the browser-storage keys from before the internal rename, which bootstrap.js copies
+   to their new names once (the bridge release, Fravashi.Domain.FormerNames; the cleanup release removes the attribute). *@
+<html lang="en" data-former-storage="@Fravashi.Domain.FormerNames.BrowserStoragePrefix">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <title>@(ProductName.Short)</title>
+    <link rel="icon" href="favicon.ico" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="brand/favicon.svg" />
+    @* The no-flash theme, sidebar width and window-host bootstrap. A file, not an inline script, since backlog 287:
+       the Content-Security-Policy (Services/StudioContentSecurityPolicy.cs) runs script files from 'self' only.
+       Synchronous and ahead of the stylesheets, so it still runs before first paint. *@
+    <script src="bootstrap.js"></script>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="studio.css" />
+    <link rel="stylesheet" href="Fravashi.Web.styles.css" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+
+<body>
+    <Routes @rendermode="InteractiveServer" />
+    <script src="_content/Microsoft.FluentUI.AspNetCore.Components/Microsoft.FluentUI.AspNetCore.Components.lib.module.js" type="module" async></script>
+    <script src="pageSplit.js"></script>
+    <script src="homeLayout.js"></script>
+    <script src="codeEditor.js"></script>
+    <script src="scratchpad.js"></script>
+    <script src="sections.js"></script>
+    <script src="sessionScroll.js"></script>
+    <script src="wikiPage.js"></script>
+    <script src="sessionCopy.js"></script>
+    <script src="mockupOutline.js"></script>
+    <script src="prototypeEdit.js"></script>
+    <script src="imagePaste.js"></script>
+    <script src="browserPane.js"></script>
+    <script src="windowShell.js"></script>
+    <script src="localTime.js"></script>
+    @* autostart off: reconnect.js starts Blazor with the studio's own reconnection handler, so the
+       stock reconnect/resume dialog never appears in the studio window (directive 2026-07-26). *@
+    <script src="_framework/blazor.web.js" autostart="false"></script>
+    <script src="reconnect.js"></script>
+</body>
+
+</html>

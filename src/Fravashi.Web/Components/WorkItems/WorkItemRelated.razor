@@ -1,0 +1,218 @@
+@namespace Fravashi.Web.Components.WorkItems
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Domain.WorkItems.AgentLayer
+@using Fravashi.Web.Components.Sessions
+@using Fravashi.Web.Components.Shell
+
+@* Requested 2026-10-22 (related items sidebar): everything an item is related to, in one column beside the item
+   instead of at the bottom under a long description, where it was easy to miss. Each entry is a real link to where
+   the related thing lives. Every relation kind the link model has gets its own group, read from THIS item
+   (WorkItemLink.ReadingFrom), plus the hierarchy (parent and children), the wiki documents on either side of the
+   item, the linked conversations and the recorded evidence. Commits are not listed: the studio keeps no index of
+   which commits name an item, and asking git on every render is not a price this page pays. *@
+<aside class="work-item-related" aria-label="Related items" data-testid="work-item-related">
+    <h3 class="work-item-related-title">Related</h3>
+
+    @if (IsEmpty)
+    {
+        <div class="work-item-empty work-item-related-empty" data-testid="work-item-related-empty">
+            Nothing is related to this item yet: no linked items, no plan or wiki document, no conversation and no
+            recorded evidence.
+        </div>
+    }
+
+    @foreach (var group in LinkGroups)
+    {
+        <PageSidebarSection Title="@group.Heading" TestId="@($"work-item-related-{StableNames.ToName(group.Reading)}")">
+            <ul class="work-item-related-list">
+                @foreach (var other in group.Others)
+                {
+                    <li class="work-item-related-row">@ItemRow(other)</li>
+                }
+            </ul>
+        </PageSidebarSection>
+    }
+
+    @if (Item.Parent is { } parent)
+    {
+        <PageSidebarSection Title="Parent" TestId="work-item-related-parent">
+            <ul class="work-item-related-list">
+                <li class="work-item-related-row">@ItemRow(parent)</li>
+            </ul>
+        </PageSidebarSection>
+    }
+
+    @if (Children.Count > 0)
+    {
+        <PageSidebarSection Title="@($"Children ({Children.Count})")" TestId="work-item-related-children">
+            <ul class="work-item-related-list">
+                @foreach (var child in Children)
+                {
+                    <li class="work-item-related-row">@ItemRow(child.Id)</li>
+                }
+            </ul>
+        </PageSidebarSection>
+    }
+
+    @if (Wiki.Count > 0)
+    {
+        <PageSidebarSection Title="Plan and wiki" TestId="work-item-related-wiki">
+            <ul class="work-item-related-list">
+                @foreach (var document in Wiki)
+                {
+                    <li class="work-item-related-row @(document.IsPlan ? "plan" : string.Empty)">
+                        @if (document.Exists)
+                        {
+                            <a class="work-item-related-link" data-testid="work-item-related-wiki-item"
+                               href="@($"/wiki/{document.Number}")">@("@" + document.Number) @document.Title</a>
+                        }
+                        else
+                        {
+                            <span class="work-item-related-gone" data-testid="work-item-related-wiki-item"
+                                  title="This project has no wiki document with that number.">@("@" + document.Number) @document.Title</span>
+                        }
+                        <span class="work-item-related-note" data-testid="work-item-related-wiki-relation">@document.Relation</span>
+                    </li>
+                }
+            </ul>
+        </PageSidebarSection>
+    }
+
+    @if (Attention is { Sessions.Count: > 0 } attention)
+    {
+        @* Backlog 244: the operator's attention per linked conversation and rolled up, the same line the session pane
+           and the session_attention tool show. Every conversation linked to the item now; one that unlinked itself or
+           was deleted is not counted. *@
+        <PageSidebarSection Title="@($"Conversations ({attention.Sessions.Count})")" TestId="work-item-sessions">
+            <SessionAttentionLine Attention="attention.Total" Label="All" TestId="work-item-attention-total" />
+            <ul class="work-item-related-list">
+                @foreach (var linked in attention.Sessions)
+                {
+                    <li class="work-item-related-row" data-testid="work-item-session">
+                        <a class="work-item-related-link work-item-session-title" data-testid="work-item-session-link"
+                           href="@($"/sessions/{linked.Session.Value:D}")">@SessionTitle(linked.Session)</a>
+                        <SessionAttentionLine Attention="linked.Attention" Label="@null" TestId="work-item-session-attention" />
+                    </li>
+                }
+            </ul>
+        </PageSidebarSection>
+    }
+
+    @if (Evidence.Count > 0)
+    {
+        @* The full record (a design check's text and pictures included) stays in the item's Evidence section, which
+           is too wide for this column; each entry here jumps to it. *@
+        <PageSidebarSection Title="@($"Evidence ({Evidence.Count})")" TestId="work-item-related-evidence">
+            <ul class="work-item-related-list">
+                @foreach (var record in Evidence)
+                {
+                    <li class="work-item-related-row">
+                        <a class="work-item-related-link" data-testid="work-item-related-evidence-entry"
+                           href="@($"/workitems/{Item.Number}#{EvidenceAnchor(record)}")">@record.Summary</a>
+                        <span class="work-item-related-note evidence-@StableNames.ToName(record.Result)">
+                            @StableNames.ToName(record.Kind), @StableNames.ToName(record.Result)
+                        </span>
+                    </li>
+                }
+            </ul>
+        </PageSidebarSection>
+    }
+</aside>
+
+@code {
+    /// <summary>The order the link groups are shown in: what holds this item first, then what it holds.</summary>
+    private static readonly (WorkItemLinkType Reading, string Heading)[] Groups =
+    [
+        (WorkItemLinkType.BlockedBy, "Blocked by"),
+        (WorkItemLinkType.Blocks, "Blocks"),
+        (WorkItemLinkType.Relates, "Relates to"),
+        (WorkItemLinkType.Duplicates, "Duplicates"),
+        (WorkItemLinkType.DuplicatedBy, "Duplicated by"),
+        (WorkItemLinkType.Supersedes, "Supersedes"),
+        (WorkItemLinkType.SupersededBy, "Superseded by"),
+    ];
+
+    /// <summary>The item the sidebar is about.</summary>
+    [Parameter, EditorRequired]
+    public WorkItem Item { get; set; } = default!;
+
+    /// <summary>Every edge touching the item, in normal form.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItemLink> Links { get; set; } = [];
+
+    /// <summary>Every item of the project by id, so a related item shows its number, title and status.</summary>
+    [Parameter]
+    public IReadOnlyDictionary<WorkItemId, WorkItem> KnownItems { get; set; } = new Dictionary<WorkItemId, WorkItem>();
+
+    /// <summary>The item's children in the hierarchy.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItem> Children { get; set; } = [];
+
+    /// <summary>The wiki documents related to the item, its plan first.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItemWikiLink> Wiki { get; set; } = [];
+
+    /// <summary>The linked conversations and their attention, or null where the studio does not count them.</summary>
+    [Parameter]
+    public Fravashi.Application.Sessions.WorkItemAttention? Attention { get; set; }
+
+    /// <summary>A readable name for each linked conversation.</summary>
+    [Parameter]
+    public IReadOnlyDictionary<AgentSessionId, string> SessionTitles { get; set; } = new Dictionary<AgentSessionId, string>();
+
+    /// <summary>The evidence recorded against the item, oldest first.</summary>
+    [Parameter]
+    public IReadOnlyList<EvidenceRecord> Evidence { get; set; } = [];
+
+    /// <summary>The element id of an evidence record's full entry in the item's Evidence section.</summary>
+    public static string EvidenceAnchor(EvidenceRecord record) => "work-item-evidence-" + record.Id;
+
+    private sealed record LinkGroup(WorkItemLinkType Reading, string Heading, IReadOnlyList<WorkItemId> Others);
+
+    private IReadOnlyList<LinkGroup> LinkGroups =>
+    [
+        .. Groups
+            .Select(g => new LinkGroup(
+                g.Reading,
+                g.Heading,
+                [.. Links.Where(l => l.ReadingFrom(Item.Id) == g.Reading).Select(l => l.OtherEnd(Item.Id))]))
+            .Where(g => g.Others.Count > 0),
+    ];
+
+    private bool IsEmpty =>
+        Links.Count == 0
+        && Item.Parent is null
+        && Children.Count == 0
+        && Wiki.Count == 0
+        && Attention is not { Sessions.Count: > 0 }
+        && Evidence.Count == 0;
+
+    private RenderFragment ItemRow(WorkItemId id) => __builder =>
+    {
+        if (KnownItems.TryGetValue(id, out var other))
+        {
+            <a class="work-item-related-link" data-testid="work-item-link" href="@($"/workitems/{other.Number}")">#@other.Number @other.Title</a>
+            <span class="work-item-related-status status-@StableNames.ToName(other.Status)"
+                  data-testid="work-item-related-status">@StatusLabel(other.Status)</span>
+        }
+        else
+        {
+            @* An end this project's board does not hold (it was deleted, or the read is out of date): named, not linked. *@
+            <span class="work-item-related-gone" data-testid="work-item-link"
+                  title="This item is not on this project's board.">@id.Value</span>
+        }
+    };
+
+    private string SessionTitle(AgentSessionId session) =>
+        SessionTitles.TryGetValue(session, out var title) && title.Length > 0
+            ? title
+            : "Conversation " + session.Value.ToString("D")[..8];
+
+    private static string StatusLabel(WorkItemStatus status) => status switch
+    {
+        WorkItemStatus.InProgress => "In progress",
+        WorkItemStatus.InReview => "In review",
+        _ => status.ToString(),
+    };
+}

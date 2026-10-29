@@ -1,0 +1,567 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Application.Persistence
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@inject IWorkspaceStore Workspaces
+@inject BridgeWorkspaceContext BridgeContext
+@inject BridgeClient Bridge
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+@inject IServiceProvider Services
+@inject ILogger<StartDialog> Logger
+
+@* Work item #350: the start dialog, modelled on Visual Studio's "Get started" window (the owner's 5.png). It is the
+   ONE place a folder is opened, switched or closed: the recents (searchable, each with its path and when it was last
+   opened), Open a folder and Clone a repository, which used to be four boxes on Home and a dropdown in the title bar.
+   There is deliberately no "continue without a folder": a window with none shows this instead of the studio
+   (StartDialogHost), and the same dialog drawn over a window that HAS a folder can be closed (the X or Escape) and
+   leaves the page under it as it was.
+
+   The recents machinery is Home's, moved here unchanged (backlog 14 re-registration through RecentWorkspaceReopen,
+   the three-way unreachable / missing / transport failure, and the two-click removal of a row), and opening a recent
+   asks the HOST to show it, the title bar's old path (backlog 29): the host focuses the window that already shows
+   that folder or re-binds this one, and without a host it is the forced page load Home always did. *@
+
+<div class="start-dialog" role="dialog" aria-modal="true" aria-labelledby="start-dialog-title"
+     data-testid="start-dialog" data-dismissible="@(Dismissible ? "true" : "false")" @onkeydown="OnKeyDownAsync">
+    <header class="start-dialog-head">
+        <div class="start-dialog-titles">
+            <h2 class="start-dialog-brand" id="start-dialog-title">@(ProductName.Short)</h2>
+            <span class="start-dialog-subtitle">Get started</span>
+        </div>
+        @if (Dismissible)
+        {
+            <button type="button" class="start-dialog-close" data-testid="start-dialog-close"
+                    title="Close (Esc)" aria-label="Close the start dialog" @onclick="CloseAsync">
+                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                    <path d="m2 2 8 8M10 2l-8 8" />
+                </svg>
+            </button>
+        }
+    </header>
+
+    <div class="start-dialog-body">
+        <section class="start-dialog-recents" aria-label="Open recent" data-testid="start-recents">
+            <div class="start-dialog-heading">
+                <span>Open recent</span>
+                @if (_recent.Count > 0)
+                {
+                    <span class="home-panel-count" data-testid="start-recents-count">@RecentCountLabel</span>
+                }
+            </div>
+
+            @if (_recent.Count == 0)
+            {
+                <p class="welcome-hint start-dialog-empty" data-testid="start-recents-empty">
+                    Nothing yet. Open a folder or clone a repository on the right, or right-click a folder in
+                    Explorer and choose "Open with @(ProductName.Short)".
+                </p>
+            }
+            else
+            {
+                <div class="start-dialog-search">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+                         stroke-linecap="round" aria-hidden="true">
+                        <circle cx="7" cy="7" r="4.2" />
+                        <path d="m10.3 10.3 3.2 3.2" />
+                    </svg>
+                    <input type="search" class="studio-input" data-testid="start-recents-filter"
+                           placeholder="Search recent folders" aria-label="Search recent folders by name or path"
+                           spellcheck="false" value="@_recentFilter" @ref="_search"
+                           @oninput="e => _recentFilter = e.Value?.ToString() ?? string.Empty" />
+                </div>
+
+                @if (FilteredRecent.Count == 0)
+                {
+                    <p class="welcome-hint start-dialog-empty" data-testid="start-recents-nomatch">
+                        No folder matches "@_recentFilter.Trim()".
+                    </p>
+                }
+                else
+                {
+                    <div class="start-dialog-list" data-testid="start-recents-list">
+                        @foreach (var group in Groups())
+                        {
+                            <div class="start-dialog-group" data-testid="start-recents-group">@group.Label</div>
+                            <ul class="start-recent-rows">
+                                @foreach (var workspace in group.Rows)
+                                {
+                                    var current = IsCurrent(workspace);
+                                    <li>
+                                        <button type="button" class="welcome-recent start-recent@(current ? " is-current" : string.Empty)"
+                                                data-testid="start-recent" data-workspace-id="@workspace.Id"
+                                                disabled="@_opening" @onclick="() => OpenRecentAsync(workspace)">
+                                            <span class="start-recent-icon" aria-hidden="true">
+                                                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"
+                                                     stroke-linejoin="round">
+                                                    <path d="M1.8 4.2c0-.6.5-1.1 1.1-1.1h3.2l1.4 1.5h5.6c.6 0 1.1.5 1.1 1.1v6.2c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1z" />
+                                                </svg>
+                                            </span>
+                                            <span class="start-recent-text">
+                                                @* Item #373: which project the folder is in, or that it is not set up, beside its name. *@
+                                                <span class="start-recent-line"><span class="welcome-recent-name">@workspace.Name</span><span class="start-recent-project @(workspace.ProjectId is null ? "is-not-set-up" : null)" data-testid="start-recent-project">@ProjectOf(workspace)</span></span>
+                                                <span class="welcome-recent-path">@workspace.RootPath</span>
+                                            </span>
+                                            <span class="start-recent-when">
+                                                @if (current)
+                                                {
+                                                    <span class="start-recent-current" data-testid="start-recent-current">Open in this window</span>
+                                                }
+                                                else
+                                                {
+                                                    <LocalTime At="workspace.LastOpenedUtc" Style="LocalTimeStyle.DateTime" />
+                                                }
+                                            </span>
+                                        </button>
+                                    </li>
+                                }
+                            </ul>
+                        }
+                    </div>
+                }
+            }
+
+            @if (_recentError is not null)
+            {
+                <div class="start-dialog-alert">
+                    <p class="welcome-hint" role="alert" data-testid="welcome-recent-error">@_recentError</p>
+                    <div class="welcome-recent-actions">
+                        @if (_retryRecent is not null)
+                        {
+                            <button type="button" class="welcome-open" data-testid="welcome-recent-retry"
+                                    disabled="@_opening" @onclick="RetryRecentAsync">
+                                @(_opening ? "Trying ..." : "Try again")
+                            </button>
+                        }
+                        @if (_forgettableRecentId is not null)
+                        {
+                            @if (_confirmForget)
+                            {
+                                <span class="welcome-hint" data-testid="welcome-recent-forget-hint">
+                                    This only drops the entry from this list. Nothing on disk is touched.
+                                </span>
+                                <button type="button" class="welcome-open" data-testid="welcome-recent-remove"
+                                        @onclick="ForgetRecent">
+                                    Drop the entry
+                                </button>
+                                <button type="button" class="welcome-open" data-testid="welcome-recent-forget-cancel"
+                                        @onclick="() => _confirmForget = false">
+                                    Keep it
+                                </button>
+                            }
+                            else
+                            {
+                                <button type="button" class="welcome-link" data-testid="welcome-recent-forget-ask"
+                                        @onclick="() => _confirmForget = true">
+                                    Remove it from the list ...
+                                </button>
+                            }
+                        }
+                    </div>
+                </div>
+            }
+        </section>
+
+        <aside class="start-dialog-actions" aria-label="Get started">
+            <div class="start-dialog-heading"><span>Start</span></div>
+
+            @if (BridgeContext.IsBridgeConfigured)
+            {
+                <button type="button" class="start-action" data-testid="start-open-folder"
+                        disabled="@_picking" @onclick="PickFolderAsync">
+                    <span class="start-action-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round">
+                            <path d="M1.8 4.2c0-.6.5-1.1 1.1-1.1h3.2l1.4 1.5h5.6c.6 0 1.1.5 1.1 1.1v6.2c0 .6-.5 1.1-1.1 1.1H2.9c-.6 0-1.1-.5-1.1-1.1z" />
+                        </svg>
+                    </span>
+                    <span class="start-action-text">
+                        <span class="start-action-title">@(_picking ? "Waiting for the folder picker ..." : "Open a folder")</span>
+                        <span class="start-action-sub">Pick a folder on this machine; it opens in this window.</span>
+                    </span>
+                </button>
+                @if (_pickError is not null)
+                {
+                    <p class="welcome-hint" role="alert" data-testid="start-open-folder-error">@_pickError</p>
+                }
+
+                <div class="start-action start-action-static" data-testid="start-clone">
+                    <span class="start-action-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"
+                             stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="4.5" cy="3.5" r="1.5" />
+                            <circle cx="4.5" cy="12.5" r="1.5" />
+                            <circle cx="11.5" cy="5.5" r="1.5" />
+                            <path d="M4.5 5v6M11.5 7c0 2.5-3 2.5-6.2 4" />
+                        </svg>
+                    </span>
+                    <span class="start-action-text">
+                        <span class="start-action-title">Clone a repository</span>
+                        <span class="start-action-sub">
+                            Cloned on YOUR machine with your git; a folder picker chooses where it lands.
+                        </span>
+                        <span class="welcome-clone start-clone">
+                            <input class="studio-input" data-testid="welcome-clone-url" spellcheck="false"
+                                   aria-label="Repository URL to clone"
+                                   placeholder="https://host/owner/repo.git"
+                                   disabled="@_cloning" @bind="_cloneUrl" />
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="welcome-clone-start"
+                                    disabled="@_cloning" @onclick="CloneAsync">
+                                @(_cloning ? "Cloning ..." : "Clone ...")
+                            </button>
+                        </span>
+                    </span>
+                </div>
+                @if (_cloneError is not null)
+                {
+                    <p class="welcome-hint" role="alert" data-testid="welcome-clone-error">@_cloneError</p>
+                }
+            }
+            else
+            {
+                <p class="welcome-hint" data-testid="start-no-bridge">
+                    The host bridge is not connected, so host folders cannot be opened or cloned from here.
+                    Start @(ProductName.Short) with `@(ProductName.Command) --open &lt;folder&gt;` or use "Open with @(ProductName.Short)" in Explorer.
+                </p>
+            }
+        </aside>
+    </div>
+
+    <footer class="start-dialog-foot">
+        @if (_activeId is not null)
+        {
+            <span class="start-dialog-foot-text" data-testid="start-dialog-current">
+                Open in this window: <strong>@_activeName</strong>
+            </span>
+            @if (_activeNotSetUp)
+            {
+                @* Item #373, section 5: the current folder is not set up, so the way to do it is offered here too. *@
+                <a class="studio-btn" href="/setup" data-testid="start-set-up" @onclick="CloseAsync">Set up @_activeName</a>
+            }
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="start-close-workspace"
+                    title="Back to the start dialog; the folder stays in your recents" @onclick="CloseWorkspaceAsync">
+                Close workspace
+            </button>
+        }
+        else
+        {
+            <span class="start-dialog-foot-text">
+                Open a folder to start. Each window shows one folder; its board, wiki, code and sessions are that
+                folder's.
+            </span>
+        }
+    </footer>
+</div>
+
+@code {
+    /// <summary>True when the window has a folder, so the dialog may be closed and the page under it kept.</summary>
+    [Parameter]
+    public bool Dismissible { get; set; }
+
+    /// <summary>Raised when a dismissible dialog is closed (the X, Escape, or once its choice has been handed on).</summary>
+    [Parameter]
+    public EventCallback OnClose { get; set; }
+
+    private IReadOnlyList<WorkspaceRecord> _recent = [];
+    private bool _activeNotSetUp;
+    private Dictionary<string, string> _projects = new(StringComparer.Ordinal);
+
+    /// <summary>The project a recent folder is in, or "Not set up" (item #373, section 5).</summary>
+    private string ProjectOf(WorkspaceRecord workspace) =>
+        workspace.ProjectId is { Length: > 0 } id
+            ? _projects.TryGetValue(id, out var name) ? name : string.Empty
+            : "Not set up";
+    private string? _activeId;
+    private string? _activeName;
+    private bool _opening;
+    private string? _recentError;
+    private WorkspaceRecord? _retryRecent;
+    private string? _forgettableRecentId;
+    private bool _confirmForget;
+    private bool _picking;
+    private string? _pickError;
+    private string _cloneUrl = string.Empty;
+    private bool _cloning;
+    private string? _cloneError;
+    private string _recentFilter = string.Empty;
+    private ElementReference _search;
+
+    private sealed record RecentGroup(string Label, IReadOnlyList<WorkspaceRecord> Rows);
+
+    // Matching is on the name OR the path, ignoring case, because somebody who remembers the drive and not the name
+    // should still find the folder (the Home rework, requested 2026-09-21, kept as it was).
+    private IReadOnlyList<WorkspaceRecord> FilteredRecent
+    {
+        get
+        {
+            var needle = _recentFilter.Trim();
+            return needle.Length == 0
+                ? _recent
+                : [.. _recent.Where(w =>
+                    w.Name.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || w.RootPath.Contains(needle, StringComparison.OrdinalIgnoreCase))];
+        }
+    }
+
+    private string RecentCountLabel =>
+        FilteredRecent.Count == _recent.Count ? $"{_recent.Count}" : $"{FilteredRecent.Count} of {_recent.Count}";
+
+    /// <summary>
+    /// The recents in two groups by when they were last opened, as the model window groups them: the last seven
+    /// days, then everything older. A group with no rows is not drawn.
+    /// </summary>
+    private IEnumerable<RecentGroup> Groups()
+    {
+        var clock = Services.GetService(typeof(TimeProvider)) as TimeProvider ?? TimeProvider.System;
+        var weekAgo = clock.GetUtcNow().AddDays(-7);
+        var recent = FilteredRecent.Where(w => w.LastOpenedUtc >= weekAgo).ToList();
+        var older = FilteredRecent.Where(w => w.LastOpenedUtc < weekAgo).ToList();
+        if (recent.Count > 0)
+        {
+            yield return new RecentGroup("This week", recent);
+        }
+
+        if (older.Count > 0)
+        {
+            yield return new RecentGroup("Older", older);
+        }
+    }
+
+    private bool IsCurrent(WorkspaceRecord workspace) =>
+        _activeId is not null && string.Equals(workspace.Id, _activeId, StringComparison.Ordinal);
+
+    protected override void OnInitialized()
+    {
+        // Backlog 319: folders a person opened, never the autopilot's worktrees.
+        _recent = Workspaces.RecentFolders();
+        if (BridgeContext.ActiveWorkspaceId is { Length: > 0 } id)
+        {
+            // The store row may predate this fravashi.exe run or be absent in the dev fallback; the id stands in.
+            _activeId = id;
+            _activeName = Workspaces.Get(id)?.Name ?? id;
+            _activeNotSetUp = Fravashi.Application.Projects.WorkspaceProjects.IsNotSetUp(Workspaces, id);
+        }
+
+        _projects = Services.GetService(typeof(Fravashi.Application.Projects.IProjectStore)) is Fravashi.Application.Projects.IProjectStore store
+            ? store.List().ToDictionary(p => p.Id.Value, p => p.Name, StringComparer.Ordinal)
+            : new Dictionary<string, string>(StringComparer.Ordinal);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _recent.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            // Typing goes straight to the search, as in the model window, and Escape then reaches the dialog.
+            await _search.FocusAsync();
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or InvalidOperationException)
+        {
+            // Prerendering, or a circuit that has gone: there is nobody to give focus to.
+        }
+    }
+
+    private async Task OnKeyDownAsync(KeyboardEventArgs e)
+    {
+        if (Dismissible && e.Key == "Escape")
+        {
+            await CloseAsync();
+        }
+    }
+
+    private Task CloseAsync() => Dismissible ? OnClose.InvokeAsync() : Task.CompletedTask;
+
+    private async Task OpenRecentAsync(WorkspaceRecord workspace)
+    {
+        if (_opening)
+        {
+            return;
+        }
+
+        _recentError = null;
+        _retryRecent = null;
+        _forgettableRecentId = null;
+        _confirmForget = false;
+
+        if (IsCurrent(workspace))
+        {
+            // Already what this window shows: choosing it is the same as closing the dialog.
+            await CloseAsync();
+            return;
+        }
+
+        _opening = true;
+        try
+        {
+            // Backlog 14: re-register with the host before pointing any window at the row.
+            var reopen = await RecentWorkspaceReopen.PrepareAsync(
+                BridgeContext, Bridge, Workspaces, workspace, CancellationToken.None);
+            if (reopen.Outcome == RecentReopenOutcome.Unreachable)
+            {
+                _recentError = $"{workspace.RootPath} could not be reached just now. If it is on a "
+                    + "network drive or a removable disk, connect it and try again. The folder itself "
+                    + "may be perfectly fine.";
+                _retryRecent = workspace;
+                _forgettableRecentId = workspace.Id;
+                return;
+            }
+
+            if (reopen.Outcome == RecentReopenOutcome.Missing || reopen.WorkspaceId is null)
+            {
+                _recentError = $"{workspace.RootPath} was not found on this machine. It may have been "
+                    + "moved or renamed.";
+                _retryRecent = workspace;
+                _forgettableRecentId = workspace.Id;
+                return;
+            }
+
+            _recent = Workspaces.RecentFolders();
+            await ShowAsync(reopen.WorkspaceId);
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit is gone; nothing left to switch from.
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Re-registering the recent workspace {WorkspaceId} failed.", workspace.Id);
+            _recentError = "The studio window could not be reached, so that folder could not be opened.";
+            // Says nothing at all about the folder, so retry only: no removal on offer here.
+            _retryRecent = workspace;
+        }
+        finally
+        {
+            _opening = false;
+        }
+    }
+
+    /// <summary>
+    /// Asks the HOST to show the folder (it focuses the window that already shows it, or re-binds this one, and owns
+    /// the navigation). Outside the studio window nothing answers, so the window adopts the folder by a forced load of
+    /// its Code page, which is what Home always did.
+    /// </summary>
+    private async Task ShowAsync(string workspaceId)
+    {
+        if (!await JS.InvokeAsync<bool>("fravashiWindow.switchWorkspace", workspaceId))
+        {
+            Navigate(workspaceId);
+            return;
+        }
+
+        // The host may have focused ANOTHER window; this one keeps its folder and its page, without the dialog.
+        await CloseAsync();
+    }
+
+    private Task RetryRecentAsync()
+        => _retryRecent is { } row ? OpenRecentAsync(row) : Task.CompletedTask;
+
+    /// <summary>
+    /// Drops a recents ROW (never a folder). Deliberately two clicks behind "Remove it from the list ...": the reason
+    /// it is offered may be a drive that is not connected yet, and a one-click destructive action under an uncertain
+    /// claim is how good entries get deleted.
+    /// </summary>
+    private void ForgetRecent()
+    {
+        if (_forgettableRecentId is { Length: > 0 } id)
+        {
+            Workspaces.Remove(id);
+            _recent = Workspaces.RecentFolders();
+        }
+
+        _recentError = null;
+        _retryRecent = null;
+        _forgettableRecentId = null;
+        _confirmForget = false;
+    }
+
+    // forceLoad: the window adopts the ws query and the fresh circuit binds the bridge seams.
+    private void Navigate(string workspaceId) =>
+        Nav.NavigateTo($"/code?ws={Uri.EscapeDataString(workspaceId)}", forceLoad: true);
+
+    private async Task PickFolderAsync()
+    {
+        _picking = true;
+        _pickError = null;
+        try
+        {
+            var picked = await Bridge.PickFolderAsync(CancellationToken.None);
+            if (picked is not null)
+            {
+                Workspaces.Touch(picked.Id, picked.Name, picked.RootPath);
+                Navigate(picked.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "The host folder picker failed.");
+            _pickError = "The folder picker could not be reached; is the studio window still running?";
+        }
+        finally
+        {
+            _picking = false;
+        }
+    }
+
+    private async Task CloneAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_cloneUrl))
+        {
+            _cloneError = "Enter the repository URL to clone.";
+            return;
+        }
+
+        _cloning = true;
+        _cloneError = null;
+        try
+        {
+            var cloned = await Bridge.CloneAsync(_cloneUrl.Trim(), CancellationToken.None);
+            if (cloned is not null)
+            {
+                Workspaces.Touch(cloned.Id, cloned.Name, cloned.RootPath);
+                Navigate(cloned.Id);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            // The bridge's honest failure text (bad URL shape, existing folder, git's stderr).
+            _cloneError = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "The host-side clone failed.");
+            _cloneError = "The clone could not be reached; is the studio window still running?";
+        }
+        finally
+        {
+            _cloning = false;
+        }
+    }
+
+    /// <summary>
+    /// Asks the host to close this window's folder (backlog 29: a WINDOW operation only; the folder keeps its grant,
+    /// its synced copy and its agent session). The host clears the binding first and navigates, or it would re-impose
+    /// the ws; without a host nothing re-imposes one, so a plain full load of Home is the same outcome.
+    /// </summary>
+    private async Task CloseWorkspaceAsync()
+    {
+        try
+        {
+            if (!await JS.InvokeAsync<bool>("fravashiWindow.closeWorkspace"))
+            {
+                Nav.NavigateTo("/", forceLoad: true);
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit is gone; the page is being replaced anyway.
+        }
+        catch (JSException)
+        {
+            _recentError = "The studio window could not be asked to close the workspace.";
+        }
+    }
+}

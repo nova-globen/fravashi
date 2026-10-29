@@ -1,0 +1,278 @@
+@namespace Fravashi.Web.Components.Autopilot
+@using System.Globalization
+@using Fravashi.Application.Autopilot
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.Autopilot
+@using Fravashi.Domain.AgentSessions
+@inject AutopilotDispatcher Dispatcher
+@inject ICurrentProject CurrentProject
+@inject IProjectDelivery Delivery
+@inject ISecretStore Secrets
+@inject IAutopilotConcurrencySettings ConcurrencySettings
+@inject IServiceProvider Services
+@using Microsoft.Extensions.DependencyInjection
+
+@* Backlog 298 (ADR 0031 decisions 1 to 3). A standalone component, not page code, so the autopilot page (#303)
+   can show it without carrying the work items page's code along. The dispatcher itself refuses a second
+   dispatch while a run is open for the project (naming why); the autopilot page was what decided whether to show
+   this form at all, and owned the real "stop now" / "stop after this item" controls (ADR 0031 decision 14) -
+   this form no longer has its own copies of them. Work item #358 retired that page: Home's Autopilot card
+   (Dashboard/AutopilotCard.razor) shows this form in its dispatch dialog and owns the stop controls now. *@
+<div class="autopilot-dispatch-form" data-testid="autopilot-dispatch-form">
+    <h3>Dispatch autopilot</h3>
+
+    <p class="studio-muted" data-testid="autopilot-dispatch-delivery">
+        This project delivers by @(_delivery == AutopilotDeliveryMode.CommitToMain ? "commit to main" : "branch and pull request").
+        Change that under Settings &gt; Project &gt; Project and variables.
+    </p>
+    @if (EffectiveCapPreview() > 1)
+    {
+        <p class="studio-muted" data-testid="autopilot-dispatch-branch-note">
+            At this run's own concurrency cap (@EffectiveCapPreview()), each item works in its own git worktree,
+            never the folder this window or any other has open: nothing here switches a workspace, and each
+            item's worktree is pruned once that item ends.
+        </p>
+    }
+    else
+    {
+        <p class="studio-muted" data-testid="autopilot-dispatch-branch-note">
+            At a concurrency cap of 1, while this run works it switches this project's workspace to the
+            current item's attempt branch, and returns it to the branch it started from when the run ends.
+            That workspace is the one most recently opened for this project, which may not be the folder this
+            window has open.
+        </p>
+    }
+
+    <h4>Limits</h4>
+    <label class="studio-modal-field">
+        <span>Money per item (USD)</span>
+        <input class="studio-input" type="number" step="0.01" data-testid="autopilot-money-per-item" @bind="_moneyPerItemUsd" />
+    </label>
+    <label class="studio-modal-field">
+        <span>Money per run (USD)</span>
+        <input class="studio-input" type="number" step="0.01" data-testid="autopilot-money-per-run" @bind="_moneyPerRunUsd" />
+    </label>
+    <label class="studio-modal-field">
+        <span>Failed commit reviews per item</span>
+        <input class="studio-input" type="number" step="1" min="1" data-testid="autopilot-failed-reviews" @bind="_failedCommitReviewsPerItem" />
+    </label>
+    <label class="studio-modal-field">
+        <span>Time per item (hours)</span>
+        <input class="studio-input" type="number" step="0.5" min="0.5" data-testid="autopilot-time-per-item" @bind="_timePerItemHours" />
+    </label>
+    <label class="studio-modal-field">
+        <span>No-progress window (minutes)</span>
+        <input class="studio-input" type="number" step="1" min="1" data-testid="autopilot-no-progress" @bind="_noProgressMinutes" />
+    </label>
+
+    <h4>Concurrency</h4>
+    @if (_delivery == AutopilotDeliveryMode.CommitToMain)
+    {
+        <p class="studio-muted" data-testid="autopilot-concurrency-commit-to-main-note">
+            Commit to main runs one item at a time: the base branch is checked out in your folder, so parallel
+            items could never move it. The Settings cap (@_settingsCap) does not apply to this project; this
+            run uses 1.
+        </p>
+    }
+    else
+    {
+        <p class="studio-muted" data-testid="autopilot-concurrency-cap-note">
+            The Settings cap is currently @_settingsCap. A dispatch can lower it for this run; it can never raise it.
+        </p>
+        <label class="studio-modal-field">
+            <span>Concurrency cap for this run (optional)</span>
+            <input class="studio-input" type="text" inputmode="numeric" spellcheck="false"
+                   placeholder="@("use the Settings cap (" + _settingsCap.ToString(CultureInfo.InvariantCulture) + ")")"
+                   data-testid="autopilot-concurrency-override" @bind="_concurrencyCapOverride" @bind:event="oninput" />
+        </label>
+    }
+
+    <h4>Missing scenario or design</h4>
+    <select class="studio-input" data-testid="autopilot-missing-scenario" value="@_missingScenario" @onchange="OnMissingScenarioChanged">
+        <option value="@MissingScenarioPolicy.Write">Write one before building (default)</option>
+        <option value="@MissingScenarioPolicy.Refuse">Refuse the item</option>
+        <option value="@MissingScenarioPolicy.Optional">Treat the scenario as optional</option>
+    </select>
+
+    <h4>People</h4>
+    <label class="studio-modal-field">
+        <span>How long to wait for a person (minutes)</span>
+        <input class="studio-input" type="number" step="1" min="1" data-testid="autopilot-person-wait" @bind="_personWaitMinutes" />
+    </label>
+
+    <h4>Roles</h4>
+    <p class="studio-muted">
+        This version ships one agent runtime, Claude Code; only the model is configurable. The building agent's
+        model starts from Settings &gt; Agents &gt; Default models and effort; a work item's own suggested model still
+        wins for that item.
+    </p>
+    <label class="studio-modal-field">
+        <span>Building agent model</span>
+        <input class="studio-input" type="text" spellcheck="false" data-testid="autopilot-builder-model" @bind="_builderModel" />
+    </label>
+    <label class="studio-modal-field">
+        <span>Operator model</span>
+        <input class="studio-input" type="text" spellcheck="false" data-testid="autopilot-operator-model" @bind="_operatorModel" />
+    </label>
+
+    <h4>Judge</h4>
+    <p class="studio-muted" data-testid="autopilot-judge-key-status">
+        @(_keyStored ? "A TypeSafe key is stored." : "No TypeSafe key is stored yet; the judge asks a person for everything until one is.")
+    </p>
+    <label class="studio-modal-field">
+        <span>TypeSafe key</span>
+        <input class="studio-input" type="password" autocomplete="off" spellcheck="false"
+               data-testid="autopilot-judge-key-input" @bind="_typeSafeKey" @bind:event="oninput" />
+    </label>
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn studio-btn-alt" data-testid="autopilot-judge-key-save"
+                disabled="@string.IsNullOrWhiteSpace(_typeSafeKey)" @onclick="SaveKey">Save key</button>
+    </div>
+
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn" data-testid="autopilot-dispatch-submit" @onclick="DispatchAsync">Dispatch</button>
+    </div>
+
+    @if (_refusal is { Length: > 0 })
+    {
+        <div class="studio-error" data-testid="autopilot-dispatch-refusal">@_refusal</div>
+    }
+    @if (_confirmation is { Length: > 0 })
+    {
+        <p class="rt-ok" data-testid="autopilot-dispatch-confirmation">@_confirmation</p>
+    }
+</div>
+
+@code {
+    /// <summary>Raised once a dispatch succeeds, so the caller can close this form.</summary>
+    [Parameter]
+    public EventCallback Dispatched { get; set; }
+
+    private decimal _moneyPerItemUsd = AutopilotLimits.Default.MoneyPerItemUsd;
+    private decimal _moneyPerRunUsd = AutopilotLimits.Default.MoneyPerRunUsd;
+    private int _failedCommitReviewsPerItem = AutopilotLimits.Default.FailedCommitReviewsPerItem;
+    private double _timePerItemHours = AutopilotLimits.Default.TimePerItem.TotalHours;
+    private int _noProgressMinutes = (int)AutopilotLimits.Default.NoProgressWindow.TotalMinutes;
+    private MissingScenarioPolicy _missingScenario = AutopilotDispatchSettings.Default.MissingScenario;
+    private int _personWaitMinutes = (int)AutopilotDispatchSettings.Default.PersonWaitTimeout.TotalMinutes;
+    private string _builderModel = AutopilotDispatchSettings.Default.Builder.Model;
+    private string _operatorModel = AutopilotDispatchSettings.Default.Operator.Model;
+    private string _typeSafeKey = string.Empty;
+    private bool _keyStored;
+    private AutopilotDeliveryMode _delivery;
+    private int _settingsCap;
+    private string _concurrencyCapOverride = string.Empty;
+    private string? _refusal;
+    private string? _confirmation;
+
+    protected override void OnInitialized()
+    {
+        // Item #373: a folder that is not set up has no project, and so no delivery of its own to show.
+        _delivery = CurrentProject.Id is { } project ? Delivery.For(project) : AutopilotDeliveryMode.BranchAndPullRequest;
+        _keyStored = Secrets.Get(AutopilotJudgeSecret.Reference) is not null;
+        _settingsCap = ConcurrencySettings.Cap();
+
+        // Work item #357: the autopilot builder's default model pre-fills the field, so the person's own pick for
+        // this run is still what the run records. Resolved optionally: a wiring without the settings store keeps
+        // the shipped default.
+        if (Services.GetService<IConfigurationStore>() is { } config
+            && AgentDefaultsSetting.Read(config).AutopilotBuilder.Model is { } builderDefault)
+        {
+            _builderModel = builderDefault;
+        }
+    }
+
+    /// <summary>
+    /// A preview of the cap this dispatch will actually run with (backlog 312), by the SAME rule
+    /// AutopilotDispatcher.DispatchAsync uses once a run exists: commit to main is always 1 (#311), otherwise
+    /// the Settings cap lowered by a valid typed override. An override that does not parse is read as "none"
+    /// here, the same forgiving direction AutopilotConcurrency.Effective already takes for a non-positive one;
+    /// DispatchAsync is still what refuses an invalid override in words at submit time.
+    /// </summary>
+    private int EffectiveCapPreview()
+    {
+        if (_delivery == AutopilotDeliveryMode.CommitToMain)
+        {
+            return 1;
+        }
+
+        var parsedOverride = int.TryParse(_concurrencyCapOverride, NumberStyles.Integer, CultureInfo.InvariantCulture, out var typed)
+            ? typed
+            : (int?)null;
+        return AutopilotConcurrency.Effective(_settingsCap, parsedOverride);
+    }
+
+    private void OnMissingScenarioChanged(ChangeEventArgs e) =>
+        _missingScenario = Enum.TryParse<MissingScenarioPolicy>(e.Value?.ToString(), out var parsed)
+            ? parsed
+            : _missingScenario;
+
+    private void SaveKey()
+    {
+        if (string.IsNullOrWhiteSpace(_typeSafeKey))
+        {
+            return;
+        }
+
+        Secrets.Set(AutopilotJudgeSecret.Reference, _typeSafeKey);
+        _typeSafeKey = string.Empty;
+        _keyStored = true;
+        _confirmation = "The TypeSafe key is stored.";
+        _refusal = null;
+    }
+
+    private async Task DispatchAsync()
+    {
+        _refusal = null;
+        _confirmation = null;
+
+        // Item #373: no shared bucket. A folder that is not set up dispatches nothing, and never the default project's
+        // marked items; the card that holds this form is not drawn there either.
+        if (CurrentProject.Id is not { } project)
+        {
+            _refusal = "This folder is not set up yet, so it has no project whose items the autopilot could build. "
+                + "Set it up first; nothing was dispatched.";
+            return;
+        }
+
+        int? concurrencyOverride = null;
+        if (!string.IsNullOrWhiteSpace(_concurrencyCapOverride))
+        {
+            if (!int.TryParse(_concurrencyCapOverride, NumberStyles.Integer, CultureInfo.InvariantCulture, out var typed))
+            {
+                // Never silently dropped to "use the Settings cap": a typo here must not read as a lower
+                // cap that was never actually asked for.
+                _refusal = $"\"{_concurrencyCapOverride.Trim()}\" is not a whole number; leave it empty to use "
+                    + "the Settings cap, or type a lower whole number.";
+                return;
+            }
+
+            concurrencyOverride = typed;
+        }
+
+        var settings = new AutopilotDispatchSettings(
+            new AutopilotLimits(
+                _moneyPerItemUsd,
+                _moneyPerRunUsd,
+                _failedCommitReviewsPerItem,
+                TimeSpan.FromHours(_timePerItemHours),
+                TimeSpan.FromMinutes(_noProgressMinutes)),
+            _missingScenario,
+            TimeSpan.FromMinutes(_personWaitMinutes),
+            new AutopilotRole(AgentTool.Claude, _builderModel),
+            new AutopilotRole(AgentTool.Claude, _operatorModel),
+            concurrencyOverride);
+
+        var outcome = await Dispatcher.DispatchAsync(project, settings);
+        if (!outcome.Dispatched)
+        {
+            _refusal = outcome.Refusal;
+            return;
+        }
+
+        _confirmation = $"Dispatched: {outcome.Run!.Queue.Count} item(s) queued.";
+        await Dispatched.InvokeAsync();
+    }
+}

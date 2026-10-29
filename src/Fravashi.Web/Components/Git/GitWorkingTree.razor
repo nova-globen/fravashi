@@ -1,0 +1,354 @@
+@namespace Fravashi.Web.Components.Git
+@using Fravashi.Domain.Git
+@using Fravashi.Web.Components.Code
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
+
+@* The working tree (work item #367), at the top of the Git page's main area. Clean, it is one line. With changes,
+   it is one compact block: the staged and unstaged files (list or tree, stage and unstage per file, per folder
+   and all, undo through a backup stash) beside the commit message and Commit. Undo is never a plain discard
+   (owner batch 2026-07-26): the page turns it into a "change backup: ..." stash. *@
+@if (TotalCount == 0)
+{
+    <div class="git-wt git-wt-clean" data-testid="git-clean">
+        <span class="git-wt-clean-mark" aria-hidden="true">✓</span>
+        <span>Working tree clean</span>
+        <button type="button" class="code-section-action" title="Refresh the working tree status" aria-label="Refresh the working tree status"
+                data-testid="git-status-refresh" @onclick="() => OnRefresh.InvokeAsync()">
+            <CodeIcon Kind="CodeIcon.IconKind.Refresh" />
+        </button>
+    </div>
+}
+else
+{
+    <section class="git-wt git-wt-changes" data-testid="git-changes" aria-label="Changes">
+        <div class="git-wt-files">
+            <div class="git-wt-head">
+                <span class="git-section-label">Changes</span>
+                <span class="code-search-count">@TotalCount</span>
+                <span class="git-wt-head-actions">
+                    <button type="button" class="code-section-action" data-testid="git-changes-view-toggle"
+                            title="@(_treeView ? "View as list" : "View as tree")"
+                            aria-label="@(_treeView ? "View changes as a list" : "View changes as a tree")"
+                            @onclick="ToggleViewAsync">
+                        <CodeIcon Kind="@(_treeView ? CodeIcon.IconKind.ListFlat : CodeIcon.IconKind.ListTree)" />
+                    </button>
+                    <button type="button" class="code-section-action" title="Undo all changes (kept as a backup stash)"
+                            aria-label="Undo all changes" data-testid="git-undo-all"
+                            @onclick='() => OnUndo.InvokeAsync((null, "all changes"))'>
+                        <CodeIcon Kind="CodeIcon.IconKind.Undo" />
+                    </button>
+                    <button type="button" class="code-section-action" title="Refresh the working tree status" aria-label="Refresh the working tree status"
+                            data-testid="git-status-refresh" @onclick="() => OnRefresh.InvokeAsync()">
+                        <CodeIcon Kind="CodeIcon.IconKind.Refresh" />
+                    </button>
+                </span>
+            </div>
+            <div class="git-wt-list">
+                @if (Status.StagedEntries.Count > 0)
+                {
+                    <div class="git-group-header">
+                        <span>Staged</span>
+                        <span class="code-search-count">@Status.StagedEntries.Count</span>
+                        <button type="button" class="code-section-action" title="Unstage all" aria-label="Unstage all"
+                                data-testid="git-unstage-all" @onclick="() => OnUnstage.InvokeAsync(Status.StagedEntries.Select(e => e.Path).ToList())">
+                            <span class="git-op-glyph" aria-hidden="true">−</span>
+                        </button>
+                    </div>
+                    @Entries((Status.StagedEntries, _stagedTree, true))
+                }
+                @if (Status.UnstagedEntries.Count > 0)
+                {
+                    <div class="git-group-header">
+                        <span>Not staged</span>
+                        <span class="code-search-count">@Status.UnstagedEntries.Count</span>
+                        <button type="button" class="code-section-action" title="Stage all" aria-label="Stage all"
+                                data-testid="git-stage-all" @onclick="() => OnStage.InvokeAsync(Status.UnstagedEntries.Select(e => e.Path).ToList())">
+                            <span class="git-op-glyph" aria-hidden="true">+</span>
+                        </button>
+                    </div>
+                    @Entries((Status.UnstagedEntries, _unstagedTree, false))
+                }
+            </div>
+        </div>
+        <div class="git-commit-box">
+            <textarea class="studio-input git-commit-message" rows="3" placeholder="Commit message"
+                      aria-label="Commit message" data-testid="git-commit-message" @bind="_message" @bind:event="oninput"></textarea>
+            <button type="button" class="studio-btn git-commit-button" data-testid="git-commit"
+                    title="@(Status.StagedEntries.Count == 0 ? "Stage the changes to commit first" : "Commit the staged changes")"
+                    disabled="@(Status.StagedEntries.Count == 0 || string.IsNullOrWhiteSpace(_message) || Busy)"
+                    @onclick="CommitAsync">
+                Commit@(Status.StagedEntries.Count > 0 ? $" {Status.StagedEntries.Count} staged" : string.Empty)
+            </button>
+        </div>
+    </section>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public GitWorkingStatus Status { get; set; } = GitWorkingStatus.Empty;
+
+    /// <summary>The change whose diff the detail pane shows, if any.</summary>
+    [Parameter]
+    public GitWorkingEntry? Selected { get; set; }
+
+    [Parameter]
+    public bool Busy { get; set; }
+
+    [Parameter]
+    public EventCallback<GitWorkingEntry> OnSelect { get; set; }
+
+    [Parameter]
+    public EventCallback<IReadOnlyList<string>> OnStage { get; set; }
+
+    [Parameter]
+    public EventCallback<IReadOnlyList<string>> OnUnstage { get; set; }
+
+    /// <summary>Undo the paths (null: everything) under a label; the page confirms and stashes them as a backup.</summary>
+    [Parameter]
+    public EventCallback<(IReadOnlyList<string>? Paths, string Label)> OnUndo { get; set; }
+
+    /// <summary>Commit the staged changes with the message; answers whether it was made, so the box is emptied only then.</summary>
+    [Parameter]
+    public Func<string, Task<bool>>? OnCommit { get; set; }
+
+    [Parameter]
+    public EventCallback OnRefresh { get; set; }
+
+    private string _message = string.Empty;
+    private bool _treeView = true;
+    private bool _prefLoaded;
+    private ChangeTreeNode _stagedTree = new();
+    private ChangeTreeNode _unstagedTree = new();
+    private readonly HashSet<string> _collapsedDirs = [];
+
+    private int TotalCount => Status.StagedEntries.Count + Status.UnstagedEntries.Count;
+
+    protected override void OnParametersSet()
+    {
+        _stagedTree = BuildTree(Status.StagedEntries);
+        _unstagedTree = BuildTree(Status.UnstagedEntries);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_prefLoaded)
+        {
+            _prefLoaded = true;
+            try
+            {
+                if (await JS.InvokeAsync<string?>("fravashiCode.getPref", "git-changes-view") == "list")
+                {
+                    _treeView = false;
+                    StateHasChanged();
+                }
+            }
+            catch (JSException)
+            {
+                // The tree stays the default.
+            }
+            catch (InvalidOperationException)
+            {
+                // Prerendering: no JS runtime yet.
+            }
+        }
+    }
+
+    private async Task CommitAsync()
+    {
+        if (OnCommit is not null && await OnCommit(_message.Trim()))
+        {
+            _message = string.Empty;
+        }
+    }
+
+    private async Task ToggleViewAsync()
+    {
+        _treeView = !_treeView;
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.setPref", "git-changes-view", _treeView ? "tree" : "list");
+        }
+        catch (JSException)
+        {
+            // Persistence is best effort.
+        }
+    }
+
+    private void ToggleDir(string key)
+    {
+        if (!_collapsedDirs.Remove(key))
+        {
+            _collapsedDirs.Add(key);
+        }
+    }
+
+    private static string DirKey(ChangeTreeNode node, bool staged) => (staged ? "s:" : "u:") + node.Key;
+
+    private RenderFragment<(IReadOnlyList<GitWorkingEntry> Flat, ChangeTreeNode Tree, bool Staged)> Entries => group =>
+        @<text>
+            @if (_treeView)
+            {
+                @foreach (var entry in group.Tree.Files)
+                {
+                    @ChangeRow(entry)
+                }
+                @foreach (var dir in group.Tree.Dirs)
+                {
+                    @DirBlock((dir, group.Staged))
+                }
+            }
+            else
+            {
+                @foreach (var entry in group.Flat)
+                {
+                    @ChangeRow(entry)
+                }
+            }
+        </text>;
+
+    private RenderFragment<GitWorkingEntry> ChangeRow => entry =>
+        @<div class="code-row git-change-row @(Selected == entry ? "active" : string.Empty)"
+              data-testid="git-change-row" data-folder="@(GitPaths.IsFolderEntry(entry.Path) ? "true" : null)" title="@entry.Path" @onclick="() => OnSelect.InvokeAsync(entry)">
+            <span class="git-state git-state-@entry.State.ToString().ToLowerInvariant()"
+                  title="@entry.State">@StateLetter(entry.State)</span>
+            <span class="code-name">@(_treeView ? FileNameOf(entry.Path) : entry.Path)</span>
+            <button type="button" class="code-section-action git-row-op" title="Undo changes (kept as a backup stash)"
+                    aria-label="@($"Undo changes to {entry.Path}")" data-testid="git-row-undo"
+                    @onclick="() => OnUndo.InvokeAsync(([entry.Path], entry.Path))" @onclick:stopPropagation="true">
+                <CodeIcon Kind="CodeIcon.IconKind.Undo" />
+            </button>
+            @if (entry.Staged)
+            {
+                <button type="button" class="code-section-action git-row-op" title="Unstage" aria-label="@($"Unstage {entry.Path}")"
+                        data-testid="git-row-unstage"
+                        @onclick="() => OnUnstage.InvokeAsync([entry.Path])" @onclick:stopPropagation="true">
+                    <span class="git-op-glyph" aria-hidden="true">−</span>
+                </button>
+            }
+            else
+            {
+                <button type="button" class="code-section-action git-row-op" title="Stage" aria-label="@($"Stage {entry.Path}")"
+                        data-testid="git-row-stage"
+                        @onclick="() => OnStage.InvokeAsync([entry.Path])" @onclick:stopPropagation="true">
+                    <span class="git-op-glyph" aria-hidden="true">+</span>
+                </button>
+            }
+        </div>;
+
+    // One folder of the tree view: collapsible, with stage/unstage-all and undo-all for everything beneath it.
+    private RenderFragment<(ChangeTreeNode Node, bool Staged)> DirBlock => item =>
+        @<div class="git-change-dir">
+            <div class="code-row git-change-dir-row" @onclick="() => ToggleDir(DirKey(item.Node, item.Staged))">
+                <span class="code-twisty @(_collapsedDirs.Contains(DirKey(item.Node, item.Staged)) ? string.Empty : "expanded")"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></span>
+                <span class="code-name">@item.Node.Label</span>
+                <span class="code-search-count">@item.Node.Count</span>
+                <button type="button" class="code-section-action git-row-op" title="Undo all changes under this folder"
+                        aria-label="@($"Undo changes under {item.Node.Key}")"
+                        @onclick="() => OnUndo.InvokeAsync((item.Node.AllPaths().ToList(), item.Node.Key))" @onclick:stopPropagation="true">
+                    <CodeIcon Kind="CodeIcon.IconKind.Undo" />
+                </button>
+                @if (item.Staged)
+                {
+                    <button type="button" class="code-section-action git-row-op" title="Unstage this folder"
+                            aria-label="@($"Unstage everything under {item.Node.Key}")"
+                            @onclick="() => OnUnstage.InvokeAsync(item.Node.AllPaths().ToList())" @onclick:stopPropagation="true">
+                        <span class="git-op-glyph" aria-hidden="true">−</span>
+                    </button>
+                }
+                else
+                {
+                    <button type="button" class="code-section-action git-row-op" title="Stage this folder"
+                            aria-label="@($"Stage everything under {item.Node.Key}")"
+                            @onclick="() => OnStage.InvokeAsync(item.Node.AllPaths().ToList())" @onclick:stopPropagation="true">
+                        <span class="git-op-glyph" aria-hidden="true">+</span>
+                    </button>
+                }
+            </div>
+            @if (!_collapsedDirs.Contains(DirKey(item.Node, item.Staged)))
+            {
+                <div class="git-tree-children">
+                    @foreach (var file in item.Node.Files)
+                    {
+                        @ChangeRow(file)
+                    }
+                    @foreach (var dir in item.Node.Dirs)
+                    {
+                        @DirBlock((dir, item.Staged))
+                    }
+                </div>
+            }
+        </div>;
+
+    private static string StateLetter(GitEntryState state) => state switch
+    {
+        GitEntryState.Modified => "M",
+        GitEntryState.Added => "A",
+        GitEntryState.Deleted => "D",
+        GitEntryState.Renamed => "R",
+        GitEntryState.Untracked => "U",
+        GitEntryState.Conflicted => "!",
+        _ => "?",
+    };
+
+    private sealed class ChangeTreeNode
+    {
+        public string Label = string.Empty;
+        public string Key = string.Empty;
+        public List<ChangeTreeNode> Dirs { get; } = [];
+        public List<GitWorkingEntry> Files { get; } = [];
+
+        public int Count => Files.Count + Dirs.Sum(d => d.Count);
+
+        public IEnumerable<string> AllPaths() => Files.Select(f => f.Path).Concat(Dirs.SelectMany(d => d.AllPaths()));
+    }
+
+    private static ChangeTreeNode BuildTree(IReadOnlyList<GitWorkingEntry> entries)
+    {
+        var root = new ChangeTreeNode();
+        var byPath = new Dictionary<string, ChangeTreeNode> { [string.Empty] = root };
+        foreach (var entry in entries)
+        {
+            // An untracked folder is one entry ending in a slash (#369): it sits in its parent as ONE row naming the
+            // folder, staged as a whole by its own path, never as a folder node holding a nameless child.
+            EnsureDir(byPath, GitPaths.EntryDirectoryOf(entry.Path)).Files.Add(entry);
+        }
+
+        Compress(root);
+        return root;
+    }
+
+    private static ChangeTreeNode EnsureDir(Dictionary<string, ChangeTreeNode> byPath, string path)
+    {
+        if (byPath.TryGetValue(path, out var existing))
+        {
+            return existing;
+        }
+
+        var parent = EnsureDir(byPath, GitPaths.DirectoryOf(path));
+        var node = new ChangeTreeNode { Label = GitPaths.NameOf(path), Key = path };
+        parent.Dirs.Add(node);
+        byPath[path] = node;
+        return node;
+    }
+
+    private static void Compress(ChangeTreeNode node)
+    {
+        foreach (var child in node.Dirs)
+        {
+            while (child.Files.Count == 0 && child.Dirs.Count == 1)
+            {
+                var only = child.Dirs[0];
+                child.Label = $"{child.Label}/{only.Label}";
+                child.Key = only.Key;
+                child.Files.AddRange(only.Files);
+                child.Dirs.Clear();
+                child.Dirs.AddRange(only.Dirs);
+            }
+
+            Compress(child);
+        }
+    }
+
+    private static string FileNameOf(string path) => GitPaths.EntryNameOf(path);
+}

@@ -1,0 +1,1 @@
+export default async (api) => { await api.sleep(1200); return api.evaluate(`({ line: (document.querySelector('[data-testid=board-provider-line]') || {}).innerText || null, send: !!document.querySelector('[data-testid=work-item-send]') })`); };

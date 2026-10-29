@@ -1,0 +1,4 @@
+remote: policy: pushes to main are closed        
+To /data/home/gitcap-hook/o.git
+ ! [remote rejected] main -> main (pre-receive hook declined)
+error: failed to push some refs to '/data/home/gitcap-hook/o.git'

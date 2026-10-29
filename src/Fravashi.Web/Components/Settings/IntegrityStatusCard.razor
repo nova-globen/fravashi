@@ -1,0 +1,81 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Integrity
+@inject IIntegrityStatusProvider Integrity
+
+@* Honest tamper-evidence surface (F3 / ADR 0007, assertion-gap rule). Each row is a REAL comparison the integrity
+   BackgroundService ran between the launcher-recorded expected shape and the observed running shape - a PASS shows
+   the expected and actual values it compared, never a decorative tick. The mode banner states whether a mismatch
+   would fail the app closed (enforced, in-container) or is only reported (outside a container / Development /
+   unprovisioned). *@
+
+<div class="settings-integrity" data-testid="integrity-status">
+    <p class="studio-muted" data-testid="integrity-mode" data-mode="@(State.Mode == IntegrityMode.Enforced ? "enforced" : "report-only")">
+        <strong>@(State.Mode == IntegrityMode.Enforced ? "Enforced" : "Report-only")</strong> - @State.ModeReason
+    </p>
+
+    @if (State.EvaluatedUtc is null)
+    {
+        <p class="studio-muted" data-testid="integrity-pending">The integrity self-check has not run yet.</p>
+    }
+    else if (State.Checks.Count == 0)
+    {
+        <p class="studio-muted" data-testid="integrity-none">
+            No expected-shape record was found, so there is nothing to verify. In a normal install the
+            <code>@(ProductName.Command)</code> launcher records the expected shape and this container is checked against it.
+        </p>
+    }
+    else
+    {
+        <p class="studio-muted" data-testid="integrity-summary">
+            Runtime: <strong>@(State.Runtime ?? " - ")</strong> -
+            <span data-testid="integrity-counts">@State.PassCount passed, @State.FailCount failed, @State.SkippedCount skipped</span>.
+            @if (State.IsFailClosed)
+            {
+                <strong data-testid="integrity-failclosed"> Integrity check FAILED - the app is failing closed.</strong>
+            }
+        </p>
+
+        <ul class="settings-posture-list" data-testid="integrity-list">
+            @foreach (var check in State.Checks)
+            {
+                var mark = check.Status switch
+                {
+                    IntegrityCheckStatus.Pass => "✓",
+                    IntegrityCheckStatus.Fail => "✗",
+                    _ => " - ",
+                };
+                var css = check.Status switch
+                {
+                    IntegrityCheckStatus.Pass => "is-active",
+                    IntegrityCheckStatus.Fail => "is-failed",
+                    _ => "is-unavailable",
+                };
+                <li class="settings-posture-item @css"
+                    data-testid="@($"integrity-check-{Slug(check.Name)}")"
+                    data-status="@check.Status.ToString().ToLowerInvariant()">
+                    <span class="settings-posture-mark" aria-hidden="true">@mark</span>
+                    <span class="settings-posture-body">
+                        <span class="settings-posture-title">
+                            @check.Name
+                            <span class="settings-posture-status">@check.Status</span>
+                        </span>
+                        <span class="settings-posture-desc studio-muted" data-testid="@($"integrity-check-{Slug(check.Name)}-desc")">@check.Detail</span>
+                        @if (!string.IsNullOrWhiteSpace(check.Expected) || !string.IsNullOrWhiteSpace(check.Actual))
+                        {
+                            <span class="settings-posture-detail studio-muted" data-testid="@($"integrity-check-{Slug(check.Name)}-detail")">
+                                expected <code>@(check.Expected ?? " - ")</code>, observed <code>@(check.Actual ?? " - ")</code>
+                            </span>
+                        }
+                    </span>
+                </li>
+            }
+        </ul>
+    }
+</div>
+
+@code {
+    private IntegrityStatus State => Integrity.Current;
+
+    private static string Slug(string name) =>
+        new string(name.ToLowerInvariant().Select(ch => char.IsLetterOrDigit(ch) ? ch : '-').ToArray()).Trim('-');
+}

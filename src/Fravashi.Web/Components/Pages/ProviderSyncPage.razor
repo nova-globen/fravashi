@@ -1,0 +1,409 @@
+@page "/board/sync"
+@using Fravashi.Application.Mirroring
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.Mirroring
+@using Fravashi.Domain.Projects
+@using Fravashi.Domain.WorkItems
+@inject ITrackerResolver Trackers
+@inject IMirrorStore Mirror
+@inject IOutboxStore Outbox
+@inject GraphRepair Repair
+@inject TimeProvider Clock
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+@inject Fravashi.Application.Projects.IProjectStore ProjectStore
+@inject Fravashi.Application.Mirroring.ProviderSync Sync
+
+<PageTitle>@(ProductName.Short) · Provider sync</PageTitle>
+
+@* Backlog 82. ADR 0018 decision 8 asks for a VISIBLE freshness indicator and decision 5 for conflict to be
+   SURFACED rather than silently resolved, and neither is true of a thing that only exists in a database. This
+   is where a person sees what is waiting, what disagrees, and what is broken, and it is the only place any of
+   it is decided. *@
+<div class="studio-sync">
+    <PageBar Title="@(Fravashi.Application.Projects.ProjectTitle.With("Provider sync", ProjectStore, CurrentProject.Id))" />
+
+    @if (!CurrentProject.IsSetUp())
+    {
+        <FolderNotSetUp Surface="provider-sync" />
+    }
+    else
+    {
+    <div class="sync-body" data-testid="sync-body">
+        @if (_connection is { } following && _foreign.Count > 0)
+        {
+            @* Backlog 145: the items are mirrored to a provider this project no longer follows. Every act refuses until a
+               person says to follow the new one, because a sync would look the old keys up on it and tombstone them. *@
+            <section class="sync-section" data-testid="sync-foreign-section">
+                <h2>This board moved to @following</h2>
+                <p class="sync-quiet" data-testid="sync-foreign">
+                    @string.Join(" and ", _foreign.Select(f => $"{f.Items} item(s) are mirrored to {f.Connection}")), which this
+                    project no longer follows. Starting to follow @following keeps where each item was as its history,
+                    abandons what was still waiting to go there, and changes nothing on either provider. Then Send
+                    everything sends the board to @following.
+                </p>
+                <button type="button" class="studio-btn" data-testid="sync-follow" disabled="@_syncing"
+                        @onclick="FollowAsync">Start following @following</button>
+            </section>
+        }
+
+        @if (_connection is { } connection)
+        {
+            @* Backlog 47: the act that STARTS the machinery below. Explicit, never a side effect of saving,
+               because it writes to somebody's tracker. Drawn from the classes this page already uses. *@
+            <section class="sync-section" data-testid="sync-now-section">
+                <h2>This board follows @connection</h2>
+                <p class="sync-quiet">
+                    Sync now sends what is waiting and then checks every mirrored item against @connection.
+                    An item is sent from its own page, or every item not on @connection yet with Send everything.
+                </p>
+                @* Backlog 232: since when the provider has not answered and what waits for it, until an act gets an answer.
+                   Nothing drains by itself when it comes back: Sync now stays the act, because it writes to somebody's tracker. *@
+                @if (_outage is { Parts.Count: > 0 } outage)
+                {
+                    <p class="sync-said" data-testid="sync-outage"><StampedText Words="outage" /></p>
+                }
+                <button type="button" class="studio-btn" data-testid="sync-now" disabled="@_syncing"
+                        @onclick="SyncNowAsync">@(_syncing ? "Syncing..." : "Sync now")</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="sync-send-all" disabled="@_syncing"
+                        @onclick="SendAllAsync">Send everything not on @connection</button>
+                @if (_canImport)
+                {
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="sync-import" disabled="@_syncing"
+                            @onclick="ImportAsync">Bring in what @connection has</button>
+                }
+            </section>
+        }
+
+        @if (!_loaded)
+        {
+            <p class="sync-quiet">Reading what the provider last said.</p>
+        }
+        else if (_states.Count == 0 && _queue.Count == 0 && _connection is null)
+        {
+            @* Not an error and not a degraded state: with no provider configured the local board IS the
+               source of truth (ADR 0018 decision 1), and saying "nothing has synced" would read as a fault. *@
+            <section class="sync-section" data-testid="sync-local-only">
+                <h2>This board is the source of truth</h2>
+                <p>@MirrorFreshness.Local.Sentence</p>
+                <p class="sync-quiet">
+                    Nothing here is a copy of anything, so there is nothing to reconcile, nothing queued and
+                    nothing that can disagree.
+                </p>
+            </section>
+        }
+        else
+        {
+            <section class="sync-section" data-testid="sync-overview">
+                <h2>What the provider last said</h2>
+                <ul class="sync-list">
+                    @foreach (var (item, state) in _states.OrderBy(p => p.Value.Key, StringComparer.Ordinal))
+                    {
+                        var freshness = MirrorFreshness.Describe(state, Clock.GetUtcNow());
+                        <li class="sync-row" data-testid="@($"sync-item-{item.Value}")">
+                            <span class="sync-chip @ChipClass(freshness.Level)"
+                                  data-testid="@($"sync-level-{item.Value}")">@Label(freshness.Level)</span>
+                            <span class="sync-key">@state.Key</span>
+                            <span class="sync-said">@freshness.Sentence</span>
+                        </li>
+                    }
+                </ul>
+            </section>
+
+            <section class="sync-section" data-testid="sync-conflicts">
+                <h2>Waiting for a decision</h2>
+                @if (_conflicts.Count == 0)
+                {
+                    <p class="sync-quiet">Nothing disagrees.</p>
+                }
+                else
+                {
+                    @* Both values are kept and neither has been written. Choosing is the only thing that
+                       settles it, which is what "surfaced, never silently resolved" means in practice. *@
+                    @foreach (var conflict in _conflicts)
+                    {
+                        <div class="sync-conflict" data-testid="@($"sync-conflict-{conflict.Id}")">
+                            <p class="sync-question">@conflict.Question(ConnectionFor(conflict.Item))</p>
+                            <div class="sync-choices">
+                                <button type="button" class="studio-btn"
+                                        data-testid="@($"sync-keep-local-{conflict.Id}")"
+                                        @onclick="@(() => SettleAsync(conflict, ConflictChoice.Local))">
+                                    Keep what is here
+                                </button>
+                                <button type="button" class="studio-btn studio-btn-alt"
+                                        data-testid="@($"sync-keep-provider-{conflict.Id}")"
+                                        @onclick="@(() => SettleAsync(conflict, ConflictChoice.Provider))">
+                                    Take the provider's
+                                </button>
+                            </div>
+                        </div>
+                    }
+                }
+            </section>
+
+            <section class="sync-section" data-testid="sync-queue">
+                <h2>Changes on their way</h2>
+                @if (_queue.Count == 0)
+                {
+                    <p class="sync-quiet">Nothing is queued.</p>
+                }
+                else
+                {
+                    <ul class="sync-list">
+                        @foreach (var entry in _queue)
+                        {
+                            <li class="sync-row" data-testid="@($"sync-write-{entry.Id}")">
+                                <span class="sync-chip @(entry.NeedsAPerson ? "sync-chip-stuck" : "sync-chip-queued")">
+                                    @entry.State
+                                </span>
+                                <span class="sync-said">
+                                    @(entry.Failure is { Length: > 0 } why ? why : Waiting(entry))
+                                </span>
+                                @if (entry.NeedsAPerson)
+                                {
+                                    @* An abandonment is a real decision with a cost, so it is a button a
+                                       person presses and never something a retry loop does on its own. *@
+                                    <button type="button" class="studio-btn studio-btn-alt"
+                                            data-testid="@($"sync-abandon-{entry.Id}")"
+                                            @onclick="@(() => AbandonAsync(entry))">
+                                        Do not send it
+                                    </button>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        }
+
+        <section class="sync-section" data-testid="sync-graph">
+            <h2>References between the tracker and the wiki</h2>
+            <button type="button" class="studio-btn" data-testid="sync-check-graph" @onclick="CheckGraphAsync">
+                Check the graph
+            </button>
+
+            @if (_graph is { } report)
+            {
+                <p class="sync-said" data-testid="sync-graph-summary">@report.Summary()</p>
+                @foreach (var defect in report.Defects)
+                {
+                    <div class="sync-defect" data-testid="@($"sync-defect-{defect.Kind}-{defect.Target}")">
+                        <p>@defect.Sentence</p>
+                        @if (defect.Suggested is not (RepairAction.Keep or RepairAction.None))
+                        {
+                            <button type="button" class="studio-btn studio-btn-alt"
+                                    data-testid="@($"sync-repair-{defect.Target}")"
+                                    @onclick="@(() => RepairAsync(defect))">
+                                @(defect.Suggested == RepairAction.RemoveLink ? "Remove the link" : "Clear the parent")
+                            </button>
+                        }
+                    </div>
+                }
+            }
+        </section>
+
+        @if (_said is { Length: > 0 })
+        {
+            <p class="sync-outcome" data-testid="sync-outcome">@_said</p>
+        }
+    </div>
+    }
+</div>
+
+@code {
+    private IReadOnlyDictionary<WorkItemId, MirrorState> _states = new Dictionary<WorkItemId, MirrorState>();
+    private IReadOnlyList<FieldConflict> _conflicts = [];
+    private IReadOnlyList<OutboxEntry> _queue = [];
+    private GraphReport? _graph;
+    private string? _said;
+    private Fravashi.Application.Time.StampedWords? _outage;
+    private bool _loaded;
+
+    private ITracker Board => Trackers.For(CurrentProject.Require());
+
+    private string? _connection;
+    private bool _canImport;
+    private bool _syncing;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        _connection = Sync.ConnectionFor(CurrentProject.Require());
+        _canImport = Sync.CanImportFor(CurrentProject.Require());
+        await LoadAsync();
+    }
+
+    /// <summary>Backlog 49: queues every item not on the provider; Sync now then sends them.</summary>
+    private async Task SendAllAsync()
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        _syncing = true;
+        try
+        {
+            _said = (await Sync.SendAllAsync(CurrentProject.Require())).Sentence;
+            await LoadAsync();
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    private async Task ImportAsync()
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        _syncing = true;
+        try
+        {
+            _said = (await Sync.ImportAsync(CurrentProject.Require())).Sentence;
+            await LoadAsync();
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    private async Task SyncNowAsync()
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        _syncing = true;
+        try
+        {
+            _said = (await Sync.SyncNowAsync(CurrentProject.Require())).Sentence;
+            await LoadAsync();
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    private IReadOnlyList<(string Connection, int Items)> _foreign = [];
+
+    private async Task FollowAsync()
+    {
+        if (_syncing)
+        {
+            return;
+        }
+
+        _syncing = true;
+        try
+        {
+            _said = (await Sync.FollowAsync(CurrentProject.Require())).Sentence;
+            await LoadAsync();
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        _foreign = await Sync.ForeignAsync(CurrentProject.Require());
+        _states = await Mirror.ForProjectAsync(CurrentProject.Require());
+        _conflicts = await Mirror.OpenConflictsAsync(CurrentProject.Require());
+        _queue = await Outbox.OpenAsync(CurrentProject.Require());
+        _outage = await Sync.OutageSentenceAsync(CurrentProject.Require());
+        _loaded = true;
+    }
+
+    private async Task SettleAsync(FieldConflict conflict, ConflictChoice choice)
+    {
+        var settled = await Mirror.ResolveConflictAsync(CurrentProject.Require(), conflict.Id, choice, Clock.GetUtcNow());
+
+        // Settling records the DECISION. Carrying it out is the next reconciliation: taking the provider's
+        // value writes it here, keeping ours queues it to be sent, and both of those are the sync's job.
+        _said = settled
+            ? choice == ConflictChoice.Local
+                ? "Your value holds. The provider will be told at the next sync."
+                : "The provider's value holds. It will be written here at the next sync."
+            : "That disagreement has already been settled.";
+
+        await LoadAsync();
+    }
+
+    private async Task AbandonAsync(OutboxEntry entry)
+    {
+        await Outbox.MarkAsync(
+            CurrentProject.Require(),
+            entry.Id,
+            OutboxState.Abandoned,
+            null,
+            "A person decided this change will not be sent.",
+            countAttempt: false,
+            Clock.GetUtcNow());
+
+        _said = "That change will not be sent. What it was going to change is still different on the two sides.";
+        await LoadAsync();
+    }
+
+    private async Task CheckGraphAsync()
+    {
+        _graph = await Repair.InspectAsync(Board);
+        _said = null;
+    }
+
+    private async Task RepairAsync(GraphDefect defect)
+    {
+        var outcome = await Repair.ApplyAsync(Board, defect);
+        _said = outcome.Sentence;
+        _graph = await Repair.InspectAsync(Board);
+    }
+
+    private string ConnectionFor(WorkItemId item) =>
+        _states.TryGetValue(item, out var state) ? state.Connection : "the provider";
+
+    private static string Waiting(OutboxEntry entry) => entry.Kind switch
+    {
+        OutboxKind.Create => "This item has not been created on the provider yet.",
+        OutboxKind.Update => "A change to this item has not reached the provider yet.",
+        _ => "A status change has not reached the provider yet.",
+    };
+
+    private static string Label(MirrorLevel level) => level switch
+    {
+        MirrorLevel.LocalOnly => "local",
+        MirrorLevel.Fresh => "current",
+        MirrorLevel.Stale => "not recent",
+        MirrorLevel.NeverConfirmed => "never confirmed",
+        MirrorLevel.Queued => "queued",
+        MirrorLevel.Conflicted => "disagrees",
+        MirrorLevel.WriteStuck => "stuck",
+        _ => "deleted there",
+    };
+
+    private static string ChipClass(MirrorLevel level) => level switch
+    {
+        MirrorLevel.Fresh => "sync-chip-fresh",
+        MirrorLevel.Queued => "sync-chip-queued",
+        MirrorLevel.Conflicted => "sync-chip-conflict",
+        MirrorLevel.WriteStuck => "sync-chip-stuck",
+        MirrorLevel.Tombstoned => "sync-chip-gone",
+        _ => "sync-chip-stale",
+    };
+}

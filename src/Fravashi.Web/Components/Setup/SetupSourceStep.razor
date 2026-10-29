@@ -1,0 +1,94 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Web.Components.Settings
+@using Fravashi.Web.Services
+@implements IDisposable
+
+@* Step 2, Source (item #373, section 3.2): read from the folder's git through the bridge, read only. No fields and no
+   Skip: Next simply goes on. The studio never runs git init for the person. *@
+<h2 class="setup-title" id="setup-step-heading" tabindex="-1" @ref="_heading">Where does @Page.FolderName's code live?</h2>
+<p class="setup-helper">Read from the folder's Git settings. Nothing is changed.</p>
+
+<div class="setup-detected" aria-live="polite" data-testid="setup-source">
+    @switch (Page.Source.State)
+    {
+        case SetupSourceState.Reading:
+            <p class="setup-pending" data-testid="setup-source-reading">
+                <span class="setup-spinner" aria-hidden="true"></span>
+                Reading @Page.FolderName's Git settings ...
+            </p>
+            break;
+
+        case SetupSourceState.NotARepository:
+            <p data-testid="setup-source-not-git">
+                @Page.FolderName is not a Git repository. The board and the wiki work without one, and Git features turn on
+                when it becomes one.
+            </p>
+            break;
+
+        case SetupSourceState.Failed:
+            <div class="setup-alert" role="alert" data-testid="setup-source-failed">
+                <p>Git could not be read in this folder: @((Page.Source.Error ?? "no reason was given").Trim().TrimEnd('.')). You can go on; the Git page will say the same.</p>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="setup-source-retry" @onclick="Page.RereadSource">Retry</button>
+            </div>
+            break;
+
+        default:
+            <dl class="setup-facts" data-testid="setup-source-facts">
+                <dt>Branch</dt>
+                <dd data-testid="setup-source-branch">@(Page.Source.Branch ?? "None yet (no commit)")</dd>
+                @if (Page.Source.Remotes.Count == 0)
+                {
+                    <dt>Remote</dt>
+                    <dd data-testid="setup-source-no-remote">None. Pull requests turn on once the folder has one.</dd>
+                }
+                @foreach (var remote in Page.Source.Remotes)
+                {
+                    <dt>Remote</dt>
+                    <dd data-testid="setup-source-remote">
+                        <span class="setup-remote-name">@remote.Name</span>
+                        <span class="setup-remote-url">@remote.Url</span>
+                        <span class="setup-remote-kind">(@remote.HostKind)</span>
+                    </dd>
+                }
+            </dl>
+            @if (Page.Source.Main is { PullRequests: true } main)
+            {
+                @if (main.HasToken)
+                {
+                    <p class="setup-ok" data-testid="setup-source-pr-ready">
+                        <SetupGlyph Kind="check" />
+                        Pull requests: ready (a token for @main.Host is set).
+                    </p>
+                }
+                else
+                {
+                    <p class="setup-field-hint" data-testid="setup-source-pr-token">
+                        To see and open pull requests here, add a token for @main.Host in
+                        <a href="@SettingsSections.Path(SettingsSections.GitHosts)">Settings, Git hosts</a>.
+                    </p>
+                }
+            }
+            break;
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public SetupPage Page { get; set; } = default!;
+
+    private ElementReference _heading;
+
+    protected override void OnInitialized() => Page.Refreshed += OnRefreshed;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await SetupFocus.HeadingAsync(_heading);
+        }
+    }
+
+    private void OnRefreshed() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Page.Refreshed -= OnRefreshed;
+}

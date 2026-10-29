@@ -1,0 +1,103 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Read-only command view (UI11): the rendered command + its slash-command markdown preview. Delete confirmed. *@
+
+@if (_command is null)
+{
+    <div class="page-body-empty" data-testid="command-view-missing">
+        <p class="studio-muted">That command no longer exists.</p>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/commands">Back to commands</a>
+    </div>
+}
+else
+{
+    <div class="skill-view" data-testid="command-view">
+        <div class="skill-view-header">
+            <div class="skill-view-heading">
+                <h2 data-testid="command-view-title">/@_command.Name</h2>
+                <div class="studio-muted">@_command.Description</div>
+            </div>
+            <div class="skill-view-actions">
+                <a class="studio-btn" href="@($"/settings/framework/commands/edit/{Id}")" data-testid="command-edit">Edit</a>
+                <button class="studio-btn studio-btn-danger" @onclick="() => _confirmDelete = true"
+                        data-testid="command-delete">Delete</button>
+            </div>
+        </div>
+
+        <dl class="skill-view-meta">
+            @if (!string.IsNullOrWhiteSpace(_command.ArgumentHint))
+            {
+                <dt>Argument hint</dt>
+                <dd data-testid="command-view-arg-hint">@_command.ArgumentHint</dd>
+            }
+            @if (_command.AllowedTools.Count > 0)
+            {
+                <dt>Allowed tools</dt>
+                <dd data-testid="command-view-allowed-tools">@string.Join(", ", _command.AllowedTools)</dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_command.Model))
+            {
+                <dt>Model</dt>
+                <dd data-testid="command-view-model">@_command.Model</dd>
+            }
+        </dl>
+
+        <section class="skill-view-section">
+            <h2>Prompt body</h2>
+            <pre class="skill-view-content" data-testid="command-view-body">@_command.Body</pre>
+        </section>
+
+        <section class="skill-view-section">
+            <h2>Command markdown preview</h2>
+            <p class="ob-field-hint">Read-only. Claude's canonical form - string values quoted, keys unquoted. Not written to disk (no file sync).</p>
+            <pre class="skill-view-skillmd" data-testid="command-view-markdown">@_markdown</pre>
+        </section>
+    </div>
+
+    @if (_confirmDelete)
+    {
+        <div class="studio-modal-backdrop" @onclick="() => _confirmDelete = false">
+            <div class="studio-modal" style="width:420px;" @onclick:stopPropagation>
+                <h2 style="margin:0 0 10px;">Delete command</h2>
+                <p>Delete <code>/@_command.Name</code>? This cannot be undone.</p>
+                <div class="studio-modal-actions" style="margin-top:14px;">
+                    <button class="studio-btn studio-btn-danger" @onclick="DeleteAsync" data-testid="command-delete-confirm">Delete</button>
+                    <button class="studio-btn studio-btn-alt" @onclick="() => _confirmDelete = false"
+                            data-testid="command-delete-cancel">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private CommandDefinition? _command;
+    private string _markdown = string.Empty;
+    private bool _confirmDelete;
+
+    protected override void OnParametersSet()
+    {
+        _command = null;
+        if (!string.IsNullOrWhiteSpace(Id) && Store.Get(Id) is { } artifact)
+        {
+            _command = FrameworkPayload<CommandDefinition>.From(artifact);
+            _markdown = CommandDocument.ToCommandMarkdown(_command);
+        }
+    }
+
+    private void DeleteAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(Id))
+        {
+            Store.Remove(Id);
+        }
+
+        Nav.NavigateTo("/settings/framework/commands");
+    }
+}

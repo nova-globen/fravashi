@@ -1,0 +1,97 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Read-only hook view (UI11): the rendered hook + its settings.json fragment preview. Delete confirmed. *@
+
+@if (_hook is null)
+{
+    <div class="page-body-empty" data-testid="hook-view-missing">
+        <p class="studio-muted">That hook no longer exists.</p>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/hooks">Back to hooks</a>
+    </div>
+}
+else
+{
+    <div class="skill-view" data-testid="hook-view">
+        <div class="skill-view-header">
+            <div class="skill-view-heading">
+                <h2 data-testid="hook-view-title">@_hook.Name</h2>
+                <div class="studio-muted">@_hook.Event</div>
+            </div>
+            <div class="skill-view-actions">
+                <a class="studio-btn" href="@($"/settings/framework/hooks/edit/{Id}")" data-testid="hook-edit">Edit</a>
+                <button class="studio-btn studio-btn-danger" @onclick="() => _confirmDelete = true"
+                        data-testid="hook-delete">Delete</button>
+            </div>
+        </div>
+
+        <dl class="skill-view-meta">
+            <dt>Event</dt>
+            <dd data-testid="hook-view-event">@_hook.Event</dd>
+            <dt>Matcher</dt>
+            <dd data-testid="hook-view-matcher">@(string.IsNullOrWhiteSpace(_hook.Matcher) ? "(all)" : _hook.Matcher)</dd>
+            @if (_hook.TimeoutSeconds is { } t)
+            {
+                <dt>Timeout</dt>
+                <dd data-testid="hook-view-timeout">@t s</dd>
+            }
+        </dl>
+
+        <section class="skill-view-section">
+            <h2>Command</h2>
+            <pre class="skill-view-content" data-testid="hook-view-command">@_hook.Command</pre>
+        </section>
+
+        <section class="skill-view-section">
+            <h2>settings.json preview</h2>
+            <p class="ob-field-hint">Read-only. The <code>hooks</code> settings fragment. Not written to disk (no file sync).</p>
+            <pre class="skill-view-skillmd" data-testid="hook-view-json">@_json</pre>
+        </section>
+    </div>
+
+    @if (_confirmDelete)
+    {
+        <div class="studio-modal-backdrop" @onclick="() => _confirmDelete = false">
+            <div class="studio-modal" style="width:420px;" @onclick:stopPropagation>
+                <h2 style="margin:0 0 10px;">Delete hook</h2>
+                <p>Delete <strong>@_hook.Name</strong>? This cannot be undone.</p>
+                <div class="studio-modal-actions" style="margin-top:14px;">
+                    <button class="studio-btn studio-btn-danger" @onclick="DeleteAsync" data-testid="hook-delete-confirm">Delete</button>
+                    <button class="studio-btn studio-btn-alt" @onclick="() => _confirmDelete = false"
+                            data-testid="hook-delete-cancel">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private HookDefinition? _hook;
+    private string _json = string.Empty;
+    private bool _confirmDelete;
+
+    protected override void OnParametersSet()
+    {
+        _hook = null;
+        if (!string.IsNullOrWhiteSpace(Id) && Store.Get(Id) is { } artifact)
+        {
+            _hook = FrameworkPayload<HookDefinition>.From(artifact);
+            _json = HookDocument.ToSettingsJson(_hook);
+        }
+    }
+
+    private void DeleteAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(Id))
+        {
+            Store.Remove(Id);
+        }
+
+        Nav.NavigateTo("/settings/framework/hooks");
+    }
+}

@@ -1,0 +1,342 @@
+@namespace Fravashi.Web.Components.Sessions
+@using System.Globalization
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Sessions.Tools
+@using Fravashi.Application.WorkItems
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+
+@* A change waiting on the user. The agent is BLOCKED here until this is answered (decision 5:
+   every change asks, and there is deliberately no "always allow this tool"; ADR 0028's trust level is a
+   choice a person makes for a folder, shown on the work strip and recorded per call, never a remembered tool).
+
+   The subject line is CAPPED, so it is never the only path-shaped thing here: a file_path long enough
+   to be cut reads as an ordinary folder inside the copy while resolving to the studio's own key ring or
+   to this session's approve.sh. Whenever the request carries a resolved target, it is shown in full,
+   and a target outside the contained copy is called out before the buttons rather than after them.
+
+   The same rule applies to arguments that are not paths (AgentToolEffects). A call can name no location
+   at all and still be the one to stop: an Agent call showed its description and its prompt while
+   "isolation": "remote" sent the workspace copy to a cloud environment off this machine. Both that and
+   how the agent really runs here (in the foreground, since the studio switches background tasks off,
+   backlog 192) are rendered now, and the loud ones are rendered loudly. *@
+<div class="session-approval" data-testid="approval-prompt">
+    <div class="session-approval-head">
+        <span class="session-approval-badge">Needs your approval</span>
+        @* Work item #356: the tool by a name a person reads; the raw name stays under "What it wants to do". *@
+        <span class="session-approval-tool" data-testid="approval-tool">@StudioToolDescriptions.DisplayName(Request.ToolName)</span>
+    </div>
+    @* Work item #351: what the call will do, in one sentence, from the same describer that labels its row once it has
+       run. It ADDS to the card: the subject line, the effects, the target and the raw arguments are all still below. *@
+    @if (Sentence is { Length: > 0 } sentence)
+    {
+        <div class="session-approval-sentence" data-testid="approval-sentence">@sentence</div>
+    }
+    <div class="session-approval-detail">@ShownDetail</div>
+    @* Follow-up filed 2026-10-22 (approval card with no arguments): a call with nothing in it said nothing at all, so an
+       empty call read like a card that was hiding its fields. It says so in words now. *@
+    @if (Request.Input.Count == 0)
+    {
+        <div class="session-approval-no-arguments" data-testid="approval-no-arguments">@NoArgumentsSentence</div>
+    }
+    @* Backlog 243: what the commit reviewer role said before this card was shown. A pass carries the reviewer's summary;
+       the role off and a review with no verdict say so as loudly as a warning, because "not reviewed" must never read
+       like "reviewed". A fail never reaches a card: it went back to the agent with the findings. *@
+    @if (Request.Review is { } review)
+    {
+        <div class="session-approval-review @(review.Outcome == CommitReviewOutcome.Passed ? "session-approval-review-pass" : "session-approval-review-none")"
+             data-testid="approval-review" data-outcome="@review.Outcome.ToString().ToLowerInvariant()">
+            <div class="session-approval-review-line" data-testid="approval-review-line">@review.CardLine</div>
+            @if (review.Outcome == CommitReviewOutcome.Passed && review.Summary is { Length: > 0 } summary)
+            {
+                <div class="session-approval-review-summary" data-testid="approval-review-summary">@summary</div>
+            }
+            @if (review.Conversation is { } conversation)
+            {
+                <div class="session-approval-review-meta" data-testid="approval-review-meta">
+                    Review conversation @conversation.Value.ToString("D"), @((int)review.Duration.TotalSeconds) s,
+                    @review.Tokens.ToString("N0", CultureInfo.InvariantCulture) tokens.
+                </div>
+            }
+        </div>
+    }
+    @* What the arguments MEAN, above the path block on purpose: a call can name no path at all and
+       still be the one worth stopping. An Agent call renders a description and a prompt, and the
+       "isolation" that sends the workspace copy to a cloud environment used to render nowhere. *@
+    @foreach (var effect in Request.Effects ?? [])
+    {
+        <div class="session-approval-effect @(effect.Weight == AgentEffectWeight.Alarm ? "session-approval-effect-alarm" : null)"
+             data-testid="approval-effect">
+            @effect.Notice
+        </div>
+    }
+    @if (Request.Target is { } target)
+    {
+        <div class="session-approval-target @(Outside ? "session-approval-target-outside" : null)"
+             data-testid="approval-target">
+            @if (Banner is { Length: > 0 } banner)
+            {
+                <div class="session-approval-outside" data-testid="approval-outside">@banner</div>
+            }
+            <dl>
+                <dt>@target.Field</dt>
+                <dd>@target.Requested</dd>
+                @* Always rendered, including when the studio could not resolve it: silence there reads
+                   as "nothing to worry about", which is the failure this whole block exists to end. *@
+                <dt>lands on</dt>
+                <dd data-testid="approval-target-resolved">
+                    @(string.IsNullOrWhiteSpace(target.Canonical)
+                        ? "the studio could not work this out"
+                        : target.Canonical)
+                </dd>
+                @if (!string.IsNullOrWhiteSpace(target.Collapsed))
+                {
+                    @* The readings disagree, which is how a link inside the copy hides a destination
+                       outside it. Both get shown; neither is the studio's guess. *@
+                    <dt>or, with ".." collapsed first</dt>
+                    <dd data-testid="approval-target-collapsed">@target.Collapsed</dd>
+                }
+            </dl>
+        </div>
+    }
+    @if (!string.IsNullOrWhiteSpace(Request.Warning))
+    {
+        @* A read that would normally run unattended and does not: say why, on the prompt itself. *@
+        <div class="session-approval-warning" data-testid="approval-warning">@Request.Warning</div>
+    }
+    @if (Body is { Length: > 0 } || RawNameDiffers)
+    {
+        <details class="session-approval-body">
+            <summary>What it wants to do</summary>
+            @if (RawNameDiffers)
+            {
+                <div class="session-approval-raw-name" data-testid="approval-raw-name">Tool: @Request.ToolName</div>
+            }
+            @if (Body is { Length: > 0 } body)
+            {
+                <pre>@body</pre>
+            }
+        </details>
+    }
+    @* Backlog 240: an argument the block above shows only the head and tail of is named here, OUTSIDE the
+       collapsed block so it is seen, with the whole raw value one click away. The value comes from the request's
+       CutArguments (the raw input the studio decided on), never from the display copy, and the box is rendered
+       only when asked for, so a long value crosses the circuit once. Past the card's limit it says so loudly
+       rather than offer a view it cannot give. *@
+    @foreach (var argument in Request.CutArguments ?? [])
+    {
+        <div class="session-approval-cut" data-testid="approval-cut">
+            @if (argument.Full is { } full)
+            {
+                <div class="session-approval-cut-line">
+                    <span>
+                        @argument.Name is @argument.Length.ToString("N0", CultureInfo.InvariantCulture) characters;
+                        @AgentToolSubject.NotShown(argument.Hidden) above.
+                    </span>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="approval-cut-toggle"
+                            @onclick="() => Toggle(argument.Name)">
+                        @(_open.Contains(argument.Name) ? "Hide the full value" : "Show the full value")
+                    </button>
+                </div>
+                @if (_open.Contains(argument.Name))
+                {
+                    <pre class="session-approval-full" data-testid="approval-full-value">@full</pre>
+                }
+            }
+            else
+            {
+                <div class="session-approval-warning" data-testid="approval-cut-oversize">
+                    @argument.Name is @argument.Length.ToString("N0", CultureInfo.InvariantCulture) characters, more than
+                    the card can show in full (@AgentToolSubject.MaxFullValueLength.ToString("N0", CultureInfo.InvariantCulture)).
+                    Only its head and tail are above; deny unless you know what the rest is.
+                </div>
+            }
+        </div>
+    }
+    <div class="session-approval-actions">
+        <button type="button" class="studio-btn" data-testid="approve"
+                disabled="@Busy" @onclick="() => Answer.InvokeAsync((Request.RequestId, true, null))">
+            Approve
+        </button>
+        <button type="button" class="studio-btn studio-btn-alt" data-testid="deny"
+                disabled="@Busy" @onclick="DenyAsync">
+            Deny
+        </button>
+        <span class="session-approval-hint">The agent is waiting.</span>
+    </div>
+    @* Backlog 220: "no, because". The words go to the agent as the refused call's result, so it can correct
+       and retry in the same turn; without them it is told only that the change was declined. Enter in the
+       field denies (a single line, so Enter means nothing else), and Approve never reads it. *@
+    <label class="session-approval-reason">
+        <span>Reason for Deny (optional, the agent reads it)</span>
+        <input type="text" data-testid="deny-reason" maxlength="@ToolApprovalDecision.MaxUserReasonLength"
+               disabled="@Busy" placeholder="for example: the commit message needs a scope"
+               @bind="_reason" @bind:event="oninput" @onkeydown="ReasonKeyAsync" />
+    </label>
+</div>
+
+@code {
+    /// <summary>The CLI's tool that sends text to another agent, matched exactly.</summary>
+    private const string SendMessageTool = "SendMessage";
+
+    /// <summary>What the card says for a call that carries no arguments at all.</summary>
+    public const string NoArgumentsSentence = "This call carries no arguments.";
+
+    [Parameter, EditorRequired]
+    public PendingToolApproval Request { get; set; } = default!;
+
+    [Parameter]
+    public bool Busy { get; set; }
+
+    /// <summary>
+    /// Raised with the request id, the answer, and the person's own reason for a denial (null for an approval, and
+    /// whatever was typed, possibly empty, for a denial; the sentence the agent reads is built from it by
+    /// <see cref="ToolApprovalDecision.UserReason"/>).
+    /// </summary>
+    [Parameter]
+    public EventCallback<(string RequestId, bool Approved, string? Reason)> Answer { get; set; }
+
+    private string? _reason;
+
+    /// <summary>What the studio already knew about the call's target when the card was shown (work item #351).</summary>
+    private StudioToolFacts _facts = new();
+
+    /// <summary>The request the facts were read for, so a re-render does not read them again.</summary>
+    private string? _factsFor;
+
+    /// <summary>The card's sentence, or null for a tool the describer does not cover (every built-in).</summary>
+    private string? Sentence =>
+        StudioToolDescriptions.ApprovalSentence(Request.ToolName, Request.Input, _facts) is { } sentence
+            ? TranscriptRedactor.Redact(sentence)
+            : null;
+
+    /// <summary>
+    /// Reads the one fact that is cheap and worth a sentence: a work item's status before a move, so the card can say
+    /// "from Ready". Optional services, so a wiring without the tracker shows the sentence without it; a read that fails
+    /// shows it without it too, because a missing "from" never misleads.
+    /// </summary>
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_factsFor == Request.RequestId)
+        {
+            return;
+        }
+
+        _factsFor = Request.RequestId;
+        _facts = new StudioToolFacts();
+        if (StudioToolDescriptions.BareName(Request.ToolName) != "work_item_transition"
+            || StudioToolDescriptions.WorkItemNumber(Request.ToolName, Request.Input) is not { } number
+            || Services.GetService<ITrackerResolver>() is not { } trackers
+            || Services.GetService<ISessionProjects>()?.For(Request.SessionId) is not { } project)
+        {
+            return;
+        }
+
+        try
+        {
+            if (await trackers.For(project).GetByNumberAsync(number) is { } item)
+            {
+                _facts = new StudioToolFacts(item.Status);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+        {
+            // The sentence stands without its "from".
+        }
+    }
+
+    /// <summary>The cut arguments whose full value the person has opened.</summary>
+    private readonly HashSet<string> _open = new(StringComparer.Ordinal);
+
+    private void Toggle(string name)
+    {
+        if (!_open.Remove(name))
+        {
+            _open.Add(name);
+        }
+    }
+
+    /// <summary>True when the header shows the tool by another name than its raw one, which then sits in the raw view.</summary>
+    private bool RawNameDiffers =>
+        !string.Equals(StudioToolDescriptions.DisplayName(Request.ToolName), Request.ToolName, StringComparison.Ordinal);
+
+    private Task DenyAsync() => Answer.InvokeAsync((Request.RequestId, false, _reason));
+
+    private Task ReasonKeyAsync(KeyboardEventArgs e) =>
+        e.Key == "Enter" && !Busy ? DenyAsync() : Task.CompletedTask;
+
+    /// <summary>
+    /// The subject line, shortened at render time (backlog 103): the request carries the RAW value
+    /// (the store's copy is authoritative), and the display cap keeps head AND tail per
+    /// AgentToolSubject.Shorten's contract so the cut cannot disguise a path's destination.
+    /// </summary>
+    private string ShownDetail =>
+        AgentToolSubject.Shorten(Request.Detail, AgentToolSubject.MaxLength);
+
+    /// <summary>
+    /// True when the call's path leaves the session's contained copy, or when the studio could not tell
+    /// that it does not. Undetermined is treated as the loud case on purpose: "we could not work this
+    /// out" must never render as quietly as "this is inside".
+    /// </summary>
+    private bool Outside =>
+        Request.Target is { Containment: not AgentTargetContainment.Inside };
+
+    /// <summary>The line above the target that says, in as many words, that this is not an ordinary
+    /// in-copy change. Empty when the target is plainly inside the copy.</summary>
+    private string? Banner => Request.Target?.Containment switch
+    {
+        AgentTargetContainment.Outside => "OUTSIDE this workspace's contained copy",
+        AgentTargetContainment.Undetermined => "The studio could not place this inside the workspace's contained copy",
+        _ => null,
+    };
+
+    /// <summary>
+    /// The argument worth showing in full: file content for a write, the command for a shell call. A call with
+    /// none of those shows EVERY argument by name instead.
+    /// <para>
+    /// "new_source" is here because NotebookEdit spells its content that way, and without it a notebook
+    /// change rendered as a path and two buttons with the text it was about to write shown nowhere.
+    /// </para>
+    /// <para>
+    /// The every-argument fallback is backlog 167: the second self-hosting trial asked to rewrite a work item's
+    /// description, 4,500 characters under an argument named "description", and the card showed only the head and
+    /// tail of the subject line, so the person approved a tracker rewrite without being able to read it.
+    /// </para>
+    /// <para>
+    /// SendMessage comes first and on its own (backlog 192): its "content" is the CLI's own shortened preview, and
+    /// the text really sent to the other agent is "message", so a card that picked "content" asked a person to
+    /// approve a message they could not read. Its recipient is shown with it.
+    /// </para>
+    /// </summary>
+    private string? Body
+    {
+        get
+        {
+            if (string.Equals(Request.ToolName, SendMessageTool, StringComparison.Ordinal)
+                && Request.Input.TryGetValue("message", out var message)
+                && !string.IsNullOrWhiteSpace(message))
+            {
+                return Request.Input.TryGetValue("to", out var to) && !string.IsNullOrWhiteSpace(to)
+                    ? "to:\n" + to + "\n\nmessage:\n" + message
+                    : message;
+            }
+
+            foreach (var key in new[] { "content", "new_string", "new_source", "command", "prompt" })
+            {
+                if (Request.Input.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            var every = Request.Input
+                .Where(argument => !string.IsNullOrWhiteSpace(argument.Value))
+                .Select(argument => argument.Key + ":\n" + argument.Value)
+                .ToList();
+            return every.Count == 0 ? null : string.Join("\n\n", every);
+        }
+    }
+}

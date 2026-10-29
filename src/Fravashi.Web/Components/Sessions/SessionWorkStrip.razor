@@ -1,0 +1,363 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Application.Wiki
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.Projects
+@using Fravashi.Domain.Wiki
+@using Fravashi.Domain.WorkItems
+@inject ISessionWorkItems Work
+@inject ISessionPlans Plans
+@inject ITrackerResolver Trackers
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+@inject IWikiLibraries Wikis
+@inject QuickChange Quick
+@inject ISessionGovernance Governance
+@inject ISessionRoles Roles
+@inject NavigationManager Nav
+@implements IDisposable
+
+@* Work item #356: the folder's trust level moved from here to the session header (SessionTrustPicker), where it is
+   always on screen. *@
+
+@* Backlog 44, 45 and 46: what this conversation is bound to, and what is missing. Without it the gates
+   would be rules only the agent can explain, and a user whose session was refused would have no way to say
+   "yes, it is this item" except by asking the agent to do it for them. It says whether changes are allowed
+   before it says what is linked, because that is the question someone reading a refusal actually has. *@
+@* Item #373: a folder that is not set up has no project, so there is nothing to work on or under; the session pane
+   says so in its own place, and this strip draws nothing. *@
+@if (CurrentProject.IsSetUp())
+{
+<div class="session-work" data-testid="session-work">
+    <span class="session-work-state @(_mayChange ? "can" : "held")" data-testid="session-work-state">
+        @(_mayChange ? "Changes allowed" : "Changes held")
+    </span>
+
+    @* Backlog 129 (decided 2026-09-21). Bound to an item and a plan, this strip wrapped onto six rows
+       and took about 190px, which at the minimum window size left the transcript one line tall. So it is one
+       summary line, and the controls are behind Details. It opens by itself while changes are HELD, because
+       that is when a person needs the controls to say "it is this item"; once the session may change there
+       is nothing to fix, and the room belongs to the conversation. A person's own click always wins. *@
+    @if (!Expanded)
+    {
+        <span class="session-work-summary" data-testid="session-work-summary">@Summary</span>
+    }
+    <button type="button" class="studio-link-btn session-work-toggle" data-testid="session-work-toggle"
+            aria-expanded="@(Expanded ? "true" : "false")" @onclick="() => _expandedByPerson = !Expanded">
+        @(Expanded ? "Hide details" : "Details")
+    </button>
+
+    @if (Expanded)
+    {
+
+    @* Backlog 88: which role this conversation runs as. It sits first because it decides what the rest of
+       the strip even permits, and its instructions are shown on hover rather than hidden in a settings
+       page, so the person and the agent are looking at the same statement of what this session is for. *@
+    <span class="session-work-label">as</span>
+    <select class="studio-input session-work-role" data-testid="session-role"
+            title="@(_role?.Instructions ?? "Unrestricted: this session may do anything a person approves.")"
+            @onchange="OnRoleAsync">
+        <option value="">Unrestricted</option>
+        @foreach (var role in Roles.Catalogue)
+        {
+            <option value="@role.Id" selected="@(_role?.Id == role.Id)">@role.Name</option>
+        }
+    </select>
+
+    <span class="session-work-label">Working on</span>
+    @if (_items.Count == 0)
+    {
+        <span class="session-work-none" data-testid="session-work-none">nothing yet</span>
+    }
+    else
+    {
+        @foreach (var entry in _items)
+        {
+            <span class="session-work-chip" data-testid="session-work-chip">
+                <button type="button" class="session-work-open" data-testid="session-work-open"
+                        @onclick="@(() => Nav.NavigateTo($"/workitems/{entry.Number}"))">
+                    #@entry.Number @entry.Title
+                </button>
+                <button type="button" class="session-work-remove" data-testid="session-work-remove"
+                        title="Stop working on this item" @onclick="@(() => UnlinkItem(entry))">
+                    x
+                </button>
+            </span>
+        }
+    }
+
+    <select class="studio-input session-work-add" data-testid="session-work-add" @onchange="LinkItemAsync">
+        <option value="">Add an item...</option>
+        @foreach (var item in _itemChoices)
+        {
+            <option value="@item.Number">#@item.Number @item.Title</option>
+        }
+    </select>
+
+    <span class="session-work-label">under plan</span>
+    @if (_plans.Count == 0)
+    {
+        <span class="session-work-none" data-testid="session-plan-none">none yet</span>
+    }
+    else
+    {
+        @foreach (var plan in _plans)
+        {
+            <span class="session-work-chip" data-testid="session-plan-chip">
+                <button type="button" class="session-work-open" data-testid="session-plan-open"
+                        @onclick="@(() => Nav.NavigateTo($"/wiki/{plan.Number}"))">
+                    @("@" + plan.Number) @plan.Title
+                </button>
+                <button type="button" class="session-work-remove" data-testid="session-plan-remove"
+                        title="Stop working under this plan" @onclick="@(() => UnlinkPlan(plan))">
+                    x
+                </button>
+            </span>
+        }
+    }
+
+    <select class="studio-input session-work-add" data-testid="session-plan-add" @onchange="LinkPlanAsync">
+        <option value="">Add a plan...</option>
+        @foreach (var plan in _planChoices)
+        {
+            <option value="@plan.Number">@("@" + plan.Number) @plan.Title</option>
+        }
+    </select>
+
+    @* The gate's verdict in a person's words (work item #362): the agent's own sentence names raw tools and is
+       written as its job, so the strip words the SAME verdict for the person reading it. Both come from one
+       verdict, so they can never disagree about whether the session is held. *@
+    @if (_missing is { Length: > 0 } missing)
+    {
+        <span class="session-work-missing" data-testid="session-work-missing">@missing</span>
+    }
+
+    @* Backlog 85's quick-change path. It is not a bypass: it creates the same item, plan and done-check
+       the gates ask for, so a typo fix costs a step rather than a conversation about scope. Offered only
+       while the session is actually held, because there is nothing to shortcut once it is not. *@
+    @if (!_mayChange)
+    {
+        <div class="session-work-quick" data-testid="session-work-quick">
+            <input class="studio-input" data-testid="session-quick-summary"
+                   placeholder="Or describe a small change in one line"
+                   value="@_quick" @oninput="e => _quick = e.Value?.ToString() ?? string.Empty" />
+            <button type="button" class="studio-btn" data-testid="session-quick-start"
+                    disabled="@(_quick.Trim().Length == 0)" @onclick="StartQuickAsync">
+                Start it
+            </button>
+        </div>
+    }
+    }
+</div>
+}
+
+@code {
+    // Backlog 121: the wiki of this window's project, asked for at each use so a rebinding is seen.
+    private IWikiLibrary Wiki => Wikis.For(CurrentProject.Require());
+
+    /// <summary>The conversation this strip is about.</summary>
+    [Parameter, EditorRequired]
+    public AgentSessionId Session { get; set; }
+
+    /// <summary>The workspace the conversation runs in (ADR 0028): the folder whose trust level the picker sets.</summary>
+    [Parameter]
+    public string? WorkspaceId { get; set; }
+
+    private readonly List<Bound> _items = [];
+    private readonly List<Bound> _plans = [];
+
+    private IReadOnlyList<WorkItem> _itemChoices = [];
+    private IReadOnlyList<WikiItem> _planChoices = [];
+    private bool _mayChange;
+    private string? _missing;
+    private string _quick = string.Empty;
+    private AgentRole? _role;
+
+    // Null until the person clicks: then their choice stands, whatever the gate says (backlog 129).
+    private bool? _expandedByPerson;
+
+    /// <summary>Open while changes are held, closed once they are allowed, unless the person said otherwise.</summary>
+    private bool Expanded => _expandedByPerson ?? !_mayChange;
+
+    /// <summary>The binding in one line: the role, the first item and plan, and how many more there are.</summary>
+    private string Summary
+    {
+        get
+        {
+            static string Of(IReadOnlyList<Bound> bound, string mark, string none) => bound.Count switch
+            {
+                0 => none,
+                1 => $"{mark}{bound[0].Number} {bound[0].Title}",
+                _ => $"{mark}{bound[0].Number} {bound[0].Title} and {bound.Count - 1} more",
+            };
+
+            var role = _role is { } r ? $"as {r.Name}, " : string.Empty;
+            return $"{role}working on {Of(_items, "#", "nothing yet")}, under plan {Of(_plans, "@", "none yet")}";
+        }
+    }
+
+    // Backlog 121: what can be PICKED here is the window's project; what is already bound is read from the
+    // project its link was made in, which the link row carries.
+    private ITracker Tracker => Trackers.For(CurrentProject.Require());
+
+    /// <summary>One binding, already resolved to what a person reads.</summary>
+    private sealed record Bound(string Id, int Number, string Title);
+
+    protected override void OnInitialized()
+    {
+        Work.Changed += OnChanged;
+        Plans.Changed += OnChanged;
+        Roles.Changed += OnChanged;
+    }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        Work.Changed -= OnChanged;
+        Plans.Changed -= OnChanged;
+        Roles.Changed -= OnChanged;
+    }
+
+    private void OnChanged(AgentSessionId session)
+    {
+        // The agent binds itself when it clears a gate, so this follows changes it did not make.
+        if (session != Session)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+    }
+
+    private async Task LoadAsync()
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        _role = Roles.For(Session);
+        _items.Clear();
+        foreach (var entry in Work.For(Session))
+        {
+            if (await Trackers.For(entry.Project).GetAsync(entry.Item) is { } item)
+            {
+                _items.Add(new Bound(item.Id.Value, item.Number, item.Title));
+            }
+        }
+
+        _plans.Clear();
+        foreach (var entry in Plans.For(Session))
+        {
+            if (await Wiki.GetAsync(entry.WikiItemId) is { } plan)
+            {
+                _plans.Add(new Bound(plan.Id, plan.Number, plan.Title));
+            }
+        }
+
+        // The verdict comes from the gate against a representative workspace change, so this strip and the
+        // refusal an agent receives can never disagree about whether the session may act. It asks the same
+        // fact source, so a cancelled item or an empty plan reads as held here too (backlog 85).
+        //
+        // Scope and change budget are about ONE change and there is none in hand, so they are set aside
+        // rather than guessed: saying "held" because the next file might be the one over budget would be a
+        // warning about a change nobody has attempted.
+        var facts = Governance.Facts(Session, null) with
+        {
+            InDeclaredScope = true,
+            WithinChangeBudget = true,
+        };
+
+        var verdict = AgentWorkGate.Check("Edit", readOnly: false, facts);
+        _mayChange = !verdict.Refuses();
+        _missing = WorkGateWordsForPeople.For(verdict);
+
+        var page = await Tracker.QueryAsync(new WorkItemQuery
+        {
+            Categories = [StatusCategory.Proposed, StatusCategory.InProgress],
+            Limit = 100,
+        });
+        _itemChoices = [.. page.Items.Where(i => _items.All(l => l.Id != i.Id.Value))];
+
+        var plans = await Wiki.ListAsync(new WikiItemQuery { Types = [WikiItemType.Plan], Limit = 100 });
+        _planChoices = [.. plans.Where(p => _plans.All(l => l.Id != p.Id))];
+    }
+
+    private async Task UnlinkItem(Bound entry)
+    {
+        Work.Unlink(Session, new WorkItemId(entry.Id));
+        await LoadAsync();
+    }
+
+    private async Task UnlinkPlan(Bound entry)
+    {
+        Plans.Unlink(Session, entry.Id);
+        await LoadAsync();
+    }
+
+    private async Task LinkItemAsync(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var number)
+            && await Tracker.GetByNumberAsync(number) is { } item)
+        {
+            // "user" rather than the session, so a reader can tell who chose this.
+            Work.Link(Session, item.Id, CurrentProject.Require(), "user");
+        }
+
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// One confirmed step that creates the item, the plan and the done-check and binds the session to
+    /// both. The confirmation IS this button: the user typed the line and pressed it.
+    /// </summary>
+    private async Task StartQuickAsync()
+    {
+        var summary = _quick.Trim();
+        if (summary.Length == 0)
+        {
+            return;
+        }
+
+        if (await Quick.StartAsync(Session, CurrentProject.Require(), summary) is not null)
+        {
+            _quick = string.Empty;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task OnRoleAsync(ChangeEventArgs e)
+    {
+        var id = e.Value?.ToString();
+        if (string.IsNullOrEmpty(id))
+        {
+            Roles.Clear(Session);
+        }
+        else
+        {
+            Roles.Assign(Session, id);
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task LinkPlanAsync(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var number)
+            && await Wiki.GetByNumberAsync(number) is { Type: WikiItemType.Plan } plan)
+        {
+            Plans.Link(Session, plan.Id, "user");
+        }
+
+        await LoadAsync();
+    }
+}

@@ -1,0 +1,131 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject ISecretStore Secrets
+@inject NavigationManager Nav
+
+@* Read-only MCP server view (UI11): the rendered config + its .mcp.json fragment preview. Secret env/header
+   values never render - they show as env-expansion placeholders. Delete removes stored secrets too. *@
+
+@if (_server is null)
+{
+    <div class="page-body-empty" data-testid="mcp-view-missing">
+        <p class="studio-muted">That MCP server no longer exists.</p>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/mcp-servers">Back to MCP servers</a>
+    </div>
+}
+else
+{
+    <div class="skill-view" data-testid="mcp-view">
+        <div class="skill-view-header">
+            <div class="skill-view-heading">
+                <h2 data-testid="mcp-view-title">@_server.Name</h2>
+                <div class="studio-muted">@(_server.Transport == McpTransport.Stdio ? "stdio" : "http")</div>
+            </div>
+            <div class="skill-view-actions">
+                <a class="studio-btn" href="@($"/settings/framework/mcp-servers/edit/{Id}")" data-testid="mcp-edit">Edit</a>
+                <button class="studio-btn studio-btn-danger" @onclick="() => _confirmDelete = true"
+                        data-testid="mcp-delete">Delete</button>
+            </div>
+        </div>
+
+        <dl class="skill-view-meta">
+            @if (_server.Transport == McpTransport.Stdio)
+            {
+                <dt>Command</dt>
+                <dd data-testid="mcp-view-command">@_server.Command</dd>
+                @if (_server.Args.Count > 0)
+                {
+                    <dt>Arguments</dt>
+                    <dd data-testid="mcp-view-args">@string.Join(" ", _server.Args)</dd>
+                }
+                @if (_server.Env.Count > 0)
+                {
+                    <dt>Environment</dt>
+                    <dd data-testid="mcp-view-env">
+                        @foreach (var e in _server.Env)
+                        {
+                            <div>@e.Key = @(e.IsSecret ? "(secret - stored securely)" : e.Value)</div>
+                        }
+                    </dd>
+                }
+            }
+            else
+            {
+                <dt>URL</dt>
+                <dd data-testid="mcp-view-url">@_server.Url</dd>
+                @if (_server.Headers.Count > 0)
+                {
+                    <dt>Headers</dt>
+                    <dd data-testid="mcp-view-headers">
+                        @foreach (var h in _server.Headers)
+                        {
+                            <div>@h.Key: @(h.IsSecret ? "(secret - stored securely)" : h.Value)</div>
+                        }
+                    </dd>
+                }
+            }
+        </dl>
+
+        <section class="skill-view-section">
+            <h2>.mcp.json preview</h2>
+            <p class="ob-field-hint">Read-only. Secret values show as <code>@("${KEY}")</code> env-expansion placeholders - the plaintext is stored in the secret store, never here. Not written to disk (no file sync).</p>
+            <pre class="skill-view-skillmd" data-testid="mcp-view-json">@_json</pre>
+        </section>
+    </div>
+
+    @if (_confirmDelete)
+    {
+        <div class="studio-modal-backdrop" @onclick="() => _confirmDelete = false">
+            <div class="studio-modal" style="width:420px;" @onclick:stopPropagation>
+                <h2 style="margin:0 0 10px;">Delete MCP server</h2>
+                <p>Delete <strong>@_server.Name</strong>? Its stored secrets are removed too. This cannot be undone.</p>
+                <div class="studio-modal-actions" style="margin-top:14px;">
+                    <button class="studio-btn studio-btn-danger" @onclick="DeleteAsync" data-testid="mcp-delete-confirm">Delete</button>
+                    <button class="studio-btn studio-btn-alt" @onclick="() => _confirmDelete = false"
+                            data-testid="mcp-delete-cancel">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private McpServerDefinition? _server;
+    private string _json = string.Empty;
+    private bool _confirmDelete;
+
+    protected override void OnParametersSet()
+    {
+        _server = null;
+        if (!string.IsNullOrWhiteSpace(Id) && Store.Get(Id) is { } artifact)
+        {
+            _server = FrameworkPayload<McpServerDefinition>.From(artifact);
+            _json = McpServerDocument.ToMcpJson(_server);
+        }
+    }
+
+    private void DeleteAsync()
+    {
+        if (_server is not null)
+        {
+            foreach (var reference in _server.Env.Concat(_server.Headers)
+                .Where(e => e.IsSecret && !string.IsNullOrWhiteSpace(e.SecretRef))
+                .Select(e => e.SecretRef!))
+            {
+                Secrets.Remove(reference);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(Id))
+        {
+            Store.Remove(Id);
+        }
+
+        Nav.NavigateTo("/settings/framework/mcp-servers");
+    }
+}

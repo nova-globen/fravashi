@@ -1,0 +1,73 @@
+@namespace Fravashi.Web.Components.Code
+@using Fravashi.Domain.Repository
+@using Fravashi.Web.Services
+@inject FileIconCatalog Icons
+
+@* Tree state (expansion set + children cache) lives on the page, not in the node, so refresh,
+   collapse-all, and post-mutation reloads can operate on the whole tree; the node is a projection. *@
+<div class="code-node">
+    @if (Node.IsDirectory)
+    {
+        <div class="code-row code-dir" @onclick="() => OnToggle.InvokeAsync(Node)"
+             @oncontextmenu="e => OnContextMenu.InvokeAsync(new CodeTreeContextRequest(Node, e.ClientX, e.ClientY))"
+             @oncontextmenu:preventDefault="true" @oncontextmenu:stopPropagation="true">
+            <span class="code-twisty @(IsExpanded ? "expanded" : string.Empty)" aria-hidden="true">
+                <CodeIcon Kind="CodeIcon.IconKind.Chevron" />
+            </span>
+            <img class="code-icon" src="@Icons.FolderIconUrl(Node.Name, IsExpanded)" alt="" aria-hidden="true" />
+            <span class="code-name">@Node.Name</span>
+        </div>
+        @if (IsExpanded && Children is not null)
+        {
+            <div class="code-children">
+                @foreach (var child in Children)
+                {
+                    <CodeTreeNode Node="child" Expanded="Expanded" ChildrenCache="ChildrenCache"
+                                  OnToggle="OnToggle" OnSelect="OnSelect" OnContextMenu="OnContextMenu"
+                                  SelectedPath="@SelectedPath" />
+                }
+            </div>
+        }
+    }
+    else
+    {
+        <div class="code-row code-file @(IsSelected ? "active" : string.Empty)"
+             @onclick="() => OnSelect.InvokeAsync(Node)"
+             @oncontextmenu="e => OnContextMenu.InvokeAsync(new CodeTreeContextRequest(Node, e.ClientX, e.ClientY))"
+             @oncontextmenu:preventDefault="true" @oncontextmenu:stopPropagation="true">
+            <span class="code-twisty"></span>
+            <img class="code-icon" src="@Icons.FileIconUrl(Node.Name)" alt="" aria-hidden="true" />
+            <span class="code-name">@Node.Name</span>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public RepositoryNode Node { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public IReadOnlySet<string> Expanded { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public IReadOnlyDictionary<string, IReadOnlyList<RepositoryNode>> ChildrenCache { get; set; } = default!;
+
+    [Parameter]
+    public EventCallback<RepositoryNode> OnToggle { get; set; }
+
+    [Parameter]
+    public EventCallback<RepositoryNode> OnSelect { get; set; }
+
+    [Parameter]
+    public EventCallback<CodeTreeContextRequest> OnContextMenu { get; set; }
+
+    [Parameter]
+    public string? SelectedPath { get; set; }
+
+    private bool IsExpanded => Expanded.Contains(Node.RelativePath);
+
+    private IReadOnlyList<RepositoryNode>? Children =>
+        ChildrenCache.TryGetValue(Node.RelativePath, out var children) ? children : null;
+
+    private bool IsSelected => SelectedPath == Node.RelativePath;
+}

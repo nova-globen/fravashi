@@ -1,0 +1,158 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Application
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Setup
+@using Fravashi.Web.Components.Settings
+@using Fravashi.Web.Services
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+
+@* Steps 3 and 4, Board and Wiki (item #373, sections 3.3 and 3.4): here in Fravashi, always the default, or the install's
+   own connection, OFFERED second and never preselected. An install's connection was made for one external project (the
+   v0.9.100 check found another project defaulting into this one's board), so the option names that project and
+   says what choosing it means. Per-project connections are item 47's; this chooses between the install's connection
+   and none, which is what a project can choose today. A project being JOINED keeps its own choice, which is every one
+   of its folders', so the step says so and asks nothing. *@
+<h2 class="setup-title" id="setup-step-heading" tabindex="-1" @ref="_heading">Where should @Page.FolderName's @(IsBoard ? "work items" : "documents") live?</h2>
+<p class="setup-helper">
+    @(IsBoard
+        ? "A board of work items: what is planned, being built and done."
+        : "A wiki of documents: plans, decisions and notes, beside the work they explain.")
+</p>
+
+@if (Joined is { } joined)
+{
+    <p class="setup-note" role="note" data-testid="setup-provider-joined">
+        @joined.Name keeps its @(IsBoard ? "board" : "wiki") where it is:
+        @(JoinedChoice == ProviderChoice.Install && Connection is not null
+            ? (IsBoard ? $"it follows {Connection.Target}." : $"it publishes to {Connection.Target}.")
+            : $"here in {ProductName.Short}.")
+        Settings, Project changes it for every folder in the project.
+    </p>
+}
+else
+{
+    <fieldset class="setup-choices">
+        <legend class="fv-visually-hidden">@(IsBoard ? "Where the board lives" : "Where the wiki lives")</legend>
+
+        <div class="setup-choice @(Choice == ProviderChoice.None ? "is-selected" : null)" data-testid="setup-provider-local">
+            <label class="setup-choice-head">
+                <input type="radio" name="@($"setup-{Slug}")" value="local" checked="@(Choice == ProviderChoice.None)"
+                       data-testid="setup-provider-local-input" @onchange="() => Choose(ProviderChoice.None)" />
+                <span class="setup-choice-text">
+                    <span class="setup-choice-title">Here in @ProductName.Short</span>
+                    <span class="setup-choice-sub">
+                        @(IsBoard ? "A local board. Nothing is sent anywhere." : "A local wiki. Nothing is published anywhere.")
+                    </span>
+                </span>
+            </label>
+        </div>
+
+        @if (Connection is { } connection)
+        {
+            <div class="setup-choice @(Choice == ProviderChoice.Install ? "is-selected" : null)" data-testid="setup-provider-install">
+                <label class="setup-choice-head">
+                    <input type="radio" name="@($"setup-{Slug}")" value="install" checked="@(Choice == ProviderChoice.Install)"
+                           data-testid="setup-provider-install-input" @onchange="() => Choose(ProviderChoice.Install)" />
+                    <span class="setup-choice-text">
+                        <span class="setup-choice-title">@(IsBoard ? "Follow" : "Publish to") @connection.Target</span>
+                        <span class="setup-choice-sub" data-testid="setup-provider-install-sub">@InstallLine(connection)</span>
+                    </span>
+                </label>
+            </div>
+        }
+        else
+        {
+            <div class="setup-choice setup-choice-link" data-testid="setup-provider-connect">
+                <a class="setup-choice-head" href="@ConnectPath" @onclick="RememberConnect">
+                    <span class="setup-choice-plus" aria-hidden="true">+</span>
+                    <span class="setup-choice-text">
+                        <span class="setup-choice-title">@(IsBoard ? "Connect Azure DevOps or Jira" : "Connect Confluence")</span>
+                        <span class="setup-choice-sub">
+                            Opens Settings, @(IsBoard ? "Board" : "Wiki"). Come back with "Continue setting up", and
+                            this choice is waiting.
+                        </span>
+                    </span>
+                </a>
+            </div>
+        }
+    </fieldset>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public SetupPage Page { get; set; } = default!;
+
+    /// <summary>True for the Board step, false for the Wiki step.</summary>
+    [Parameter]
+    public bool IsBoard { get; set; }
+
+    private ElementReference _heading;
+
+    private string Slug => IsBoard ? SetupSteps.Board : SetupSteps.Wiki;
+
+    private SetupConnection? Connection => IsBoard ? Page.Connections.Board : Page.Connections.Wiki;
+
+    /// <summary>The choice as shown: following the install's connection means nothing until there is one.</summary>
+    private ProviderChoice Choice =>
+        Connection is null ? ProviderChoice.None : IsBoard ? Page.Draft.Board : Page.Draft.Wiki;
+
+    /// <summary>What following the install's connection means, said so that it cannot be taken for a board of its own.</summary>
+    private string InstallLine(SetupConnection connection)
+    {
+        var where = connection.Site is { Length: > 0 } site ? $"The install's connection, at {site}." : "The install's connection.";
+        return IsBoard
+            ? $"{where} Choose it only if {Page.FolderName}'s work items belong on that board, beside the work already there. Nothing is sent until you say so."
+            : $"{where} Choose it only if {Page.FolderName}'s documents belong there, beside what is already published. Nothing is published until you say so.";
+    }
+
+    private string ConnectPath => SettingsSections.Path(IsBoard ? SettingsSections.Board : SettingsSections.Wiki);
+
+    private ProjectRecord? Joined =>
+        Page.Draft.ProjectMode == SetupProjectMode.Join && Page.Draft.JoinProjectId is { Length: > 0 } id
+            ? Page.Projects.FirstOrDefault(p => p.Id.Value == id)
+            : null;
+
+    private ProviderChoice JoinedChoice =>
+        Joined is { } joined && Services.GetService<IProjectProviders>() is { } providers
+            ? (IsBoard ? providers.For(joined.Id).Board : providers.For(joined.Id).Wiki)
+            : ProviderChoice.None;
+
+    private void Choose(ProviderChoice choice)
+    {
+        if (IsBoard)
+        {
+            Page.Draft.Board = choice;
+        }
+        else
+        {
+            Page.Draft.Wiki = choice;
+        }
+
+        Page.Draft.MarkSkipped(Slug, false);
+        Page.Changed();
+    }
+
+    /// <summary>Remembers that the person went to connect, so coming back with a connection selects it.</summary>
+    private void RememberConnect()
+    {
+        if (IsBoard)
+        {
+            Page.Draft.Board = ProviderChoice.Install;
+        }
+        else
+        {
+            Page.Draft.Wiki = ProviderChoice.Install;
+        }
+
+        Page.Save();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await SetupFocus.HeadingAsync(_heading);
+        }
+    }
+}

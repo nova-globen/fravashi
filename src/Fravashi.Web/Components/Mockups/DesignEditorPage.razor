@@ -1,0 +1,1590 @@
+@page "/wiki/{Number:int}/design"
+@using System.Globalization
+@using Fravashi.Application.Mockups
+@using Fravashi.Application.Wiki
+@using Fravashi.Domain.Wiki
+@inject IWikiLibraries Wikis
+@inject NavigationManager Nav
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+@inject Fravashi.Application.Projects.IProjectStore ProjectStore
+
+<PageTitle>@(ProductName.Short) · Design editor</PageTitle>
+
+@* Backlog 196, slice 4 of #51: the first surface that changes a mockup. ADR 0021 decision 5 asks for a sortable
+   OUTLINE in stage one rather than a canvas, so every structural edit is a button and a key (no drag), each one
+   MockupEdit applied through the one MockupEditSession (#195), so undo is the same everywhere. Save lands with the
+   first edit so the round-trip rule holds from the start: a save with no edits writes nothing (DesignMockupSave). *@
+<NavigationLock ConfirmExternalNavigation="@Dirty" OnBeforeInternalNavigation="OnNavigating" />
+
+<div class="studio-workitems mk-editor-page" data-testid="design-editor" data-mockup-editor @onkeydown="OnEditorKey">
+    <PageBar Title="@BarTitle" />
+
+    @if (!CurrentProject.IsSetUp())
+    {
+        <FolderNotSetUp Surface="design" />
+    }
+    else if (_loaded && _item is null)
+    {
+        <div class="page-body-empty" data-testid="design-editor-missing">There is no document numbered @Number.</div>
+    }
+    else if (_item is { } item && item.Type != WikiItemType.Design)
+    {
+        <div class="page-body-empty" data-testid="design-editor-not-design">
+            @("@" + item.Number) is a @WikiNames.ToName(item.Type) document, not a design, so it holds no mockup to edit.
+            <a href="@DocumentHref">Back to the document</a>
+        </div>
+    }
+    else if (_cannotOpen.Count > 0)
+    {
+        <section class="work-item-section design-mockup-errors mk-editor-closed" data-testid="design-editor-cannot-open">
+            <h3 class="work-item-section-title">This design cannot be opened in the editor</h3>
+            <ul class="work-item-list">
+                @foreach (var problem in _cannotOpen)
+                {
+                    <li data-testid="mockup-error"><code class="design-mockup-path">@problem.Path</code> <span>@problem.Message</span></li>
+                }
+            </ul>
+            <a href="@DocumentHref">Back to the document</a>, where its body can be edited as text.
+        </section>
+    }
+    else if (_session is { } session)
+    {
+        <div class="mk-editor-bar" role="toolbar" aria-label="Design">
+            <a class="studio-btn studio-btn-alt" href="@DocumentHref" data-testid="design-editor-back">Back to the document</a>
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-undo" disabled="@(!session.CanUndo)"
+                    title="Undo (Ctrl+Z)" @onclick="Undo">Undo</button>
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-redo" disabled="@(!session.CanRedo)"
+                    title="Redo (Ctrl+Y)" @onclick="Redo">Redo</button>
+            <button type="button" class="studio-btn" data-testid="mockup-save" disabled="@_saving" title="Save (Ctrl+S)"
+                    @onclick="SaveAsync">Save</button>
+            <span class="mk-editor-status" data-testid="mockup-status">
+                @(_status ?? (session.IsDirty ? "Unsaved edits" : $"Version {_item!.Version.ToString(CultureInfo.InvariantCulture)}, no edits"))
+            </span>
+        </div>
+
+        @if (_pendingNavigation is not null)
+        {
+            <div class="mk-editor-banner" role="alertdialog" aria-label="Unsaved edits" data-testid="mockup-leave">
+                <span>This design has edits that are not saved. Leaving now loses them.</span>
+                <button type="button" class="studio-btn" data-testid="mockup-leave-save" @onclick="SaveAndLeaveAsync">Save, then leave</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-leave-discard" @onclick="Leave">Leave without saving</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-leave-stay" @onclick="Stay">Stay</button>
+            </div>
+        }
+
+        @if (_stale is { } stale)
+        {
+            <div class="mk-editor-banner" role="alert" data-testid="mockup-stale">
+                <span>@stale</span>
+                <button type="button" class="studio-btn" data-testid="mockup-reload" @onclick="ReloadAsync">Reload, discarding my edits</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-keep" @onclick="() => _stale = null">Keep editing</button>
+            </div>
+        }
+
+        @if (_problems.Count > 0)
+        {
+            <div class="session-error" role="alert" data-testid="mockup-refusal">
+                <span class="session-error-mark" aria-hidden="true">!</span>
+                <span class="session-error-text">
+                    @foreach (var problem in _problems)
+                    {
+                        <span class="mk-editor-refusal">
+                            @if (problem.Path.Length > 0)
+                            {
+                                <code>@problem.Path</code>
+                            }
+                            @problem.Message
+                        </span>
+                    }
+                </span>
+            </div>
+        }
+
+        @foreach (var note in _bodyNotes)
+        {
+            <div class="mk-editor-note" data-testid="mockup-body-note">@note.Message Saving closes it.</div>
+        }
+
+        var rows = MockupOutline.Rows(session);
+        var marks = ErrorMarks(session);
+        var selectedRow = SelectedRow(rows);
+        var choices = PaletteChoices(session);
+        <div class="mk-editor">
+            <section class="mk-editor-outline" aria-label="Outline">
+                @* Backlog 197, slice 5 of #51: the palette grows the tree. Choose-and-insert, not drag (ADR 0021 decision
+                   5); every type is one MockupEdit.Insert of a node that is valid on its own, and a place the reader would
+                   refuse is not offered but stays focusable (aria-disabled), so a keyboard reaches it and hears why. *@
+                <div class="mk-palette" data-testid="mockup-palette">
+                    <label class="mk-palette-place">
+                        <span>Insert</span>
+                        <select class="studio-input" data-testid="mockup-palette-place" aria-describedby="mk-palette-help"
+                                @onchange="OnPlace">
+                            @foreach (var place in Enum.GetValues<MockupPalettePlace>())
+                            {
+                                <option value="@PlaceValue(place)" selected="@(place == _place)">@PlaceLabel(place)</option>
+                            }
+                        </select>
+                    </label>
+                    <div class="mk-palette-types" role="toolbar" aria-label="Components">
+                        @foreach (var choice in choices)
+                        {
+                            var component = choice.Component;
+                            var type = MockupVocabulary.Name(component);
+                            <button type="button" class="@($"mk-palette-item {(choice.Offered ? null : "is-refused")}")"
+                                    data-testid="mockup-palette-item" data-type="@type"
+                                    aria-disabled="@(choice.Offered ? null : "true")"
+                                    aria-describedby="@(choice.Offered ? null : $"mk-palette-why-{type}")"
+                                    title="@(choice.Refusal ?? $"Insert a {type}")"
+                                    @onclick="e => Insert(component, e)" @onfocus="() => _paletteFocus = component"
+                                    @onmouseenter="() => _paletteFocus = component">
+                                <span class="@($"mk-outline-glyph mk-glyph-{type}")" aria-hidden="true">@Glyph(type)</span>
+                                <span>@type</span>
+                            </button>
+                            @if (choice.Refusal is { } why)
+                            {
+                                <span id="@($"mk-palette-why-{type}")" class="mk-announce">@why</span>
+                            }
+                        }
+                    </div>
+                    <p id="mk-palette-help" class="mk-outline-help">
+                        Ctrl+click inserts inside the selection, Alt+click before it. A greyed type cannot go there; it says why.
+                        A panel inserted with one of a tabs' own panels selected becomes a new tab after it; Ctrl+click still nests it inside.
+                    </p>
+                    @if (choices.FirstOrDefault(c => c.Component == _paletteFocus)?.Refusal is { } hint)
+                    {
+                        <p class="mk-palette-hint" data-testid="mockup-palette-hint">
+                            @($"{MockupVocabulary.Name(_paletteFocus!.Value)}: {hint}")
+                        </p>
+                    }
+                </div>
+
+                <div class="mk-outline-tools" role="toolbar" aria-label="Outline actions">
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-move-up" title="Move up (Alt+Up)"
+                            disabled="@(!Can(MockupOutlineAction.MoveUp))" @onclick="() => Act(MockupOutlineAction.MoveUp)">Up</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-move-down" title="Move down (Alt+Down)"
+                            disabled="@(!Can(MockupOutlineAction.MoveDown))" @onclick="() => Act(MockupOutlineAction.MoveDown)">Down</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-outdent" title="Outdent (Alt+Left or Shift+Tab)"
+                            disabled="@(!Can(MockupOutlineAction.Outdent))" @onclick="() => Act(MockupOutlineAction.Outdent)">Outdent</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-indent" title="Indent (Alt+Right or Tab)"
+                            disabled="@(!Can(MockupOutlineAction.Indent))" @onclick="() => Act(MockupOutlineAction.Indent)">Indent</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="mockup-remove" title="Delete (Delete)"
+                            disabled="@(!Can(MockupOutlineAction.Remove))" @onclick="() => Act(MockupOutlineAction.Remove)">Delete</button>
+                </div>
+                <p id="mk-outline-help" class="mk-outline-help">
+                    Up and Down choose a node. Alt with an arrow moves it; Tab and Shift+Tab indent and outdent it. Escape
+                    lets go of it, and Tab then leaves the outline.
+                </p>
+                <div class="mk-outline" role="tree" tabindex="0" aria-label="Outline of the design"
+                     aria-describedby="mk-outline-help" aria-activedescendant="@(selectedRow is { } chosen ? RowId(chosen) : null)"
+                     data-mockup-outline data-testid="mockup-outline" @onkeydown="OnOutlineKey">
+                    @foreach (var row in rows)
+                    {
+                        var current = row;
+                        var selected = selectedRow == row;
+                        <div role="treeitem" id="@RowId(row)" class="mk-outline-row @(selected ? "is-selected" : null)"
+                             aria-level="@row.Depth" aria-selected="@(selected ? "true" : "false")"
+                             aria-setsize="@row.Siblings" aria-posinset="@(row.Index + 1)"
+                             style="@($"padding-left: {((row.Depth - 1) * 16 + 6).ToString(CultureInfo.InvariantCulture)}px")"
+                             data-testid="mockup-outline-row" data-path="@row.JsonPath" @onclick="() => Choose(current.Path)">
+                            <span class="@($"mk-outline-glyph mk-glyph-{row.Type}")" aria-hidden="true">@Glyph(row.Type)</span>
+                            <span class="mk-outline-type">@row.Type</span>
+                            @if ((row.Text ?? row.Label) is { } words)
+                            {
+                                <span class="mk-outline-text">@words</span>
+                            }
+                            @if (row.Id is { } id)
+                            {
+                                <code class="mk-outline-id">@id</code>
+                            }
+                            @if (marks.TryGetValue(row.JsonPath, out var count))
+                            {
+                                <span class="mk-outline-error" data-testid="mockup-outline-error"
+                                      title="@($"{count.ToString(CultureInfo.InvariantCulture)} {(count == 1 ? "error" : "errors")}")">
+                                    @($"{count.ToString(CultureInfo.InvariantCulture)} !")
+                                </span>
+                            }
+                        </div>
+                    }
+                </div>
+            </section>
+
+            <section class="mk-editor-preview" aria-label="Preview">
+                @{ var editing = ActiveScope(session); }
+                <MockupPreview Document="session.Document" Errors="session.Errors"
+                               Selected="@(selectedRow?.JsonPath)" OnSelect="ChooseFromPreview"
+                               ShowState="@editing?.State" ShowViewport="@editing?.Viewport" />
+            </section>
+
+            @* Backlog 198, slice 6 of #51: the inspector edits a node's content and layout, by type as @14 lists them.
+               Every control applies ONE MockupEdit (MockupInspector says which) when the person LEAVES it (change, not
+               input), so an undo step is a change a person made, not a keystroke. A property the type does not carry
+               is never rendered. Backlog 199 adds the rest under them: states, viewport overrides, interactions and
+               accessibility per node, viewports and sample data per document, and editing a state's or a viewport's
+               override with these same controls (MockupInspector.InOverride). *@
+            <aside class="mk-editor-inspector" aria-label="Inspector" data-testid="mockup-inspector">
+                <div class="mk-inspector-field" @key="@FieldKey("title")">
+                    <label class="mk-inspector-label">
+                        <span>Design title</span>
+                        <input class="studio-input" data-testid="inspector-title" value="@MockupInspector.Title(session)"
+                               @onchange="e => ChangeTitle(e)" />
+                    </label>
+                </div>
+
+                @* Backlog 199, slice 7 of #51: what the document declares for every node, the viewports an override can be
+                   written for and the sample data a list or table can be bound to. Closed by default, since a node is what
+                   the inspector is usually about; the controls are in the page either way. *@
+                @{ var viewports = MockupBehaviour.Viewports(session); }
+                <details class="mk-inspector-section" data-testid="inspector-viewports">
+                    <summary>@($"Viewports ({viewports.Count.ToString(CultureInfo.InvariantCulture)})")</summary>
+                    @foreach (var viewport in viewports)
+                    {
+                        var name = viewport.Name;
+                        <div class="mk-inspector-list-row" data-testid="inspector-viewport" data-viewport="@name" @key="@FieldKey("viewport:" + name)">
+                            <input class="studio-input" data-testid="inspector-viewport-name" value="@name" spellcheck="false"
+                                   aria-label="@($"Viewport {name}: name")"
+                                   @onchange="@(e => ChangeDocument("viewport:" + name, s => MockupBehaviour.RenameViewport(s, name, Text(e)), $"The viewport {name} renamed."))" />
+                            <input class="studio-input" type="number" min="@MockupVocabulary.MinViewportWidth" max="@MockupVocabulary.MaxViewportWidth"
+                                   data-testid="inspector-viewport-width" value="@viewport.Width" aria-label="@($"Viewport {name}: width in pixels")"
+                                   @onchange="@(e => ChangeDocument("viewport:" + name, s => MockupBehaviour.ResizeViewport(s, name, Text(e)), $"The viewport {name} resized."))" />
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-viewport-remove"
+                                    aria-label="@($"Remove the viewport {name} and every override for it")"
+                                    @onclick="@(() => ChangeDocument("viewports", s => MockupBehaviour.RemoveViewport(s, name), $"The viewport {name} removed, with every override for it."))">Remove</button>
+                        </div>
+                    }
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-viewport-add"
+                            @onclick="@(() => ChangeDocument("viewports", s => MockupBehaviour.AddViewport(s), "A viewport added."))">Add a viewport</button>
+                    <p class="mk-inspector-note">Removing a viewport also removes every node's override for it, in one undoable edit.</p>
+                </details>
+
+                <details class="mk-inspector-section" data-testid="inspector-data">
+                    @{ var sets = MockupBehaviour.DataSets(session); }
+                    <summary>@($"Sample data ({sets.Count.ToString(CultureInfo.InvariantCulture)})")</summary>
+                    @foreach (var set in sets)
+                    {
+                        var setName = set.Name;
+                        <div class="mk-inspector-field" data-testid="inspector-dataset" data-set="@setName" @key="@FieldKey("data:" + setName)">
+                            <div class="mk-inspector-list-row">
+                                <input class="studio-input" data-testid="inspector-dataset-name" value="@setName" spellcheck="false"
+                                       aria-label="@($"Data set {setName}: name")"
+                                       @onchange="@(e => ChangeDocument("data:" + setName, s => MockupBehaviour.RenameDataSet(s, setName, Text(e)), $"The data set {setName} renamed."))" />
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-dataset-remove"
+                                        aria-label="@($"Remove the data set {setName}")"
+                                        @onclick="@(() => ChangeDocument("data:" + setName, s => MockupBehaviour.RemoveDataSet(s, setName), $"The data set {setName} removed."))">Remove</button>
+                            </div>
+                            @if (set.BoundBy.Count > 0)
+                            {
+                                <p class="mk-inspector-note">@($"Shown by {string.Join(", ", set.BoundBy)}.")</p>
+                            }
+                            <div class="mk-inspector-data">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            @foreach (var key in set.Keys)
+                                            {
+                                                var k = key;
+                                                <th>
+                                                    <input class="studio-input" data-testid="inspector-data-key" value="@k" spellcheck="false"
+                                                           aria-label="@($"Data set {setName}: key {k}")"
+                                                           @onchange="@(e => ChangeDocument("data:" + setName, s => MockupBehaviour.RenameKey(s, setName, k, Text(e)), $"The key {k} renamed."))" />
+                                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-data-key-remove"
+                                                            aria-label="@($"Remove the key {k} from every record")"
+                                                            @onclick="@(() => ChangeDocument("data:" + setName, s => MockupBehaviour.RemoveKey(s, setName, k), $"The key {k} removed."))">x</button>
+                                                </th>
+                                            }
+                                            <th>
+                                                <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-data-key-add"
+                                                        @onclick="@(() => ChangeDocument("data:" + setName, s => MockupBehaviour.AddKey(s, setName), "A key added."))">Add a key</button>
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @for (var r = 0; r < set.Records.Count; r++)
+                                        {
+                                            var row = r;
+                                            <tr data-testid="inspector-data-row">
+                                                @foreach (var key in set.Keys)
+                                                {
+                                                    var k = key;
+                                                    var cell = set.Records[row][k];
+                                                    <td>
+                                                        @if (cell.Kind == MockupDataCellKind.Records)
+                                                        {
+                                                            <span class="mk-inspector-nested" data-testid="inspector-data-nested" title="A list of records is shown here and not edited.">@cell.Text</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <input class="studio-input" data-testid="inspector-data-cell" data-key="@k" value="@cell.Text"
+                                                                   placeholder="@(cell.Kind switch { MockupDataCellKind.Null => "null", MockupDataCellKind.Absent => "(absent)", _ => null })"
+                                                                   aria-label="@($"Data set {setName}, record {row + 1}, {k}")"
+                                                                   @onchange="@(e => ChangeDocument("data:" + setName, s => MockupBehaviour.SetDataCell(s, setName, row, k, Text(e)), $"Record {row + 1} of {setName} changed."))" />
+                                                        }
+                                                    </td>
+                                                }
+                                                <td>
+                                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-data-row-remove"
+                                                            aria-label="@($"Remove record {row + 1} of {setName}")"
+                                                            @onclick="@(() => ChangeDocument("data:" + setName, s => MockupBehaviour.RemoveRecord(s, setName, row), $"Record {row + 1} of {setName} removed."))">Remove</button>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-data-row-add"
+                                    @onclick="@(() => ChangeDocument("data:" + setName, s => MockupBehaviour.AddRecord(s, setName), $"A record added to {setName}."))">Add a record</button>
+                            @if (set.Records.Any(r => r.Values.Any(c => c.Kind == MockupDataCellKind.Records)))
+                            {
+                                <p class="mk-inspector-note">A value that is a list of records (a tree's nesting) is shown, not edited, here.</p>
+                            }
+                        </div>
+                    }
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-dataset-add"
+                            @onclick="@(() => ChangeDocument("data", s => MockupBehaviour.AddDataSet(s), "A data set added."))">Add a data set</button>
+                    <p class="mk-inspector-note">A set something is bound to, or a key a binding shows, is not removed or renamed: change the binding first.</p>
+                </details>
+
+                @if (selectedRow is { } shown && ReadNode(session, shown.Path) is { } node)
+                {
+                    var scope = ActiveScope(session);
+                    <h3 class="work-item-section-title">@Name(shown)</h3>
+                    <dl class="mk-inspector-facts">
+                        <dt>Type</dt><dd>@shown.Type</dd>
+                        <dt>Place</dt><dd><code>@shown.JsonPath</code></dd>
+                    </dl>
+                    @if (scope is not null)
+                    {
+                        <div class="mk-inspector-scope" role="status" data-testid="inspector-scope" data-map="@MockupVocabulary.Name(scope.Map)" data-key="@scope.Key">
+                            <span>@($"Editing how this {shown.Type} looks {ScopeWords(scope)}. What is not set here is as at rest.")</span>
+                            @if (node.Overridden.Count > 0)
+                            {
+                                <span class="mk-inspector-note" data-testid="inspector-scope-sets">@($"This override sets: {string.Join(", ", node.Overridden)}.")</span>
+                            }
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-scope-done" @onclick="LeaveScope">Back to the node at rest</button>
+                        </div>
+                    }
+                    var own = session.Errors.Where(e => MockupOutline.NodeOf(e.Path) is { } at && at.SequenceEqual(shown.Path)).ToList();
+                    @if (own.Count > 0)
+                    {
+                        <ul class="work-item-list mk-inspector-errors" role="alert" data-testid="mockup-inspector-errors">
+                            @foreach (var problem in own)
+                            {
+                                <li><code>@problem.Path</code> @problem.Message</li>
+                            }
+                        </ul>
+                    }
+
+                    <div class="mk-inspector-form" data-testid="inspector-properties">
+                        @if (node.Offers("id"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="id" @key="@FieldKey("id")">
+                                <label class="mk-inspector-label">
+                                    <span>Id</span>
+                                    <input class="studio-input" data-testid="inspector-id" value="@node.Id" spellcheck="false"
+                                           @onchange="@(e => Change("id", (s, p) => MockupInspector.SetId(s, p, Text(e))))" />
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("text"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="text" @key="@FieldKey("text")">
+                                <label class="mk-inspector-label">
+                                    <span>@TextLabel(node.Component)</span>
+                                    <input class="studio-input" data-testid="inspector-text" value="@node.Text"
+                                           @onchange="@(e => Change("text", (s, p) => MockupInspector.SetString(s, p, "text", Text(e))))" />
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("href"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="href" @key="@FieldKey("href")">
+                                <label class="mk-inspector-label">
+                                    <span>Goes to (not checked)</span>
+                                    <input class="studio-input" data-testid="inspector-href" value="@node.Href"
+                                           @onchange="@(e => Change("href", (s, p) => MockupInspector.SetString(s, p, "href", Text(e))))" />
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("layout"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="layout" @key="@FieldKey("layout")">
+                                <label class="mk-inspector-label">
+                                    <span>Layout</span>
+                                    <select class="studio-input" data-testid="inspector-layout"
+                                            @onchange="@(e => Change("layout", (s, p) => MockupInspector.SetLayout(s, p, Text(e))))">
+                                        <option value="" selected="@(node.Layout is null)">(as the preview chooses)</option>
+                                        @foreach (var arrangement in MockupVocabulary.Names<MockupLayout>())
+                                        {
+                                            <option value="@arrangement" selected="@(node.Layout == arrangement)">@arrangement</option>
+                                        }
+                                        @if (node.Layout is { } odd && !MockupVocabulary.Names<MockupLayout>().Contains(odd))
+                                        {
+                                            <option value="@odd" selected>@odd</option>
+                                        }
+                                    </select>
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("cols"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="cols" @key="@FieldKey("cols")">
+                                <label class="mk-inspector-label">
+                                    <span>Grid columns (1 to 12)</span>
+                                    <input class="studio-input" type="number" min="1" max="12" data-testid="inspector-cols" value="@node.Cols"
+                                           @onchange="@(e => Change("cols", (s, p) => MockupInspector.SetCols(s, p, Text(e))))" />
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("input"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="input" @key="@FieldKey("input")">
+                                <label class="mk-inspector-label">
+                                    <span>Input</span>
+                                    <select class="studio-input" data-testid="inspector-input"
+                                            @onchange="@(e => Change("input", (s, p) => MockupInspector.SetInput(s, p, Text(e))))">
+                                        <option value="" selected="@(node.Input is null)">text (the default)</option>
+                                        @foreach (var input in MockupVocabulary.Names<MockupInput>())
+                                        {
+                                            <option value="@input" selected="@(node.Input == input)">@input</option>
+                                        }
+                                    </select>
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("options"))
+                        {
+                            <fieldset class="mk-inspector-field mk-inspector-list" data-testid="inspector-property" data-property="options" @key="@FieldKey("options")">
+                                <legend>Options, in order</legend>
+                                @for (var i = 0; i < node.Options.Count; i++)
+                                {
+                                    var at = i;
+                                    <div class="mk-inspector-list-row" data-testid="inspector-option">
+                                        <input class="studio-input" data-testid="inspector-option-text" value="@node.Options[at]" aria-label="@($"Option {at + 1}")"
+                                               @onchange="@(e => Change("options", (s, p) => MockupInspector.SetOptions(s, p, Replaced(node.Options, at, Text(e)))))" />
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-option-up" disabled="@(at == 0)"
+                                                aria-label="@($"Move option {at + 1} up")"
+                                                @onclick="@(() => Change("options", (s, p) => MockupInspector.SetOptions(s, p, Swapped(node.Options, at, at - 1))))">Up</button>
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-option-down" disabled="@(at == node.Options.Count - 1)"
+                                                aria-label="@($"Move option {at + 1} down")"
+                                                @onclick="@(() => Change("options", (s, p) => MockupInspector.SetOptions(s, p, Swapped(node.Options, at, at + 1))))">Down</button>
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-option-remove"
+                                                aria-label="@($"Remove option {at + 1}")"
+                                                @onclick="@(() => Change("options", (s, p) => MockupInspector.SetOptions(s, p, [.. node.Options.Where((_, j) => j != at)])))">Remove</button>
+                                    </div>
+                                }
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-option-add"
+                                        @onclick="@(() => Change("options", (s, p) => MockupInspector.SetOptions(s, p, [.. node.Options, NewOption(node.Options)])))">Add an option</button>
+                            </fieldset>
+                        }
+                        @if (node.Offers("value"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="value" @key="@FieldKey("value")">
+                                <label class="mk-inspector-label">
+                                    <span>Sample value</span>
+                                    @if (node.Input is "select" or "radio")
+                                    {
+                                        <select class="studio-input" data-testid="inspector-value"
+                                                @onchange="@(e => Change("value", (s, p) => MockupInspector.SetValue(s, p, Text(e))))">
+                                            <option value="" selected="@(node.Value is null)">(none chosen)</option>
+                                            @foreach (var option in node.Options)
+                                            {
+                                                <option value="@option" selected="@(node.Value == option)">@option</option>
+                                            }
+                                            @if (node.Value is { } stray && !node.Options.Contains(stray))
+                                            {
+                                                <option value="@stray" selected>@stray</option>
+                                            }
+                                        </select>
+                                    }
+                                    else if (node.Input == "checkbox")
+                                    {
+                                        <select class="studio-input" data-testid="inspector-value"
+                                                @onchange="@(e => Change("value", (s, p) => MockupInspector.SetValue(s, p, Text(e))))">
+                                            <option value="" selected="@(node.Value is null)">(not shown)</option>
+                                            <option value="true" selected="@(node.Value == "true")">checked</option>
+                                            <option value="false" selected="@(node.Value == "false")">unchecked</option>
+                                            @if (node.Value is { } stray && stray is not ("true" or "false"))
+                                            {
+                                                <option value="@stray" selected>@stray</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <input class="studio-input" data-testid="inspector-value" value="@node.Value"
+                                               @onchange="@(e => Change("value", (s, p) => MockupInspector.SetValue(s, p, Text(e))))" />
+                                    }
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("placeholder"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="placeholder" @key="@FieldKey("placeholder")">
+                                <label class="mk-inspector-label">
+                                    <span>Placeholder</span>
+                                    <input class="studio-input" data-testid="inspector-placeholder" value="@node.Placeholder"
+                                           @onchange="@(e => Change("placeholder", (s, p) => MockupInspector.SetString(s, p, "placeholder", Text(e))))" />
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("required"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="required" @key="@FieldKey("required")">
+                                <label class="mk-inspector-check">
+                                    <input type="checkbox" data-testid="inspector-required" checked="@node.Required"
+                                           @onchange="@(e => Change("required", (s, p) => MockupInspector.SetRequired(s, p, e.Value is true)))" />
+                                    <span>Required</span>
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("data"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="data" @key="@FieldKey("data")">
+                                <label class="mk-inspector-label">
+                                    <span>@(node.Component == MockupComponent.Table ? "Rows come from" : "Items come from")</span>
+                                    <select class="studio-input" data-testid="inspector-source"
+                                            @onchange="@(e => Change("data", (s, p) => MockupInspector.SetSource(s, p, Text(e))))">
+                                        <option value="" selected="@(node.Data is null)">items written here</option>
+                                        @foreach (var set in node.DataSets)
+                                        {
+                                            <option value="@set" selected="@(node.Data == set)">@($"the data set \"{set}\"")</option>
+                                        }
+                                        @if (node.Data is { } missing && !node.DataSets.Contains(missing))
+                                        {
+                                            <option value="@missing" selected>@($"the data set \"{missing}\" (not declared)")</option>
+                                        }
+                                    </select>
+                                </label>
+                                @if (node.DataSets.Count == 0)
+                                {
+                                    <p class="mk-outline-help">This design declares no sample data sets.</p>
+                                }
+                            </div>
+                        }
+                        @if (node.Offers("show"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="show" @key="@FieldKey("show")">
+                                <label class="mk-inspector-label">
+                                    <span>Shows the key</span>
+                                    <select class="studio-input" data-testid="inspector-show"
+                                            @onchange="@(e => Change("show", (s, p) => MockupInspector.SetShow(s, p, Text(e))))">
+                                        <option value="" selected="@(node.Show is null)">(none)</option>
+                                        @foreach (var key in node.DataKeys)
+                                        {
+                                            <option value="@key" selected="@(node.Show == key)">@key</option>
+                                        }
+                                        @if (node.Show is { } other && !node.DataKeys.Contains(other))
+                                        {
+                                            <option value="@other" selected>@other</option>
+                                        }
+                                    </select>
+                                </label>
+                            </div>
+                        }
+                        @if (node.Offers("columns"))
+                        {
+                            <fieldset class="mk-inspector-field mk-inspector-list" data-testid="inspector-property" data-property="columns" @key="@FieldKey("columns")">
+                                <legend>Columns: record key and heading</legend>
+                                @for (var i = 0; i < node.Columns.Count; i++)
+                                {
+                                    var at = i;
+                                    var column = node.Columns[at];
+                                    <div class="mk-inspector-list-row" data-testid="inspector-column">
+                                        <input class="studio-input" data-testid="inspector-column-key" value="@column.Key" spellcheck="false"
+                                               aria-label="@($"Column {at + 1} key")"
+                                               @onchange="@(e => Change("columns", (s, p) => MockupInspector.RenameColumn(s, p, at, Text(e))))" />
+                                        <input class="studio-input" data-testid="inspector-column-heading" value="@column.Heading"
+                                               aria-label="@($"Column {at + 1} heading")" placeholder="@column.Key"
+                                               @onchange="@(e => Change("columns", (s, p) => MockupInspector.SetColumnHeading(s, p, at, Text(e))))" />
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-column-up" disabled="@(at == 0)"
+                                                aria-label="@($"Move column {at + 1} left")"
+                                                @onclick="@(() => Change("columns", (s, p) => MockupInspector.MoveColumn(s, p, at, -1)))">Up</button>
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-column-down" disabled="@(at == node.Columns.Count - 1)"
+                                                aria-label="@($"Move column {at + 1} right")"
+                                                @onclick="@(() => Change("columns", (s, p) => MockupInspector.MoveColumn(s, p, at, 1)))">Down</button>
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-column-remove"
+                                                aria-label="@($"Remove column {at + 1}")"
+                                                @onclick="@(() => Change("columns", (s, p) => MockupInspector.RemoveColumn(s, p, at)))">Remove</button>
+                                    </div>
+                                }
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-column-add"
+                                        disabled="@(!MockupInspector.CanAddColumn(node))"
+                                        title="@(MockupInspector.CanAddColumn(node) ? "Add a column" : "Every record key already has a column.")"
+                                        @onclick="@(() => Change("columns", (s, p) => MockupInspector.AddColumn(s, p)))">Add a column</button>
+                                @if (!MockupInspector.CanAddColumn(node))
+                                {
+                                    <p class="mk-outline-help" data-testid="inspector-column-add-help">Every record key already has a column.</p>
+                                }
+                            </fieldset>
+                        }
+                        @if (node.Offers("items") && node.Component == MockupComponent.Table)
+                        {
+                            <fieldset class="mk-inspector-field mk-inspector-list" data-testid="inspector-property" data-property="items" @key="@FieldKey("items")">
+                                <legend>Rows</legend>
+                                @for (var r = 0; r < node.Rows.Count; r++)
+                                {
+                                    var row = r;
+                                    <div class="mk-inspector-list-row" data-testid="inspector-row">
+                                        @foreach (var column in node.Columns)
+                                        {
+                                            var key = column.Key;
+                                            <input class="studio-input" data-testid="inspector-cell" data-key="@key"
+                                                   value="@node.Rows[row].GetValueOrDefault(key)"
+                                                   aria-label="@($"Row {row + 1}, {column.Heading ?? key}")"
+                                                   @onchange="@(e => Change("items", (s, p) => MockupInspector.SetCell(s, p, row, key, Text(e))))" />
+                                        }
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-row-remove"
+                                                aria-label="@($"Remove row {row + 1}")"
+                                                @onclick="@(() => Change("items", (s, p) => MockupInspector.RemoveRow(s, p, row)))">Remove</button>
+                                    </div>
+                                }
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-row-add"
+                                        @onclick="@(() => Change("items", (s, p) => MockupInspector.AddRow(s, p)))">Add a row</button>
+                            </fieldset>
+                        }
+                        else if (node.Offers("items"))
+                        {
+                            <div class="mk-inspector-field" data-testid="inspector-property" data-property="items" @key="@FieldKey("items")">
+                                <label class="mk-inspector-label">
+                                    <span>Items, one a line@(node.Component == MockupComponent.Tree ? "; two more spaces nest a line under the one above" : "")</span>
+                                    <textarea class="studio-input mk-inspector-lines" data-testid="inspector-items" spellcheck="false"
+                                              rows="@Math.Clamp(node.ItemLines.Count(c => c == '\n') + 2, 3, 12)"
+                                              @onchange="@(e => Change("items", (s, p) => MockupInspector.SetItemLines(s, p, Text(e))))">@node.ItemLines</textarea>
+                                </label>
+                            </div>
+                        }
+                    </div>
+
+                    @* Backlog 199: accessibility intent, in an override as well as at rest (an override may carry a11y).
+                       Labelled and decorative exclude each other in the control itself: setting one clears the other in
+                       the same edit, so the two can never both be written from here. *@
+                    <fieldset class="mk-inspector-section" data-testid="inspector-a11y" @key="@FieldKey("a11y")">
+                        <legend>Accessibility</legend>
+                        <label class="mk-inspector-label">
+                            <span>Accessible name (a label)</span>
+                            <input class="studio-input" data-testid="inspector-a11y-label" value="@node.Label"
+                                   @onchange="@(e => Change("a11y", (s, p) => MockupBehaviour.SetLabel(s, p, Text(e))))" />
+                        </label>
+                        <label class="mk-inspector-check">
+                            <input type="checkbox" data-testid="inspector-a11y-decorative" checked="@node.Decorative"
+                                   @onchange="@(e => Change("a11y", (s, p) => MockupBehaviour.SetDecorative(s, p, e.Value is true)))" />
+                            <span>Decorative: assistive technology skips it</span>
+                        </label>
+                        <p class="mk-inspector-note">A node is labelled or decorative, never both: setting one clears the other.</p>
+                        <label class="mk-inspector-label">
+                            <span>Heading level</span>
+                            <select class="studio-input" data-testid="inspector-a11y-heading"
+                                    @onchange="@(e => Change("a11y", (s, p) => MockupBehaviour.SetHeading(s, p, Text(e))))">
+                                <option value="" selected="@(node.Heading is null)">(not a heading)</option>
+                                @for (var level = 1; level <= 6; level++)
+                                {
+                                    var value = level.ToString(CultureInfo.InvariantCulture);
+                                    <option value="@value" selected="@(node.Heading == value)">@value</option>
+                                }
+                                @if (node.Heading is { } oddLevel && !(oddLevel.Length == 1 && oddLevel[0] is >= '1' and <= '6'))
+                                {
+                                    <option value="@oddLevel" selected>@oddLevel</option>
+                                }
+                            </select>
+                        </label>
+                        <label class="mk-inspector-label">
+                            <span>Announces changes</span>
+                            <select class="studio-input" data-testid="inspector-a11y-live"
+                                    @onchange="@(e => Change("a11y", (s, p) => MockupBehaviour.SetLive(s, p, Text(e))))">
+                                <option value="" selected="@(node.Live is null)">(no)</option>
+                                @foreach (var live in MockupVocabulary.LiveValues)
+                                {
+                                    <option value="@live" selected="@(node.Live == live)">@live</option>
+                                }
+                                @if (node.Live is { } oddLive && !MockupVocabulary.LiveValues.Contains(oddLive))
+                                {
+                                    <option value="@oddLive" selected>@oddLive</option>
+                                }
+                            </select>
+                        </label>
+                    </fieldset>
+
+                    @if (scope is null && MockupBehaviour.Read(session, shown.Path) is { } behaviour)
+                    {
+                        @* Backlog 199: component states. Each of the eight can be described (an override, "{}" until it
+                           says otherwise) and edited with the controls above; dropping one also drops the initial state
+                           naming it and every set showing this node in it, in one undoable edit. *@
+                        <fieldset class="mk-inspector-section" data-testid="inspector-states" @key="@FieldKey("states")">
+                            <legend>States</legend>
+                            @foreach (var state in Enum.GetValues<MockupState>())
+                            {
+                                var named = state;
+                                var name = MockupVocabulary.Name(named);
+                                var described = behaviour.States.Contains(name);
+                                <div class="mk-inspector-list-row" data-testid="inspector-state" data-state="@name">
+                                    <label class="mk-inspector-check">
+                                        <input type="checkbox" data-testid="inspector-state-described" checked="@described"
+                                               @onchange="@(e => ChangeAtRest("states", (s, p) => e.Value is true ? MockupBehaviour.DescribeState(s, p, named) : MockupBehaviour.DropState(s, p, name)))" />
+                                        <span>@name</span>
+                                    </label>
+                                    @if (described)
+                                    {
+                                        <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-state-edit"
+                                                aria-label="@($"Edit how it looks when {name}")"
+                                                @onclick="@(() => EditOverride(MockupOverrideScope.InState(named)))">Edit</button>
+                                    }
+                                    @if (behaviour.SetBy.GetValueOrDefault(name) is > 0 and var count)
+                                    {
+                                        <span class="mk-inspector-note">@($"set by {count.ToString(CultureInfo.InvariantCulture)} action{(count == 1 ? "" : "s")}")</span>
+                                    }
+                                </div>
+                            }
+                            @foreach (var stray in behaviour.States.Where(s => !MockupVocabulary.TryParse<MockupState>(s, out _)))
+                            {
+                                var strayName = stray;
+                                <div class="mk-inspector-list-row" data-testid="inspector-state" data-state="@strayName">
+                                    <span>@($"\"{strayName}\" (not a state)")</span>
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-state-drop"
+                                            @onclick="@(() => ChangeAtRest("states", (s, p) => MockupBehaviour.DropState(s, p, strayName)))">Remove</button>
+                                </div>
+                            }
+                            <label class="mk-inspector-label">
+                                <span>Starts in</span>
+                                <select class="studio-input" data-testid="inspector-initial-state"
+                                        @onchange="@(e => ChangeAtRest("state", (s, p) => MockupBehaviour.SetInitialState(s, p, Text(e))))">
+                                    <option value="" selected="@(behaviour.InitialState is null)">at rest</option>
+                                    @foreach (var state in behaviour.States)
+                                    {
+                                        <option value="@state" selected="@(behaviour.InitialState == state)">@state</option>
+                                    }
+                                    @if (behaviour.InitialState is { } initial && !behaviour.States.Contains(initial))
+                                    {
+                                        <option value="@initial" selected>@($"{initial} (not described)")</option>
+                                    }
+                                </select>
+                            </label>
+                            <p class="mk-inspector-note">Dropping a state also drops "starts in" and every action that sets this node to it.</p>
+                        </fieldset>
+
+                        @if (behaviour.Viewports.Count > 0 || behaviour.AtViewports.Count > 0)
+                        {
+                            <fieldset class="mk-inspector-section" data-testid="inspector-node-viewports" @key="@FieldKey("at")">
+                                <legend>At each viewport</legend>
+                                @foreach (var viewport in behaviour.Viewports.Union(behaviour.AtViewports))
+                                {
+                                    var name = viewport;
+                                    var has = behaviour.AtViewports.Contains(name);
+                                    <div class="mk-inspector-list-row" data-testid="inspector-at" data-viewport="@name">
+                                        <label class="mk-inspector-check">
+                                            <input type="checkbox" data-testid="inspector-at-override" checked="@has"
+                                                   @onchange="@(e => ChangeAtRest("at", (s, p) => e.Value is true ? MockupBehaviour.AddViewportOverride(s, p, name) : MockupBehaviour.DropViewportOverride(s, p, name)))" />
+                                            <span>@(behaviour.Viewports.Contains(name) ? $"differs at {name}" : $"differs at {name} (not declared)")</span>
+                                        </label>
+                                        @if (has)
+                                        {
+                                            <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-at-edit"
+                                                    aria-label="@($"Edit how it looks at {name}")"
+                                                    @onclick="@(() => EditOverride(MockupOverrideScope.AtViewport(name)))">Edit</button>
+                                        }
+                                    </div>
+                                }
+                            </fieldset>
+                        }
+
+                        @if (behaviour.Events.Count > 0)
+                        {
+                            @* Backlog 199: interactions. Only targets that exist are offered: screens for go, dialogs for open
+                               and close, and for set a node with an id and one of ITS described states (or default). The
+                               action is written whole, and one left with nothing to do goes with its event. *@
+                            <fieldset class="mk-inspector-section" data-testid="inspector-events" @key="@FieldKey("on")">
+                                <legend>Interactions</legend>
+                                @foreach (var raised in behaviour.Events)
+                                {
+                                    var on = raised;
+                                    var action = behaviour.Actions.GetValueOrDefault(on) ?? MockupInspectorAction.None;
+                                    <div class="mk-inspector-event" data-testid="inspector-event" data-event="@on">
+                                        <strong>@($"On {on}")</strong>
+                                        <label class="mk-inspector-label">
+                                            <span>Go to the screen</span>
+                                            <select class="studio-input" data-testid="inspector-action-go"
+                                                    @onchange="@(e => ChangeAtRest("on", (s, p) => MockupBehaviour.SetAction(s, p, on, action with { Go = Chosen(e) })))">
+                                                <option value="" selected="@(action.Go is null)">(none)</option>
+                                                @foreach (var screen in behaviour.Screens)
+                                                {
+                                                    <option value="@screen" selected="@(action.Go == screen)">@screen</option>
+                                                }
+                                                @if (action.Go is { } noScreen && !behaviour.Screens.Contains(noScreen))
+                                                {
+                                                    <option value="@noScreen" selected>@($"{noScreen} (no such screen)")</option>
+                                                }
+                                            </select>
+                                        </label>
+                                        @foreach (var verb in new[] { "open", "close" })
+                                        {
+                                            var opening = verb == "open";
+                                            var current = opening ? action.Open : action.Close;
+                                            <label class="mk-inspector-label">
+                                                <span>@(opening ? "Open the dialog" : "Close the dialog")</span>
+                                                <select class="studio-input" data-testid="@($"inspector-action-{verb}")"
+                                                        @onchange="@(e => ChangeAtRest("on", (s, p) => MockupBehaviour.SetAction(s, p, on, opening ? action with { Open = Chosen(e) } : action with { Close = Chosen(e) })))">
+                                                    <option value="" selected="@(current is null)">(none)</option>
+                                                    @foreach (var dialog in behaviour.Dialogs)
+                                                    {
+                                                        <option value="@dialog" selected="@(current == dialog)">@dialog</option>
+                                                    }
+                                                    @if (current is { } noDialog && !behaviour.Dialogs.Contains(noDialog))
+                                                    {
+                                                        <option value="@noDialog" selected>@($"{noDialog} (no such dialog)")</option>
+                                                    }
+                                                </select>
+                                            </label>
+                                        }
+                                        <span class="mk-inspector-note">Show other nodes in a state:</span>
+                                        @for (var i = 0; i < action.Set.Count; i++)
+                                        {
+                                            var at = i;
+                                            var target = action.Set[at];
+                                            var candidate = behaviour.Settable.FirstOrDefault(c => c.Id == target.Id);
+                                            <div class="mk-inspector-list-row" data-testid="inspector-action-set">
+                                                <select class="studio-input" data-testid="inspector-action-set-node" aria-label="@($"Set {at + 1}: node")"
+                                                        @onchange="@(e => ChangeAtRest("on", (s, p) => MockupBehaviour.SetAction(s, p, on, action with { Set = Retargeted(action.Set, at, Chosen(e) ?? target.Id, behaviour) })))">
+                                                    @foreach (var settable in behaviour.Settable)
+                                                    {
+                                                        <option value="@settable.Id" selected="@(settable.Id == target.Id)">@($"{settable.Id} ({settable.Type})")</option>
+                                                    }
+                                                    @if (candidate is null)
+                                                    {
+                                                        <option value="@target.Id" selected>@($"{target.Id} (no such node)")</option>
+                                                    }
+                                                </select>
+                                                <select class="studio-input" data-testid="inspector-action-set-state" aria-label="@($"Set {at + 1}: state")"
+                                                        @onchange="@(e => ChangeAtRest("on", (s, p) => MockupBehaviour.SetAction(s, p, on, action with { Set = ReplacedSet(action.Set, at, target with { State = Text(e) ?? MockupVocabulary.DefaultState }) })))">
+                                                    <option value="@MockupVocabulary.DefaultState" selected="@(target.State == MockupVocabulary.DefaultState)">as at rest (default)</option>
+                                                    @foreach (var state in candidate?.States ?? [])
+                                                    {
+                                                        <option value="@state" selected="@(target.State == state)">@state</option>
+                                                    }
+                                                    @if (target.State != MockupVocabulary.DefaultState && candidate?.States.Contains(target.State) != true)
+                                                    {
+                                                        <option value="@target.State" selected>@($"{target.State} (not described)")</option>
+                                                    }
+                                                </select>
+                                                <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-action-set-remove"
+                                                        aria-label="@($"Remove set {at + 1}")"
+                                                        @onclick="@(() => ChangeAtRest("on", (s, p) => MockupBehaviour.SetAction(s, p, on, action with { Set = [.. action.Set.Where((_, j) => j != at)] })))">Remove</button>
+                                            </div>
+                                        }
+                                        @if (behaviour.Settable.FirstOrDefault(c => action.Set.All(t => t.Id != c.Id)) is { } next)
+                                        {
+                                            <button type="button" class="studio-btn studio-btn-alt" data-testid="inspector-action-set-add"
+                                                    @onclick="@(() => ChangeAtRest("on", (s, p) => MockupBehaviour.SetAction(s, p, on, action with { Set = [.. action.Set, new MockupSetTarget(next.Id, MockupVocabulary.DefaultState)] })))">Add a node to set</button>
+                                        }
+                                    </div>
+                                }
+                            </fieldset>
+                        }
+                    }
+                }
+                else
+                {
+                    <p class="studio-muted">Choose a node in the outline or the preview.</p>
+                }
+            </aside>
+        </div>
+
+        <div class="mk-announce" aria-live="polite" role="status" data-testid="mockup-announce">@_announce</div>
+    }
+</div>
+
+@code {
+    /// <summary>The design's number, from the route.</summary>
+    [Parameter]
+    public int Number { get; set; }
+
+    private IWikiLibrary Wiki => Wikis.For(CurrentProject.Require());
+
+    private int? _loadedNumber;
+    private bool _loaded;
+    private WikiItem? _item;
+    private MockupEditSession? _session;
+    private IReadOnlyList<int>? _selected;
+    private IReadOnlyList<MockupError> _cannotOpen = [];
+    private IReadOnlyList<MockupError> _bodyNotes = [];
+    private IReadOnlyList<MockupError> _problems = [];
+    private string? _announce;
+    private string? _status;
+    private string? _stale;
+    private string? _pendingNavigation;
+    private bool _leaving;
+    private bool _saving;
+    private MockupPalettePlace _place = MockupPalettePlace.Auto;
+    private MockupComponent? _paletteFocus;
+    private ((string Json, string? Selected, MockupPalettePlace Place) Key, IReadOnlyList<MockupPaletteChoice> Choices)? _palette;
+
+    private bool Dirty => _session?.IsDirty == true;
+
+    private string DocumentHref => $"/wiki/{Number.ToString(CultureInfo.InvariantCulture)}";
+
+    private string BarTitle => Fravashi.Application.Projects.ProjectTitle.With(
+        _item is { } item ? $"Design: {item.Title}" : "Design editor", ProjectStore, CurrentProject.Id);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        if (_loadedNumber != Number)
+        {
+            await OpenAsync();
+        }
+    }
+
+    /// <summary>Opens the design as it is stored now, dropping whatever was being edited.</summary>
+    private async Task OpenAsync()
+    {
+        _loadedNumber = Number;
+        _session = null;
+        _selected = null;
+        _cannotOpen = [];
+        _bodyNotes = [];
+        _problems = [];
+        _status = null;
+        _stale = null;
+        _announce = null;
+        _palette = null;
+
+        _item = await Wiki.GetByNumberAsync(Number);
+        _loaded = true;
+        if (_item is not { Type: WikiItemType.Design } item)
+        {
+            return;
+        }
+
+        var read = DesignMockup.Read(item.Body);
+        if (read.Block is not { } block)
+        {
+            _cannotOpen = read.Errors;
+            return;
+        }
+
+        if (!MockupEditSession.TryOpen(block.Json, out var session, out var refusal))
+        {
+            _cannotOpen = refusal;
+            return;
+        }
+
+        _session = session;
+        _bodyNotes = [.. read.Errors.Where(e => e.Path == DesignMockup.BodyPath)];
+    }
+
+    // ---- selection -------------------------------------------------------------------------------------------
+
+    private MockupOutlineRow? SelectedRow(IReadOnlyList<MockupOutlineRow> rows) =>
+        _selected is { } path ? rows.FirstOrDefault(r => r.Path.SequenceEqual(path)) : null;
+
+    private void Choose(IReadOnlyList<int> path) => _selected = path;
+
+    private void ChooseFromPreview(string jsonPath)
+    {
+        if (MockupOutline.NodeOf(jsonPath) is { } path && _session is { } session && MockupOutline.Exists(session, path))
+        {
+            _selected = path;
+        }
+    }
+
+    private void Step(int by)
+    {
+        if (_session is not { } session)
+        {
+            return;
+        }
+
+        var rows = MockupOutline.Rows(session);
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        var at = _selected is { } path ? IndexOf(rows, path) : -1;
+        var next = by switch
+        {
+            int.MinValue => 0,
+            int.MaxValue => rows.Count - 1,
+            _ when at < 0 => by > 0 ? 0 : rows.Count - 1,
+            _ => Math.Clamp(at + by, 0, rows.Count - 1),
+        };
+        _selected = rows[next].Path;
+    }
+
+    private static int IndexOf(IReadOnlyList<MockupOutlineRow> rows, IReadOnlyList<int> path)
+    {
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (rows[i].Path.SequenceEqual(path))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    // ---- edits -----------------------------------------------------------------------------------------------
+
+    private bool Can(MockupOutlineAction action) =>
+        _session is { } session && _selected is { } path && MockupOutline.Plan(session, path, action) is not null;
+
+    /// <summary>Applies one outline action as one edit, or shows and announces why it was refused.</summary>
+    private void Act(MockupOutlineAction action)
+    {
+        if (_session is not { } session || _selected is not { } path)
+        {
+            return;
+        }
+
+        var rows = MockupOutline.Rows(session);
+        var row = rows.FirstOrDefault(r => r.Path.SequenceEqual(path));
+        if (row is null || MockupOutline.Plan(session, path, action) is not { } step)
+        {
+            _announce = $"{(row is null ? "Nothing" : Name(row))} cannot {Verb(action)} from here.";
+            return;
+        }
+
+        var parent = path.Count >= 2 ? rows.FirstOrDefault(r => r.Path.SequenceEqual(path.Take(path.Count - 1))) : null;
+        var into = action == MockupOutlineAction.Indent && path[^1] > 0
+            ? rows.FirstOrDefault(r => r.Path.SequenceEqual([.. path.Take(path.Count - 1), path[^1] - 1]))
+            : null;
+        var parentName = parent is null ? null : Name(parent);
+        var intoName = into is null ? null : Name(into);
+
+        var outcome = session.Apply(step.Edit);
+        if (!outcome.Applied)
+        {
+            _problems = outcome.Refusal;
+            _announce = $"Not done: {string.Join(" ", outcome.Refusal.Select(e => e.Message))}";
+            return;
+        }
+
+        _problems = [];
+        _status = null;
+        if (step.Lands is { } lands)
+        {
+            _selected = lands;
+            var now = MockupOutline.Rows(session).First(r => r.Path.SequenceEqual(lands));
+            _announce = action switch
+            {
+                MockupOutlineAction.Indent => $"{Name(row)} indented into {intoName}, now {Position(now)}.",
+                MockupOutlineAction.Outdent => $"{Name(row)} outdented to after {parentName}, now {Position(now)}.",
+                _ => $"{Name(row)} moved {(action == MockupOutlineAction.MoveUp ? "up" : "down")}, now {Position(now)}.",
+            };
+        }
+        else
+        {
+            _selected = NearestAfterRemoval(session, path);
+            _announce = $"{Name(row)} deleted.";
+        }
+    }
+
+    // ---- palette --------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// What each type would do at the chosen place, for the tree and selection as they are now. Each is a dry run
+    /// through the reader, so it is worked out once per tree, selection and place rather than on every render.
+    /// </summary>
+    private IReadOnlyList<MockupPaletteChoice> PaletteChoices(MockupEditSession session)
+    {
+        var selected = _selected is { } path ? string.Join(",", path) : null;
+        if (_palette is not { } cached
+            || !ReferenceEquals(cached.Key.Json, session.Json) || cached.Key.Selected != selected || cached.Key.Place != _place)
+        {
+            var choices = MockupPalette.Components.Select(c => MockupPalette.Plan(session, _selected, c, _place)).ToList();
+            _palette = cached = ((session.Json, selected, _place), choices);
+        }
+
+        return cached.Choices;
+    }
+
+    private void OnPlace(ChangeEventArgs e) =>
+        _place = Enum.GetValues<MockupPalettePlace>().FirstOrDefault(p => PlaceValue(p) == e.Value?.ToString(), _place);
+
+    private static string PlaceValue(MockupPalettePlace place) => place.ToString().ToLowerInvariant();
+
+    private static string PlaceLabel(MockupPalettePlace place) => place switch
+    {
+        MockupPalettePlace.Auto => "inside the selection, or after it",
+        MockupPalettePlace.After => "after the selection",
+        MockupPalettePlace.Before => "before the selection",
+        _ => "inside the selection",
+    };
+
+    /// <summary>
+    /// Inserts one palette type as one edit and selects it, or shows and announces why it cannot go there. Ctrl (or
+    /// Cmd) with the click puts it inside the selection, Alt before it; otherwise the place chosen above applies.
+    /// </summary>
+    private void Insert(MockupComponent component, MouseEventArgs e)
+    {
+        if (_session is not { } session)
+        {
+            return;
+        }
+
+        var place = e.CtrlKey || e.MetaKey ? MockupPalettePlace.Inside : e.AltKey ? MockupPalettePlace.Before : _place;
+        var type = MockupVocabulary.Name(component);
+        var choice = MockupPalette.Plan(session, _selected, component, place);
+        var outcome = choice.Offered ? session.Apply(choice.Edit!) : null;
+        if (outcome is not { Applied: true })
+        {
+            var why = choice.Refusal ?? string.Join(" ", outcome!.Refusal.Select(r => r.Message));
+            _problems = [new MockupError(string.Empty, $"A {type} cannot be inserted {PlaceLabel(place)}: {why}")];
+            _announce = $"Not inserted: {why}";
+            return;
+        }
+
+        _problems = [];
+        _status = null;
+        _selected = choice.Lands;
+        var now = MockupOutline.Rows(session).First(r => r.Path.SequenceEqual(choice.Lands!));
+        _announce = $"{Name(now)} inserted, now {Position(now)}.";
+    }
+
+    // ---- inspector ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Applies one inspector change to the selected node as one edit, or shows and announces why it was refused. A
+    /// refused control is re-rendered from the tree (its key moves on), so it does not go on showing the refused text;
+    /// only that control, so focus the person has since moved elsewhere in the inspector stays where it is. While an
+    /// override is being edited (#199) the same change is made in it, as one edit of that override.
+    /// </summary>
+    private void Change(string property, Func<MockupEditSession, IReadOnlyList<int>, MockupEdit?> plan) =>
+        Change(property, plan, overridable: true);
+
+    /// <summary>A change to the node itself, never to an override: its states, viewport overrides and interactions.</summary>
+    private void ChangeAtRest(string property, Func<MockupEditSession, IReadOnlyList<int>, MockupEdit?> plan) =>
+        Change(property, plan, overridable: false);
+
+    private void Change(string property, Func<MockupEditSession, IReadOnlyList<int>, MockupEdit?> plan, bool overridable)
+    {
+        if (_session is not { } session || _selected is not { } path || !MockupOutline.Exists(session, path))
+        {
+            return;
+        }
+
+        var row = MockupOutline.Rows(session).First(r => r.Path.SequenceEqual(path));
+        var scope = overridable ? ActiveScope(session) : null;
+        var edit = scope is null ? plan(session, path) : MockupInspector.InOverride(session, path, scope, plan);
+        if (edit is null)
+        {
+            return;
+        }
+
+        Applied(session.Apply(edit), property, scope is null
+            ? $"{Name(row)}: {property} changed."
+            : $"{Name(row)} {ScopeWords(scope)}: {property} changed.");
+    }
+
+    /// <summary>A change to the document rather than a node (#199: its viewports and sample data).</summary>
+    private void ChangeDocument(string property, Func<MockupEditSession, MockupEdit?> plan, string said)
+    {
+        if (_session is { } session && plan(session) is { } edit)
+        {
+            Applied(session.Apply(edit), property, said);
+        }
+    }
+
+    // ---- overrides (#199) -------------------------------------------------------------------------------------
+
+    private MockupOverrideScope? _scope;
+    private IReadOnlyList<int>? _scopeFor;
+
+    /// <summary>
+    /// The override being edited: only for the node it was chosen on, and only while that node still has it (an undo,
+    /// a drop or another selection ends it without anyone having to remember to).
+    /// </summary>
+    private MockupOverrideScope? ActiveScope(MockupEditSession session)
+    {
+        if (_scope is not { } scope || _scopeFor is not { } path || _selected is not { } selected || !path.SequenceEqual(selected))
+        {
+            return null;
+        }
+
+        var behaviour = MockupBehaviour.Read(session, path);
+        var still = scope.Map == MockupEntryMap.States
+            ? behaviour?.States.Contains(scope.Key) == true
+            : behaviour?.AtViewports.Contains(scope.Key) == true;
+        return still ? scope : null;
+    }
+
+    private MockupInspectorNode? ReadNode(MockupEditSession session, IReadOnlyList<int> path) =>
+        ActiveScope(session) is { } scope ? MockupInspector.Read(session, path, scope) : MockupInspector.Read(session, path);
+
+    private void EditOverride(MockupOverrideScope scope)
+    {
+        if (_session is not { } session || _selected is not { } path)
+        {
+            return;
+        }
+
+        _scope = scope;
+        _scopeFor = path;
+        var row = MockupOutline.Rows(session).First(r => r.Path.SequenceEqual(path));
+        _announce = $"Editing how {Name(row)} looks {ScopeWords(scope)}.";
+    }
+
+    private void LeaveScope()
+    {
+        _scope = null;
+        _scopeFor = null;
+        _announce = "Back to the node at rest.";
+    }
+
+    private static string ScopeWords(MockupOverrideScope scope) =>
+        scope.Map == MockupEntryMap.States ? $"when {scope.Key}" : $"at {scope.Key}";
+
+    private static string? Chosen(ChangeEventArgs e) => string.IsNullOrEmpty(Text(e)) ? null : Text(e);
+
+    private static IReadOnlyList<MockupSetTarget> ReplacedSet(IReadOnlyList<MockupSetTarget> list, int at, MockupSetTarget value) =>
+        [.. list.Select((t, i) => i == at ? value : t)];
+
+    /// <summary>A set row pointed at another node: its state is kept when that node describes it too, else default.</summary>
+    private static IReadOnlyList<MockupSetTarget> Retargeted(IReadOnlyList<MockupSetTarget> list, int at, string id, MockupBehaviourNode behaviour)
+    {
+        var state = list[at].State;
+        var keeps = behaviour.Settable.FirstOrDefault(c => c.Id == id)?.States.Contains(state) == true;
+        return ReplacedSet(list, at, new MockupSetTarget(id, keeps ? state : MockupVocabulary.DefaultState));
+    }
+
+    private void ChangeTitle(ChangeEventArgs e)
+    {
+        if (_session is { } session && MockupInspector.SetTitle(session, Text(e)) is { } edit)
+        {
+            Applied(session.Apply(edit), "title", "The design's title changed.");
+        }
+    }
+
+    private void Applied(MockupEditOutcome outcome, string property, string said)
+    {
+        if (!outcome.Applied)
+        {
+            _problems = outcome.Refusal;
+            _announce = $"Not changed: {string.Join(" ", outcome.Refusal.Select(r => r.Message))}";
+            _refusedEpochs[property] = _refusedEpochs.GetValueOrDefault(property) + 1;
+            return;
+        }
+
+        _problems = [];
+        _status = null;
+        _announce = said;
+    }
+
+    private readonly Dictionary<string, int> _refusedEpochs = new(StringComparer.Ordinal);
+
+    // The override being edited is part of a control's key (#199), so switching to another one never leaves a control
+    // showing what it held for the last.
+    private string FieldKey(string property) =>
+        $"{property}:{_scope?.Map}:{_scope?.Key}:{_refusedEpochs.GetValueOrDefault(property).ToString(CultureInfo.InvariantCulture)}";
+
+    private static string? Text(ChangeEventArgs e) => e.Value?.ToString();
+
+    private static string TextLabel(MockupComponent? component) => component switch
+    {
+        MockupComponent.Window => "Title",
+        MockupComponent.Field => "Label",
+        MockupComponent.Image => "Caption",
+        MockupComponent.Panel => "Text (a tab's label inside tabs)",
+        _ => "Text",
+    };
+
+    private static IReadOnlyList<string> Replaced(IReadOnlyList<string> list, int at, string? value) =>
+        [.. list.Select((o, i) => i == at ? value ?? "" : o)];
+
+    private static IReadOnlyList<string> Swapped(IReadOnlyList<string> list, int a, int b)
+    {
+        var copy = list.ToList();
+        (copy[a], copy[b]) = (copy[b], copy[a]);
+        return copy;
+    }
+
+    private static string NewOption(IReadOnlyList<string> options)
+    {
+        for (var n = options.Count + 1; ; n++)
+        {
+            var candidate = "Option " + n.ToString(CultureInfo.InvariantCulture);
+            if (!options.Contains(candidate, StringComparer.Ordinal))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    private static string Position(MockupOutlineRow row) =>
+        $"{(row.Index + 1).ToString(CultureInfo.InvariantCulture)} of {row.Siblings.ToString(CultureInfo.InvariantCulture)} at level {row.Depth.ToString(CultureInfo.InvariantCulture)}";
+
+    /// <summary>What to select once a node is gone: what took its place, else the sibling before it, else its parent.</summary>
+    private static IReadOnlyList<int>? NearestAfterRemoval(MockupEditSession session, IReadOnlyList<int> removed)
+    {
+        if (MockupOutline.Exists(session, removed))
+        {
+            return removed;
+        }
+
+        if (removed[^1] > 0)
+        {
+            return [.. removed.Take(removed.Count - 1), removed[^1] - 1];
+        }
+
+        return removed.Count > 1 ? [.. removed.Take(removed.Count - 1)] : null;
+    }
+
+    private void Undo()
+    {
+        var id = SelectedId();
+        if (_session?.Undo() == true)
+        {
+            AfterHistory("Undone.", id);
+        }
+    }
+
+    private void Redo()
+    {
+        var id = SelectedId();
+        if (_session?.Redo() == true)
+        {
+            AfterHistory("Redone.", id);
+        }
+    }
+
+    private string? SelectedId() =>
+        _session is { } session && _selected is { } path
+            ? MockupOutline.Rows(session).FirstOrDefault(r => r.Path.SequenceEqual(path))?.Id
+            : null;
+
+    /// <summary>
+    /// After an undo or a redo the selection follows the node it was on: by its id when it has one (an undone move
+    /// puts it back where it was), else by its place while there still is a node there.
+    /// </summary>
+    private void AfterHistory(string said, string? selectedId)
+    {
+        _problems = [];
+        _status = null;
+        var rows = MockupOutline.Rows(_session!);
+        if (selectedId is not null && rows.FirstOrDefault(r => r.Id == selectedId) is { } same)
+        {
+            _selected = same.Path;
+        }
+        else if (_selected is { } path && !MockupOutline.Exists(_session!, path))
+        {
+            _selected = null;
+        }
+
+        _announce = said;
+    }
+
+    // ---- keys ------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The outline's own keys. mockupOutline.js stops the browser acting on exactly these (Alt+Left is Back in a
+    /// browser, Tab moves focus), and lets Tab through when nothing is selected, so the outline never traps focus.
+    /// </summary>
+    private void OnOutlineKey(KeyboardEventArgs e)
+    {
+        if (e.CtrlKey || e.MetaKey)
+        {
+            return;
+        }
+
+        switch (e.Key)
+        {
+            case "ArrowUp" when e.AltKey:
+                Act(MockupOutlineAction.MoveUp);
+                break;
+            case "ArrowDown" when e.AltKey:
+                Act(MockupOutlineAction.MoveDown);
+                break;
+            case "ArrowLeft" when e.AltKey:
+                Act(MockupOutlineAction.Outdent);
+                break;
+            case "ArrowRight" when e.AltKey:
+                Act(MockupOutlineAction.Indent);
+                break;
+            case "Tab" when _selected is not null:
+                Act(e.ShiftKey ? MockupOutlineAction.Outdent : MockupOutlineAction.Indent);
+                break;
+            case "Delete":
+                Act(MockupOutlineAction.Remove);
+                break;
+            case "ArrowUp":
+                Step(-1);
+                break;
+            case "ArrowDown":
+                Step(1);
+                break;
+            case "Home":
+                Step(int.MinValue);
+                break;
+            case "End":
+                Step(int.MaxValue);
+                break;
+            case "Escape":
+                _selected = null;
+                break;
+        }
+    }
+
+    /// <summary>The editor's keys, wherever focus is inside it: undo, redo and save.</summary>
+    private async Task OnEditorKey(KeyboardEventArgs e)
+    {
+        if (!(e.CtrlKey || e.MetaKey) || _session is null)
+        {
+            return;
+        }
+
+        switch (e.Key.ToLowerInvariant())
+        {
+            case "z" when e.ShiftKey:
+            case "y":
+                Redo();
+                break;
+            case "z":
+                Undo();
+                break;
+            case "s":
+                await SaveAsync();
+                break;
+        }
+    }
+
+    // ---- saving and leaving ----------------------------------------------------------------------------------
+
+    private async Task SaveAsync()
+    {
+        if (_session is not { } session || _item is not { } item || _saving)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var result = await DesignMockupSave.SaveAsync(Wiki, item, session);
+            switch (result.Outcome)
+            {
+                case DesignSaveOutcome.Unchanged:
+                    _status = "Nothing to save: the tree is the one that was opened.";
+                    break;
+                case DesignSaveOutcome.Saved:
+                    _item = result.Item;
+                    _stale = null;
+                    _status = $"Saved as version {result.Item!.Version.ToString(CultureInfo.InvariantCulture)}.";
+                    break;
+                case DesignSaveOutcome.Stale:
+                    var now = await Wiki.GetAsync(item.Id);
+                    _stale = now is null
+                        ? "This design was deleted since it was opened. Nothing was written."
+                        : $"Somebody saved this design since it was opened (you opened version {item.Version.ToString(CultureInfo.InvariantCulture)}, it is now version {now.Version.ToString(CultureInfo.InvariantCulture)}). Nothing was written.";
+                    break;
+                default:
+                    _problems = [.. result.Errors.Select(e => new MockupError(string.Empty, e.Message))];
+                    break;
+            }
+
+            _announce = _stale ?? _status ?? string.Join(" ", _problems.Select(p => p.Message));
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        await OpenAsync();
+        _announce = "Reloaded the design as it is stored now.";
+    }
+
+    private void OnNavigating(LocationChangingContext context)
+    {
+        if (_leaving || !Dirty)
+        {
+            return;
+        }
+
+        context.PreventNavigation();
+        _pendingNavigation = context.TargetLocation;
+        StateHasChanged();
+    }
+
+    private async Task SaveAndLeaveAsync()
+    {
+        await SaveAsync();
+        if (!Dirty)
+        {
+            Leave();
+        }
+    }
+
+    private void Leave()
+    {
+        if (_pendingNavigation is not { } target)
+        {
+            return;
+        }
+
+        _leaving = true;
+        _pendingNavigation = null;
+        Nav.NavigateTo(target);
+    }
+
+    private void Stay() => _pendingNavigation = null;
+
+    // ---- words -----------------------------------------------------------------------------------------------
+
+    /// <summary>The rows with a reader error, by JSON path, and how many each has.</summary>
+    private static Dictionary<string, int> ErrorMarks(MockupEditSession session)
+    {
+        var marks = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var error in session.Errors)
+        {
+            if (MockupOutline.NodeOf(error.Path) is { } path)
+            {
+                var at = MockupOutline.JsonPath(path);
+                marks[at] = marks.GetValueOrDefault(at) + 1;
+            }
+        }
+
+        return marks;
+    }
+
+    private static string RowId(MockupOutlineRow row) =>
+        "mk-row-" + string.Join("-", row.Path.Select(i => i.ToString(CultureInfo.InvariantCulture)));
+
+    /// <summary>How a node is named in an announcement: its id, else its type and text.</summary>
+    private static string Name(MockupOutlineRow row) =>
+        row.Id ?? ((row.Text ?? row.Label) is { } words ? $"{row.Type} \"{words}\"" : row.Type);
+
+    private static string Verb(MockupOutlineAction action) => action switch
+    {
+        MockupOutlineAction.MoveUp => "move up",
+        MockupOutlineAction.MoveDown => "move down",
+        MockupOutlineAction.Indent => "be indented",
+        MockupOutlineAction.Outdent => "be outdented",
+        _ => "be deleted",
+    };
+
+    /// <summary>The type's mark in the outline: two letters in a box, styled per type.</summary>
+    private static string Glyph(string type) => type switch
+    {
+        "window" => "Wn",
+        "panel" => "Pn",
+        "toolbar" => "Tb",
+        "list" => "Ls",
+        "table" => "Ta",
+        "form" => "Fm",
+        "field" => "Fd",
+        "button" => "Bt",
+        "link" => "Lk",
+        "tabs" => "Ts",
+        "tree" => "Tr",
+        "dialog" => "Dg",
+        "text" => "Tx",
+        "image" => "Im",
+        "container" => "Ct",
+        _ => "?",
+    };
+}

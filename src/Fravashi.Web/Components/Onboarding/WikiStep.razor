@@ -1,0 +1,289 @@
+@page "/onboarding/wiki"
+@layout OnboardingLayout
+@using Fravashi.Application.Onboarding
+@using Fravashi.Application.Onboarding.Auth
+@using Fravashi.Application.Persistence
+@using Fravashi.Web.Services
+@inject IWikiAccessProbe Probe
+@inject ISecretStore Secrets
+@inject IProviderConnectionStore Connections
+@inject IConfigurationStore Config
+@inject IConfigurationReloader Reloader
+@inject IAuthConfigStore AuthConfig
+@inject NavigationManager Nav
+@inject OnboardingDraft Draft
+
+@* O6 - O10 - documentation/wiki provider. Confluence / Azure DevOps Wiki / GitHub Wiki first, plus the in-app
+   local wiki (O10) for users with none. Access is authorized and read-tested. For Confluence, supplying a
+   space key runs a real, user-consented write/delete round-trip (create → update → delete a labelled probe
+   page); without a key, and for ADO/GitHub wiki, write/delete stay honestly "not verified". O9 records the
+   sync policy - your site is authoritative, conflicts ask you - but the sync ENGINE is out of scope (backlog).
+   Field values live in the wizard-scoped draft (F13); the token is circuit-only and never persisted. *@
+
+<div class="ob-step">
+    <h2>Your documentation / wiki</h2>
+
+    <label class="ob-field">
+        <span class="ob-field-label">Provider</span>
+        <FluentSelect TOption="string" @bind-Value="Draft.WikiProvider" @bind-Value:after="OnProviderChanged" data-testid="wiki-provider">
+            <FluentOption Value="@OnboardingProviders.Confluence">Confluence</FluentOption>
+            <FluentOption Value="@OnboardingProviders.AzureDevOpsWiki">Azure DevOps Wiki</FluentOption>
+            <FluentOption Value="@OnboardingProviders.GitHubWiki">GitHub Wiki</FluentOption>
+            <FluentOption Value="@OnboardingProviders.Local">Local (in-app) - I have no external wiki</FluentOption>
+        </FluentSelect>
+    </label>
+
+    @if (Draft.WikiProvider == OnboardingProviders.Local)
+    {
+        <p class="ob-note" data-testid="wiki-local">
+            @(ProductName.Short) will keep a <strong>local wiki</strong> for your reference docs. This choice is recorded.
+            The in-app local wiki store is not yet a working store - it is on the backlog - so no pages exist
+            until it is built.
+        </p>
+    }
+    else
+    {
+        <label class="ob-field">
+            <span class="ob-field-label">@BaseUrlLabel</span>
+            <FluentTextField @bind-Value="Draft.WikiBaseUrl" @bind-Value:after="Draft.Save" data-testid="wiki-baseurl" />
+        </label>
+
+        @if (Draft.WikiProvider == OnboardingProviders.Confluence)
+        {
+            <label class="ob-field">
+                <span class="ob-field-label">Account email</span>
+                <FluentTextField @bind-Value="Draft.WikiEmail" @bind-Value:after="Draft.Save" data-testid="wiki-email" />
+            </label>
+        }
+
+        <ProviderSignIn Area="wiki" Provider="@Draft.WikiProvider" BaseUrl="@Draft.WikiBaseUrl"
+                        ConnectionId="wiki" CredentialRef="wiki:token"
+                        UseSso="_useSso" UseSsoChanged="OnUseSsoChanged" OnSignedIn="OnSignedInAsync"
+                        ReturnMode="@ReturnMode" />
+
+        @if (_signinReturn is not null)
+        {
+            <p class="ob-saved" data-testid="wiki-signin-return">@_signinReturn</p>
+        }
+
+        @if (!_useSso || !_ssoAvailable)
+        {
+            <label class="ob-field">
+                <span class="ob-field-label">API token / PAT</span>
+                <FluentTextField @bind-Value="Draft.WikiToken" TextFieldType="TextFieldType.Password" data-testid="wiki-token" />
+            </label>
+        }
+
+        @if (Draft.WikiProvider == OnboardingProviders.GitHubWiki)
+        {
+            <p class="ob-field-hint" data-testid="wiki-github-help">
+                A GitHub wiki <strong>is</strong> a git repository. "Test access" runs a real <code>ls-remote</code>
+                (read) and, with a token, a real write test: it clones the wiki, pushes a clearly-labelled probe
+                page ("Fravashi-access-probe-…"), then pushes its removal. The wiki's git repository only exists
+                <strong>after its first page is created</strong> - if none exists yet, create one page in the
+                repository's Wiki tab and retest. Note: git history is append-only, so the probe's two commits
+                remain in the wiki's history even though the page is removed.
+            </p>
+        }
+
+        @if (Draft.WikiProvider == OnboardingProviders.Confluence)
+        {
+            <label class="ob-field">
+                <span class="ob-field-label">Space key (optional)</span>
+                <FluentTextField @bind-Value="Draft.WikiSpaceKey" @bind-Value:after="Draft.Save" data-testid="wiki-spacekey" />
+                <span class="ob-field-hint" data-testid="wiki-spacekey-help">
+                    The key of a Confluence space you can write to (e.g. <code>DOCS</code>). With it, "Test access"
+                    runs a real write test: it creates a clearly-labelled probe page ("@(ProductName.Short) access probe - safe
+                    to delete"), updates it, then deletes it (moved to trash). <strong>Leave it empty</strong> and
+                    write/delete cannot be tested - they stay honestly "not verified".
+                </span>
+            </label>
+        }
+
+        <SavedConnectionNote Connection="_prior" TokenNeeded="TokenNeeded" Area="wiki" />
+
+        <div class="ob-actions">
+            <FluentButton Appearance="Appearance.Accent" OnClick="TestAsync" Disabled="_busy" data-testid="wiki-test">
+                @(_busy ? "Testing…" : "Test access")
+            </FluentButton>
+        </div>
+
+        <ProbeResultView Result="Draft.WikiResult" />
+    }
+
+    <div class="ob-actions">
+        <FluentButton OnClick="SaveAsync" Disabled="_busy" data-testid="wiki-save">Save connection</FluentButton>
+    </div>
+
+    <div class="ob-policy" role="note">
+        <strong>Sync policy.</strong> Your wiki site is <strong>authoritative</strong>; @(ProductName.Short) keeps a local
+        copy and, on a conflict, <strong>asks you</strong>. This policy is recorded now. The sync engine that
+        enforces it is out of scope for onboarding (backlog).
+    </div>
+
+    @if (Draft.WikiSavedStatus is not null)
+    {
+        <p class="ob-saved" data-testid="wiki-saved">Saved as <code>@Draft.WikiSavedStatus</code>.</p>
+    }
+</div>
+
+@code {
+    private bool _busy;
+    private ProviderConnection? _prior;
+    private bool _useSso;
+    private bool _ssoAvailable;
+    private string? _signinReturn;
+
+    private bool TokenNeeded => _prior?.CredentialRef is not null && string.IsNullOrWhiteSpace(Draft.WikiToken) && Draft.WikiCredential is null;
+
+    // Settings-hosted when the URL carries the wizard re-entry flag OR the step is rendered under the Settings
+    // Environment tab (/settings/…). Either way an OAuth sign-in must round-trip back to Settings, not the wizard.
+    private string ReturnMode =>
+        Nav.Uri.Contains("mode=settings", StringComparison.OrdinalIgnoreCase)
+        || Nav.ToBaseRelativePath(Nav.Uri).StartsWith("settings/", StringComparison.OrdinalIgnoreCase)
+            ? "settings" : "wizard";
+
+    private bool WikiBearer =>
+        Draft.WikiProvider == OnboardingProviders.AzureDevOpsWiki
+        && Draft.WikiCredential is { Method: not AuthMethods.Pat };
+
+    protected override void OnInitialized()
+    {
+        _prior = Connections.Get("wiki");
+        RecomputeSso();
+        _signinReturn = SignInReturnMessage();
+    }
+
+    private void RecomputeSso()
+    {
+        _ssoAvailable = AuthConfig.StrategyFor(Draft.WikiProvider) != AuthStrategy.Pat;
+        _useSso = _ssoAvailable && AuthConfig.Get(Draft.WikiProvider).IsConfigured;
+    }
+
+    private string? SignInReturnMessage()
+    {
+        var query = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(new Uri(Nav.Uri).Query);
+        var signin = query.TryGetValue("signin", out var value) ? value.ToString() : null;
+        return signin switch
+        {
+            "ok" => "Signed in - a token was acquired and stored.",
+            "ok-unverified" => "Signed in and the token was stored, but the accessible-resources check returned nothing - verify the scopes.",
+            "denied" => "Sign-in was cancelled or denied. You can try again or use an access token.",
+            "error" => "Sign-in did not complete - the token exchange failed. Check the client id / secret and try again.",
+            "csrf" => "Sign-in could not be verified (state mismatch) and was rejected. Start it again.",
+            _ => null,
+        };
+    }
+
+    private void OnUseSsoChanged(bool useSso)
+    {
+        _useSso = useSso;
+        _ssoAvailable = AuthConfig.StrategyFor(Draft.WikiProvider) != AuthStrategy.Pat;
+    }
+
+    private Task OnSignedInAsync(StoredCredential credential)
+    {
+        Draft.WikiCredential = credential;
+        Draft.WikiToken = credential.AccessToken;
+        return Task.CompletedTask;
+    }
+
+    private void OnProviderChanged()
+    {
+        Draft.Save();
+        RecomputeSso();
+        StateHasChanged();
+    }
+
+    private string BaseUrlLabel => Draft.WikiProvider switch
+    {
+        OnboardingProviders.Confluence => "Site URL (https://your-site.atlassian.net)",
+        OnboardingProviders.AzureDevOpsWiki => "Organization/project URL (https://dev.azure.com/org/project)",
+        OnboardingProviders.GitHubWiki => "Repository or wiki URL (a repo URL, its /wiki page, or <repo>.wiki.git)",
+        _ => "Base URL",
+    };
+
+    private async Task TestAsync()
+    {
+        _busy = true;
+        Draft.WikiSavedStatus = null;
+        try
+        {
+            Draft.WikiResult = await Probe.ProbeAsync(BuildRequest());
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        _busy = true;
+        try
+        {
+            var isLocal = Draft.WikiProvider == OnboardingProviders.Local;
+            if (!isLocal)
+            {
+                Draft.WikiResult ??= await Probe.ProbeAsync(BuildRequest());
+            }
+
+            var status = isLocal ? "Local" : StatusFor(Draft.WikiResult!);
+            const string credentialRef = "wiki:token";
+            var method = AuthMethods.Pat;
+            if (!isLocal && Draft.WikiCredential is not null)
+            {
+                Secrets.Set(credentialRef, CredentialEnvelope.Serialize(Draft.WikiCredential));
+                method = Draft.WikiCredential.Method;
+            }
+            else if (!isLocal && !string.IsNullOrWhiteSpace(Draft.WikiToken))
+            {
+                Secrets.Set(credentialRef, Draft.WikiToken);
+            }
+
+            var hasCredential = !isLocal && (Draft.WikiCredential is not null || !string.IsNullOrWhiteSpace(Draft.WikiToken) || _prior?.CredentialRef is not null);
+            Connections.Upsert(new ProviderConnection(
+                Id: "wiki",
+                Kind: ProviderKind.Wiki,
+                BaseUrl: isLocal ? null : NullIfEmpty(Draft.WikiBaseUrl),
+                CredentialRef: hasCredential ? credentialRef : null,
+                Status: status,
+                UpdatedUtc: DateTimeOffset.UtcNow));
+
+            Config.Set("Onboarding:Wiki:Provider", Draft.WikiProvider);
+            if (!isLocal)
+            {
+                Config.Set(AuthSettings.AuthMethodKey("wiki"), method);
+
+                // Commit the non-secret Confluence coordinate the reader adapter needs - the account email it
+                // pairs with the token for basic auth. The coordinate bridge projects this (with the
+                // connection's BaseUrl → Atlassian:JiraDomain) into Atlassian:JiraEmail, but only where a Jira
+                // board did not already, so a Confluence-only site is wired without clobbering a Jira board.
+                Config.Set("Onboarding:Wiki:Email", NullIfEmpty(Draft.WikiEmail));
+            }
+
+            Config.Set("Wiki:SyncPolicy", "SiteAuthoritative;AskOnConflict");
+            Draft.Save();
+            Draft.WikiSavedStatus = status;
+            _prior = Connections.Get("wiki");
+
+            // Saving is when the connection has to reach the adapters. The bridges re-project only on a reload,
+            // and the only one used to sit in the wizard's final Done, which a step re-opened from Settings
+            // never reaches: a verified Confluence connection read "not fully wired yet" on Home until the
+            // container restarted (backlog 12, met in the installed product on 2026-09-21).
+            Reloader.Reload();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private WikiAccessRequest BuildRequest() =>
+        new(Draft.WikiProvider, NullIfEmpty(Draft.WikiBaseUrl), NullIfEmpty(Draft.WikiEmail), NullIfEmpty(Draft.WikiToken), NullIfEmpty(Draft.WikiSpaceKey), WikiBearer);
+
+    private static string StatusFor(AccessProbeResult result) =>
+        result.AnyFailed ? "Failed" : result.ReadVerified ? "Verified" : "Recorded";
+
+    private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+}

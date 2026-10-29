@@ -1,0 +1,634 @@
+@page "/sessions"
+@page "/sessions/{Id}"
+@page "/sessions/imported/{ImportedName}"
+@using Fravashi.Application.AgentSync
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Web.Components.Dashboard
+@using Fravashi.Web.Components.Sessions
+@using Microsoft.Extensions.DependencyInjection
+@inject LiveSessionRegistry Registry
+@inject BridgeWorkspaceContext Workspace
+@inject IWorkspaceAgentSync Sync
+@inject ImportedConversationCatalog Imports
+@inject ICliConversationSource ImportSource
+@inject NavigationManager Nav
+@inject IServiceProvider Services
+@implements IDisposable
+
+<PageTitle>@(ProductName.Short) · Sessions</PageTitle>
+
+@* The page bar and the split MUST live in the .studio-workitems flex column, as Git and Settings do:
+   the bar keeps its 48px and the split takes the rest, so the page itself never scrolls and the
+   composer never lands under the taskbar. Only the transcript inside the pane scrolls (backlog 16). *@
+<div class="studio-workitems sessions-page">
+    <PageBar Title="Sessions" />
+
+    <PageSplit SidebarLabel="Agent sessions" SidebarTestId="sessions-sidebar" BodyTestId="sessions-detail"
+               BodyCssClass="sessions-body">
+        <Sidebar>
+            @* Backlog 307: across every concurrent session in every workspace, not only this one, which is
+               why it reuses #304's own cross-workspace list rather than reading anything scoped to here. *@
+            <WaitingForYouPanel KindFilter="WaitingForPersonKind.Approval" HeadingLabel="Approvals inbox"
+                                 PanelTestId="approvals-inbox" />
+
+            <div class="page-sidebar-heading">This workspace</div>
+            @* Backlog 21: this was styled with the sidebar item and label classes, so it rendered as a
+               heading above the list and the owner reported it as missing. It is an action, so it looks
+               like one, and it means exactly what the panel's own header action means because it calls
+               the same method on the same component. *@
+            <button type="button" class="session-new" data-testid="new-session" @onclick="StartNew">
+                <span class="session-new-mark" aria-hidden="true">+</span>
+                <span>New conversation</span>
+            </button>
+
+            @if (Entries.Count == 0)
+            {
+                <div class="page-sidebar-empty">No sessions yet.</div>
+            }
+            @* Keyed by session id: a card holds its own rename state (backlog 109), and without the key
+               a new session inserted at the top would hand an open rename box to a different entry. *@
+            @foreach (var entry in Entries)
+            {
+                @if (entry.ImportedName is { } importedName)
+                {
+                    @* Backlog 43: run with the CLI outside Fravashi, read from its own history on the host. *@
+                    <SessionCard @key="entry.Key" Title="@entry.Title" Started="entry.StartedUtc" Imported="true"
+                                 Selected="@(_importedSelected?.Name == importedName)"
+                                 Select="() => SelectImported(importedName)" />
+                }
+                else if (entry.Id is { } id)
+                {
+                    <SessionCard @key="entry.Key" Title="@entry.Title" State="entry.State" Started="entry.StartedUtc"
+                                 GraphOnly="@Registry.IsGraphOnly(id)"
+                                 Assistant="@Registry.IsAssistant(id)"
+                                 Selected="@(_selected == id)"
+                                 Select="() => Select(id)"
+                                 OpenBesideCode="@(CanOpenBesideCode(id) ? EventCallback.Factory.Create(this, () => OpenBesideCode(id)) : default)"
+                                 Rename="name => RenameSession(id, name)" />
+                }
+            }
+
+            @if (_importNote is { Length: > 0 } importNote)
+            {
+                <div class="page-sidebar-empty" data-testid="import-note">@importNote</div>
+            }
+
+            @* The running totals sit below the list, spanning every workspace on purpose (backlog 19). *@
+            <SessionTotalsStrip Totals="_totals" Limits="Registry.SpendLimits" />
+        </Sidebar>
+        <Body>
+            @* Backlog 44: gate G1 is only half a feature if the user cannot see what the conversation is
+               working on, so it sits above the transcript in both the live and the stored views. *@
+            @if (OnScreen is { } workSession && !string.IsNullOrWhiteSpace(WorkspaceId))
+            {
+                <SessionWorkStrip Session="workSession" WorkspaceId="@WorkspaceId" />
+            }
+
+            @if (string.IsNullOrWhiteSpace(WorkspaceId))
+            {
+                <div class="page-body-empty" data-testid="sessions-no-workspace">
+                    Open a workspace folder to run an agent session in it.
+                </div>
+            }
+            else if (_importedSelected is not null)
+            {
+                <ImportedTranscript Conversation="_importedSelected" />
+            }
+            else if (!string.IsNullOrWhiteSpace(ImportedName))
+            {
+                <div class="page-body-empty" data-testid="imported-pending">
+                    @(_importsLoaded
+                        ? "That imported conversation is no longer in the CLI's history for this folder."
+                        : $"Reading the conversations run outside {ProductName.Short}...")
+                </div>
+            }
+            else if (_stored is not null)
+            {
+                <div class="session-history" data-testid="session-history">
+                    <div class="session-history-head">
+                        <span class="session-history-title">@StoredTitle(_stored)</span>
+                        @if (Registry.IsAssistant(_stored.Id))
+                        {
+                            @* Work item #359: it resumes as the assistant, beside whatever else runs. *@
+                            <span class="session-chip-graph-only" data-testid="assistant-chip">@AgentAssistantTools.Label</span>
+                        }
+                        @if (Registry.IsGraphOnly(_stored.Id))
+                        {
+                            @* Work item #352: and it resumes as one, whatever is running beside it. *@
+                            <span class="session-chip-graph-only" data-testid="graph-only-chip">@AgentGraphOnlyTools.Label</span>
+                        }
+                        <span class="session-history-state">@_stored.State</span>
+                        <button type="button" class="studio-btn" data-testid="resume-session"
+                                disabled="@(!CanResume)" @onclick="Resume">
+                            Resume this conversation
+                        </button>
+                    </div>
+                    @if (Registry.HistoryRemoved(_stored.Id))
+                    {
+                        @* Conversations that ended before resume-in-place lost the CLI's file at teardown: say
+                           so plainly instead of offering a Resume that could only fail with the CLI's error. *@
+                        <div class="session-note" data-testid="resume-history-removed">
+                            @LiveSessionRegistry.HistoryRemovedNotice
+                        </div>
+                    }
+                    @if (_resumeError is { Length: > 0 } resumeError)
+                    {
+                        <div class="session-error" data-testid="resume-error">
+                            <span class="session-error-mark" aria-hidden="true">!</span>
+                            <span class="session-error-text">@resumeError</span>
+                        </div>
+                    }
+                    @* Backlog 110. A stored conversation is read the same way a live one is, so it offers
+                       the same right-click: the studio window has no browser menu to fall back on (ADR
+                       0014), and a bubble swallows the event to send its own text along, so without this
+                       handler a right-click here does nothing at all. *@
+                    <div class="session-transcript" data-testid="stored-transcript"
+                         @oncontextmenu="e => OpenCopyMenuAsync(new TranscriptContextRequest(e.ClientX, e.ClientY, null))"
+                         @oncontextmenu:preventDefault="true">
+                        @foreach (var (entry, index) in _storedTranscript.Select((e, i) => (e, i)))
+                        {
+                            switch (entry)
+                            {
+                                @* Backlog 25: folded exactly as the live pane folds it (AgentTurnDrafts). *@
+                                case MessageEmitted draft when _storedDrafts.Contains(index):
+                                    <details class="session-draft" data-testid="superseded-draft">
+                                        <summary class="session-draft-summary">Earlier wording, replaced by this turn's answer</summary>
+                                        <ChatBubble Role="draft.Role" Text="@draft.Text" Timestamp="draft.Timestamp"
+                                                    OnContextMenu="OpenCopyMenuAsync" />
+                                    </details>
+                                    break;
+
+                                case MessageEmitted message:
+                                    <ChatBubble Role="message.Role" Text="@message.Text" Timestamp="message.Timestamp"
+                                                Images="TranscriptImages.For(_storedTranscript, index)"
+                                                Untyped="_storedUntyped.Contains(index)"
+                                                OnContextMenu="OpenCopyMenuAsync" />
+                                    break;
+
+                                @* Backlog 25: a stored conversation says how a turn failed exactly as the live
+                                   pane did, so a restart does not turn a failed turn into silence. *@
+                                case TurnCompleted failedTurn
+                                    when TranscriptTurnOutcomes.FailedTurnNote(failedTurn) is { } turnNote:
+                                    <div class="session-error" data-testid="failed-turn-note">
+                                        <span class="session-error-mark" aria-hidden="true">!</span>
+                                        <span class="session-error-text">@turnNote</span>
+                                    </div>
+                                    break;
+
+                                @* Backlog 92: a question the studio restarted on is still a question. It
+                                   is shown with what was offered, and it says plainly that there is
+                                   nothing here to answer to; Resume above is what makes it answerable. *@
+                                case TurnCompleted turn
+                                    when AgentTurnQuestionsReader.Read(turn.Document) is { Count: > 0 } questions:
+                                    <QuestionPrompt Questions="questions"
+                                                    Answered="AgentTurnQuestionsReader.WasAnswered(_storedTranscript, index)"
+                                                    CanAnswer="false" />
+                                    break;
+                            }
+                        }
+                    </div>
+                    <TranscriptCopyMenu @ref="_copyMenu" />
+                </div>
+            }
+            else
+            {
+                @* A resumed conversation needs no note of its own (owner report 2026-09-15): Resume brings the
+                   conversation itself back, running, so what is on screen IS what the next message continues. *@
+                <SessionPane @ref="_pane" WorkspaceId="@WorkspaceId" WorkingDirectory="@WorkingDirectory"
+                             SessionId="_selected" StartFresh="_startFresh"
+                             SessionStarted="OnSessionStarted"
+                             NewConversation="OnNewConversation"
+                             CopyStateChanged="StateHasChanged">
+                    <HeaderActions>
+                        @* Work item #366: move the conversation on screen to the Code page's panel. *@
+                        @if (OnScreen is { } besideId && CanOpenBesideCode(besideId))
+                        {
+                            <button type="button" class="session-head-action" data-testid="session-open-beside-code"
+                                    title="Open beside the code" aria-label="Open beside the code"
+                                    @onclick="() => OpenBesideCode(besideId)">
+                                <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.2"
+                                     stroke-linejoin="round" aria-hidden="true">
+                                    <rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.6" />
+                                    <path d="M10 2.6v10.8" />
+                                    <path d="M10.6 4.1h3.2v7.8h-3.2z" fill="currentColor" stroke="none" />
+                                </svg>
+                            </button>
+                        }
+                    </HeaderActions>
+                </SessionPane>
+            }
+        </Body>
+    </PageSplit>
+</div>
+
+@code {
+    [Parameter]
+    public string? Id { get; set; }
+
+    /// <summary>
+    /// Backlog 34: the home card's Resume arrives as a navigation, so the request has to ride on the
+    /// URL. It ARMS the composer exactly as the button below does, and when the conversation cannot be
+    /// resumed (no CLI session to continue, or one already running in this workspace) it is ignored and
+    /// the stored conversation is shown with its Resume button disabled, which is the same answer the
+    /// reader would get by clicking it.
+    /// </summary>
+    /// <summary>Backlog 43: the file name of an imported conversation, from <c>/sessions/imported/{name}</c>.</summary>
+    [Parameter]
+    public string? ImportedName { get; set; }
+
+    [Parameter, SupplyParameterFromQuery(Name = "resume")]
+    public bool ResumeRequested { get; set; }
+
+    private AgentSessionId? _selected;
+
+    /// <summary>
+    /// The conversation the body is showing, which is not always the one the route names. With no id the
+    /// pane falls back to the workspace's live conversation (<c>SessionPane.Resolve</c>), so anything that
+    /// describes "this conversation" has to fall back the same way or it describes nothing: the work strip
+    /// used to look at the route alone and stayed hidden on a plain /sessions, over a running conversation
+    /// that was bound to an item and a plan. An imported or a stored view is not a live conversation, so
+    /// there is nothing to fall back to while one of those is on screen.
+    /// </summary>
+    private AgentSessionId? OnScreen => _selected
+        ?? (_importedSelected is null && string.IsNullOrWhiteSpace(ImportedName) && _stored is null
+            && !string.IsNullOrWhiteSpace(WorkspaceId)
+            ? Registry.LatestFor(WorkspaceId)?.Id
+            : null);
+    private SessionRecord? _stored;
+    private SessionPane? _pane;
+
+    /// <summary>
+    /// The right-click menu for the STORED conversation (backlog 110). The live pane brings its own
+    /// inside SessionTranscript; this branch of the Body renders bubbles directly, so it owns one too.
+    /// </summary>
+    private TranscriptCopyMenu? _copyMenu;
+
+    private Task OpenCopyMenuAsync(TranscriptContextRequest request) =>
+        _copyMenu?.OpenAsync(request) ?? Task.CompletedTask;
+
+    /// <summary>
+    /// Cost and token totals across every session and workspace (backlog 19). Refreshed whenever the
+    /// session set changes and on every navigation, which is when a turn has finished folding its usage
+    /// into the store; a totals view is not a live meter, so mid-turn precision is not the point.
+    /// </summary>
+    private SessionUsageTotals _totals = SessionUsageTotals.Empty;
+
+    /// <summary>
+    /// The pane, but only while the Body really renders one. Blazor never nulls a component @ref when
+    /// the component leaves the render tree, so <c>_pane</c> keeps pointing at a DISPOSED pane once a
+    /// stored conversation takes its place; calling that instance renders into a component the renderer
+    /// no longer holds, which is silently discarded. This asks the same question the Body's own branches
+    /// ask, so the two can never disagree.
+    /// </summary>
+    private SessionPane? LivePane =>
+        !string.IsNullOrWhiteSpace(WorkspaceId) && _stored is null && _importedSelected is null
+        && string.IsNullOrWhiteSpace(ImportedName) ? _pane : null;
+
+    /// <summary>
+    /// Backlog 43: conversations the user ran with the CLI outside Fravashi, for this workspace. Read once
+    /// when the page opens; the catalog re-reads a file only when it changed, so opening again is cheap.
+    /// </summary>
+    private IReadOnlyList<ImportedConversation> _imported = [];
+
+    private ImportedConversation? _importedSelected;
+
+    private bool _importsLoaded;
+
+    /// <summary>Said under the list when the host's history could not be read, rather than showing nothing.</summary>
+    private string? _importNote;
+
+    private string? WorkspaceId => Workspace.ActiveWorkspaceId;
+
+    /// <summary>The workspace's contained copy: the only place an agent is ever run (plan 2d decision 2).</summary>
+    private string? WorkingDirectory
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(WorkspaceId))
+            {
+                return null;
+            }
+
+            Sync.EnsureStarted(WorkspaceId);
+            return Sync.CopyPathFor(WorkspaceId);
+        }
+    }
+
+    /// <summary>
+    /// Every conversation in the workspace, most recently ACTIVE first: a live one by when it last started or was
+    /// resumed (so a resumed conversation rises to the top), a stored one by when it ended, an imported one by
+    /// when it started. The card still shows each conversation's start.
+    /// </summary>
+    private IReadOnlyList<SessionEntry> Entries
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(WorkspaceId))
+            {
+                return [];
+            }
+
+            var live = Registry.Sessions.Where(s => s.WorkspaceId == WorkspaceId).ToList();
+            var entries = live
+                .Select(s => new SessionEntry(s.Id, null, TitleOf(s.Id, s.CustomTitle, s.DerivedTitle), s.State, s.StartedUtc, s.ActivatedUtc))
+                .ToList();
+            var liveIds = live.Select(s => s.Id).ToHashSet();
+            entries.AddRange(Registry.History(WorkspaceId)
+                .Where(r => !liveIds.Contains(r.Id))
+                .Select(r => new SessionEntry(r.Id, null, StoredTitle(r), r.State, r.StartedUtc, r.EndedUtc ?? r.StartedUtc)));
+            entries.AddRange(_imported
+                .Where(c => c.WorkspaceId == WorkspaceId)
+                .Select(c => new SessionEntry(null, c.Name, ConversationTitles.Display(null, c.Title), AgentSessionState.Completed, c.StartedUtc, c.StartedUtc)));
+            return [.. entries.OrderByDescending(e => e.LastActiveUtc)];
+        }
+    }
+
+    /// <summary>
+    /// The selected stored conversation's transcript, read ONCE when the selection resolves. The whole
+    /// list rather than only its messages: a turn that ended in a questions document is part of what the
+    /// conversation said, and dropping it here is what would make a restart lose the question (backlog 92).
+    /// </summary>
+    private IReadOnlyList<AgentEvent> _storedTranscript = [];
+
+    /// <summary>The stored conversation's untyped answers, read once with the transcript (backlog 25).</summary>
+    private IReadOnlySet<int> _storedUntyped = new HashSet<int>();
+    private IReadOnlySet<int> _storedDrafts = new HashSet<int>();
+
+    private bool CanResume => _stored is not null
+        && !string.IsNullOrWhiteSpace(WorkingDirectory)
+        && Registry.CanResume(_stored.Id);
+
+    /// <summary>A list entry: a Fravashi session (an id) or an imported conversation (a file name), never both.</summary>
+    private sealed record SessionEntry(
+        AgentSessionId? Id, string? ImportedName, string Title, AgentSessionState State, DateTimeOffset StartedUtc,
+        DateTimeOffset LastActiveUtc)
+    {
+        public string Key => ImportedName is { } name ? "imported:" + name : Id!.Value.ToString();
+    }
+
+    private readonly CancellationTokenSource _disposed = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        Registry.SessionsChanged += OnSessionsChanged;
+        _titles = new ConversationTitleSource(Services);
+        _titles.Changed += OnTitleLinksChanged;
+        await LoadImportedAsync();
+        await LoadTitlesAsync();
+    }
+
+    /// <summary>
+    /// Work item #351: each conversation is titled by the work item it is linked to when it is linked to one, so the
+    /// links are read for the listed conversations (once each; again when one's links change).
+    /// </summary>
+    private ConversationTitleSource? _titles;
+
+    private string TitleOf(AgentSessionId id, string? custom, string? derived) =>
+        _titles?.Title(id, custom, derived) ?? ConversationTitles.Display(custom, derived);
+
+    private string StoredTitle(SessionRecord record) => TitleOf(record.Id, record.CustomTitle, record.Title);
+
+    private async Task<bool> LoadTitlesAsync() =>
+        _titles is not null && await _titles.LoadAsync(Entries.Where(e => e.Id is not null).Select(e => e.Id!.Value));
+
+    private void OnTitleLinksChanged(AgentSessionId session) => _ = InvokeAsync(async () =>
+    {
+        await LoadTitlesAsync();
+        StateHasChanged();
+    });
+
+    /// <summary>
+    /// Backlog 43. Asked once per page open, never on a timer. A host that cannot be asked right now (the
+    /// bridge restarting, fravashi.exe gone) is said under the list; the studio's own sessions are unaffected.
+    /// </summary>
+    private async Task LoadImportedAsync()
+    {
+        if (string.IsNullOrWhiteSpace(WorkspaceId))
+        {
+            _importsLoaded = true;
+            return;
+        }
+
+        try
+        {
+            _imported = await Imports.ListAsync(WorkspaceId, ImportSource, _disposed.Token);
+            _importNote = null;
+        }
+        catch (OperationCanceledException) when (_disposed.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException
+                                       or OperationCanceledException or InvalidOperationException)
+        {
+            _imported = [];
+            _importNote = $"Conversations run outside {ProductName.Short} could not be read from this machine right now.";
+        }
+
+        _importsLoaded = true;
+        ResolveImported();
+    }
+
+    private void ResolveImported() =>
+        _importedSelected = string.IsNullOrWhiteSpace(ImportedName)
+            ? null
+            : _imported.FirstOrDefault(c => c.Name == ImportedName && c.WorkspaceId == WorkspaceId);
+
+    protected override void OnParametersSet()
+    {
+        _selected = Guid.TryParse(Id, out var parsed) ? new AgentSessionId(parsed) : null;
+        Resolve();
+        ResolveImported();
+
+        if (ResumeRequested)
+        {
+            Resume();
+        }
+
+        _totals = Registry.UsageTotals();
+    }
+
+    /// <summary>A selected session is either still live here, or a record to read back from the store.</summary>
+    private void Resolve()
+    {
+        _stored = _selected is { } id && Registry.Find(id) is null
+            ? Registry.History(WorkspaceId ?? string.Empty).FirstOrDefault(r => r.Id == id)
+            : null;
+
+        _storedTranscript = _stored is null ? [] : Registry.StoredTranscript(_stored.Id);
+        _storedUntyped = TranscriptTurnOutcomes.UntypedAnswers(_storedTranscript);
+        _storedDrafts = AgentTurnDrafts.Superseded(_storedTranscript);
+    }
+
+    private void OnSessionsChanged() => InvokeAsync(async () =>
+    {
+        _totals = Registry.UsageTotals();
+        StateHasChanged();
+        if (await LoadTitlesAsync())
+        {
+            StateHasChanged();
+        }
+    });
+
+    private void SelectImported(string name)
+    {
+        _selected = null;
+        _stored = null;
+        Nav.NavigateTo($"/sessions/imported/{Uri.EscapeDataString(name)}");
+    }
+
+    private void Select(AgentSessionId id)
+    {
+        _selected = id;
+        _importedSelected = null;
+        _resumeError = null;
+        Resolve();
+        Nav.NavigateTo($"/sessions/{id.Value:D}");
+    }
+
+    /// <summary>
+    /// A rename from the list (backlog 109), live session or stored row alike. The registry persists it
+    /// and raises SessionsChanged for the list; re-resolving is for the stored conversation's own header,
+    /// which reads the record this page holds rather than the store.
+    /// </summary>
+    private void RenameSession(AgentSessionId id, string name)
+    {
+        if (Registry.Rename(id, name))
+        {
+            Resolve();
+        }
+    }
+
+    /// <summary>
+    /// The sidebar's action, which must mean the same thing as the panel's own: the PANE decides, always,
+    /// including asking first about a running turn. When one is on screen it is asked directly. When a
+    /// stored conversation has taken its place there is no pane to ask, so the page drops its selection to
+    /// bring one back AND hands that pane the reason it was brought back. Dropping the selection alone is
+    /// what shipped last time, and it left the reader inside the still-running conversation: the new pane
+    /// resolved to the workspace's latest session, so the reader moved and got nothing they asked for.
+    /// </summary>
+    private async Task StartNew()
+    {
+        if (LivePane is { } pane)
+        {
+            await pane.StartNewConversation();
+            return;
+        }
+
+        _startFresh = true;
+        OnNewConversation();
+    }
+
+    /// <summary>
+    /// The reader's request for a fresh conversation, waiting for a pane to serve it. It is set only on
+    /// the route that has no pane on screen, and it lives for exactly one render (see OnAfterRender).
+    /// </summary>
+    private bool _startFresh;
+
+    /// <summary>
+    /// Drops the fresh-conversation request once the render it was set for has happened: the pane serves
+    /// it while its parameters are set, which is before this runs. Left standing it would be served again
+    /// by whatever pane renders next, so picking a live conversation afterwards would clear it out from
+    /// under the reader. Deliberately no StateHasChanged: nothing on screen depends on the flag being
+    /// false, and the pane that already served it ignores a repeat.
+    /// </summary>
+    protected override void OnAfterRender(bool firstRender) => _startFresh = false;
+
+    /// <summary>The pane cleared itself to a fresh conversation; the page drops what it had selected.</summary>
+    private void OnNewConversation()
+    {
+        _selected = null;
+        _stored = null;
+
+        // The address is part of what the reader is looking at: leaving /sessions/{old-id} in it means a
+        // reload lands back on the conversation they just walked away from. Both routes into a fresh
+        // conversation (this page's sidebar and the pane's own header) end here, so it navigates once.
+        Nav.NavigateTo("/sessions");
+    }
+
+    private void OnSessionStarted(AgentSessionId id)
+    {
+        _selected = id;
+        _stored = null;
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Resumes this conversation IN PLACE (owner report 2026-09-15). The registry brings the same session
+    /// back running under its own id, with its transcript, so the pane shows the earlier turns at once and
+    /// the composer is armed; the next message continues the CLI conversation and lands under the same row.
+    /// It used to arm an empty pane whose first message started a second session, which is how one
+    /// conversation became two rows and the resumed CLI looked for its conversation in the wrong place.
+    /// </summary>
+    private void Resume()
+    {
+        if (_stored is null || !CanResume)
+        {
+            return;
+        }
+
+        try
+        {
+            var resumed = Registry.Resume(_stored.Id, WorkingDirectory!);
+            _resumeError = null;
+            _selected = resumed.Id;
+            _stored = null;
+            _storedTranscript = [];
+        }
+        catch (InvalidOperationException ex)
+        {
+            // A spend ceiling, or a session that started in this workspace a moment ago: said where the
+            // reader pressed the button, and the stored conversation stays on screen.
+            _resumeError = ex.Message;
+        }
+
+        StateHasChanged();
+    }
+
+    /// <summary>Why the last Resume was refused, shown under the stored conversation's header.</summary>
+    private string? _resumeError;
+
+    /// <summary>
+    /// Work item #366: the Code page's panel state, resolved optionally so a wiring without it (most component tests)
+    /// simply does not offer "Open beside the code".
+    /// </summary>
+    private Fravashi.Web.Services.AgentPanelState? BesidePanel => Services.GetService<Fravashi.Web.Services.AgentPanelState>();
+
+    /// <summary>
+    /// Only a conversation the studio holds live can be shown in the panel: the panel's pane resolves a session from
+    /// the registry, and a stored one would open there as an empty new conversation. Resume brings a stored one back.
+    /// </summary>
+    private bool CanOpenBesideCode(AgentSessionId id) => BesidePanel is not null && Registry.Find(id) is not null;
+
+    /// <summary>
+    /// "Open beside the code": the panel takes this conversation and the Code page opens with it beside the editor.
+    /// Leaving this page is what keeps the conversation from being shown live in two places at once.
+    /// </summary>
+    private void OpenBesideCode(AgentSessionId id)
+    {
+        if (BesidePanel is not { } panel || Registry.Find(id) is null)
+        {
+            return;
+        }
+
+        panel.ShowBesideCode(id);
+        Nav.NavigateTo("/code");
+    }
+
+    public void Dispose()
+    {
+        if (_titles is not null)
+        {
+            _titles.Changed -= OnTitleLinksChanged;
+            _titles.Dispose();
+        }
+
+        Registry.SessionsChanged -= OnSessionsChanged;
+        _disposed.Cancel();
+        _disposed.Dispose();
+    }
+}

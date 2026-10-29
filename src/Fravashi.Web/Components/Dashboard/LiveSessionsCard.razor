@@ -1,0 +1,531 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using System.Globalization
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Sessions
+@using Fravashi.Application.Sessions.Tools
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Web.Components.Sessions
+@using Fravashi.Web.Components.Shared
+@using Fravashi.Web.Services
+@inject LiveSessionRegistry Registry
+@inject IWorkspaceStore Workspaces
+@inject BridgeWorkspaceContext BridgeContext
+@inject BridgeClient Bridge
+@inject NavigationManager Nav
+@inject ILogger<LiveSessionsCard> Logger
+@inject IServiceProvider Services
+@implements IDisposable
+
+@* Backlog 35: every agent session running right now, in EVERY workspace, with what each one is doing.
+   A session blocked on a person (a tool approval, or a question its last typed turn asked) is drawn
+   apart from the working ones and leads the list, and one click lands on the conversation where the
+   prompt is answered. The answer itself is given THERE and not here on purpose: an approval prompt
+   carries the resolved target and the effects of the call (ApprovalPrompt.razor), and a card that let
+   the owner approve without them would be asking a weaker question than the pane asks. *@
+
+<section class="dash-panel dash-panel-wide live-sessions" aria-label="Live agent sessions"
+         data-testid="live-sessions">
+    @* Work item #350: two filters in the head. "Include autopilot sessions" (on by default, so nothing that ran
+       here before is hidden until the reader asks) drops the sessions the autopilot runs, which are either marked
+       as its own (IAgentApprovalBroker.IsAutopilot) or run in one of its worktrees; and the project filter keeps
+       the sessions whose folder belongs to one project (WorkspaceProjects, a worktree counting as its repository's). *@
+    <div class="dash-panel-head">
+        <span>Live agent sessions</span>
+        <div class="dash-panel-tools">
+            <label class="dash-toggle" title="Show the sessions the autopilot runs as well as your own">
+                <input type="checkbox" data-testid="live-sessions-autopilot" checked="@_includeAutopilot"
+                       @onchange="e => SetIncludeAutopilot(e.Value is true)" />
+                <span>Include autopilot sessions</span>
+            </label>
+            <StudioDropdown TestId="live-sessions-project" Class="dash-project-filter" Compact="true"
+                            Options="ProjectOptions()" Value="@_projectScope" ValueChanged="SetProjectScope"
+                            AriaLabel="Which project's sessions to show" TitleText="Which project's sessions to show" />
+            @if (_rows.Count > 0)
+            {
+                <span class="live-sessions-count" data-testid="live-sessions-count">@CountText()</span>
+            }
+        </div>
+    </div>
+
+    @if (_rows.Count == 0 && _all.Count > 0)
+    {
+        <p class="studio-muted home-empty" data-testid="live-sessions-filtered">
+            @_all.Count running, none of them in what the filters above show.
+        </p>
+    }
+    else if (_rows.Count == 0)
+    {
+        <p class="studio-muted home-empty" data-testid="live-sessions-empty">
+            No agent is running right now. A conversation started in any folder's Sessions area shows up
+            here while it runs.
+        </p>
+    }
+    else
+    {
+        <ul class="live-session-list home-scroll">
+            @foreach (var row in _rows)
+            {
+                <li class="live-session-row@(row.Waiting is WaitKind.None ? string.Empty : " live-session-waiting")"
+                    data-testid="live-session-row" data-session-id="@row.Id.Value.ToString("D")"
+                    data-waiting="@WaitAttribute(row.Waiting)">
+                    <button type="button" class="live-session" data-testid="live-session"
+                            disabled="@_busy" @onclick="() => OpenAsync(row)">
+                        <span class="live-session-title">@row.Title</span>
+                        <span class="live-session-meta">
+                            <span class="live-session-workspace">@row.WorkspaceLabel</span>
+                            <span class="live-session-sep" aria-hidden="true">·</span>
+                            <span class="live-session-status @StatusClass(row.Waiting)" data-testid="live-session-status">@row.Status</span>
+                        </span>
+                    </button>
+                    @if (row.Waiting is not WaitKind.None)
+                    {
+                        <button type="button" class="welcome-open live-session-answer" data-testid="live-session-answer"
+                                disabled="@_busy" @onclick="() => OpenAsync(row)">
+                            @(row.Waiting is WaitKind.Approval ? "Review and answer" : "Answer")
+                        </button>
+                    }
+                    @if (_messageFor == row.Id && _message is not null)
+                    {
+                        <p class="live-session-message" role="alert" data-testid="live-session-message">@_message</p>
+                    }
+                    @if (_messageFor == row.Id && _sessionsInstead is not null)
+                    {
+                        <button type="button" class="studio-link-btn" data-testid="live-session-workspace-instead"
+                                @onclick="() => OpenWorkspaceSessions(_sessionsInstead)">
+                            Open that folder's sessions
+                        </button>
+                    }
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@code {
+    // Backlog 246: the person's zone, looked up so a host that registers none renders labelled UTC.
+    private PersonTimeZone? Zone => Services.GetService(typeof(PersonTimeZone)) as PersonTimeZone;
+
+    /// <summary>What a session is blocked on, if anything.</summary>
+    private enum WaitKind
+    {
+        None,
+        Approval,
+        Question,
+    }
+
+    /// <summary>One listed session, snapshotted: the render never reads the live object.</summary>
+    private sealed record Row(
+        AgentSessionId Id,
+        string WorkspaceId,
+        string Title,
+        string WorkspaceLabel,
+        WaitKind Waiting,
+        string Status,
+        DateTimeOffset StartedUtc,
+        bool Autopilot = false,
+        string? Project = null);
+
+    private const string AllProjects = "all";
+
+    // Work item #350: every running session, before the head's two filters; _rows is what they let through.
+    private IReadOnlyList<Row> _all = [];
+    private bool _includeAutopilot = true;
+    private string _projectScope = AllProjects;
+
+    private readonly Lock _subscriptionGate = new();
+    private readonly HashSet<LiveAgentSession> _watched = [];
+    private IReadOnlyList<Row> _rows = [];
+    private AgentSessionId? _messageFor;
+    private string? _message;
+    private string? _sessionsInstead;
+    private bool _busy;
+    private bool _disposed;
+
+    // 1 while a refresh is queued on the renderer and has not started reading yet. A streaming turn
+    // raises Changed once per text delta, and each one queueing its own render would have the home page
+    // re-render a card per token for a status line that changes a few times a turn.
+    private int _refreshQueued;
+
+    protected override void OnInitialized()
+    {
+        Registry.SessionsChanged += OnSomethingChanged;
+        _titles = new ConversationTitleSource(Services);
+        _titles.Changed += OnTitleLinksChanged;
+        Load();
+    }
+
+    /// <summary>Work item #351: titled by the linked work item, read after the first render so the card is not held up.</summary>
+    private ConversationTitleSource? _titles;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await RefreshTitlesAsync();
+        }
+    }
+
+    private async Task RefreshTitlesAsync()
+    {
+        if (_titles is not null && !_disposed && await _titles.LoadAsync(_all.Select(r => r.Id)))
+        {
+            Load();
+            StateHasChanged();
+        }
+    }
+
+    private void OnTitleLinksChanged(AgentSessionId session) => _ = InvokeAsync(RefreshTitlesAsync);
+
+    public void Dispose()
+    {
+        if (_titles is not null)
+        {
+            _titles.Changed -= OnTitleLinksChanged;
+            _titles.Dispose();
+        }
+
+        Registry.SessionsChanged -= OnSomethingChanged;
+        lock (_subscriptionGate)
+        {
+            _disposed = true;
+            foreach (var session in _watched)
+            {
+                session.Changed -= OnSomethingChanged;
+            }
+
+            _watched.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Raised on the thread that changed the session, which for a streamed event is that session's PUMP.
+    /// So this handler does no work of its own and never waits: it queues one refresh on the renderer and
+    /// returns, and the pump carries on with its next event whatever the render is doing.
+    /// </summary>
+    private void OnSomethingChanged()
+    {
+        if (Interlocked.Exchange(ref _refreshQueued, 1) == 1)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(() =>
+        {
+            // Cleared BEFORE reading, so a change landing while this reads queues the next refresh rather
+            // than being lost behind a snapshot that was already taken.
+            Interlocked.Exchange(ref _refreshQueued, 0);
+            if (_disposed)
+            {
+                return;
+            }
+
+            Load();
+            StateHasChanged();
+        });
+    }
+
+    /// <summary>
+    /// Reads every running session and what it is waiting for.
+    /// <para>
+    /// <b>Enumerating does not stall a running pump (checked for backlog 35).</b>
+    /// <see cref="LiveSessionRegistry.Sessions"/> snapshots a <c>ConcurrentDictionary</c>'s values. That
+    /// snapshot does take the dictionary's internal bucket locks (its <c>GetValues</c> calls
+    /// <c>AcquireAllLocks</c>, read out of the IL on runtime 10.0.12), but only for the length of the copy, and
+    /// the only writers that contend for them are a session STARTING (the add under the registry's start
+    /// gate) and a stored conversation being DELETED. A pump's per-event path never touches them: it folds
+    /// each event into its own session under that session's gate and finds sessions with
+    /// <c>TryGetValue</c>, which is lock-free. The registry's <c>_startGate</c> is not taken here at all.
+    /// </para>
+    /// <para>
+    /// Reading one session (<see cref="LiveAgentSession.Pending"/>, <see cref="LiveAgentSession.Transcript"/>)
+    /// takes THAT session's gate, which its pump also takes to apply an event. Both sides hold it only for
+    /// a list copy or one fold, never across I/O, a render or an await, so the pump waits at most for a
+    /// copy. The transcript is copied only for a session between turns with nothing pending, the one state
+    /// a question can be open in, so a streaming turn is never copied once per delta.
+    /// </para>
+    /// </summary>
+    private void Load()
+    {
+        var running = Registry.Sessions.Where(s => s.IsRunning).ToList();
+        Watch(running);
+
+        _all = [.. running
+            .Select(Snapshot)
+            // Blocked sessions first: a person is the only thing that can move them.
+            .OrderBy(row => row.Waiting is WaitKind.None ? 1 : 0)
+            .ThenByDescending(row => row.StartedUtc)];
+        Filter();
+    }
+
+    private void Filter() =>
+        _rows = [.. _all.Where(row =>
+            (_includeAutopilot || !row.Autopilot)
+            && (_projectScope == AllProjects || string.Equals(row.Project, _projectScope, StringComparison.Ordinal)))];
+
+    private void SetIncludeAutopilot(bool include)
+    {
+        _includeAutopilot = include;
+        Filter();
+    }
+
+    private void SetProjectScope(string scope)
+    {
+        _projectScope = string.IsNullOrEmpty(scope) ? AllProjects : scope;
+        Filter();
+    }
+
+    /// <summary>All projects first, then every project the studio knows, by name.</summary>
+    private IReadOnlyList<StudioDropdownOption> ProjectOptions()
+    {
+        var options = new List<StudioDropdownOption> { new(AllProjects, "All projects") };
+        if (Services.GetService(typeof(IProjectStore)) is IProjectStore projects)
+        {
+            try
+            {
+                options.AddRange(projects.List().Select(p => new StudioDropdownOption(p.Id.Value, p.Name)));
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.Data.Common.DbException)
+            {
+                Logger.LogWarning(ex, "The project list could not be read for the live sessions card.");
+            }
+        }
+
+        return options;
+    }
+
+    /// <summary>
+    /// Subscribes to every running session BEFORE its state is read, so a change landing between the read
+    /// and the subscription still queues a refresh; and lets go of sessions that have ended.
+    /// </summary>
+    private void Watch(List<LiveAgentSession> running)
+    {
+        lock (_subscriptionGate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            foreach (var gone in _watched.Where(s => !running.Contains(s)).ToList())
+            {
+                gone.Changed -= OnSomethingChanged;
+                _watched.Remove(gone);
+            }
+
+            foreach (var session in running)
+            {
+                if (_watched.Add(session))
+                {
+                    session.Changed += OnSomethingChanged;
+                }
+            }
+        }
+    }
+
+    private Row Snapshot(LiveAgentSession session)
+    {
+        var record = Workspaces.Get(session.WorkspaceId);
+        // Item #373: the card spans every project, so a row names its project beside its folder.
+        var label = ProjectLabels.ForFolder(Workspaces, Services.GetService(typeof(IProjectStore)) as IProjectStore, session.WorkspaceId)
+            ?? session.WorkspaceId;
+        var (waiting, status) = Describe(session);
+        var broker = Services.GetService(typeof(IAgentApprovalBroker)) as IAgentApprovalBroker;
+        var autopilot = broker?.IsAutopilot(session.Id) == true || RepositoryFolder.IsWorktree(record);
+        var project = WorkspaceProjects.For(Workspaces, session.WorkspaceId)?.Value;
+        return new Row(session.Id, session.WorkspaceId,
+            _titles?.Title(session.Id, session.CustomTitle, session.DerivedTitle)
+            ?? ConversationTitles.Display(session.CustomTitle, session.DerivedTitle),
+            label, waiting, status, session.StartedUtc,
+            autopilot, project);
+    }
+
+    private (WaitKind Waiting, string Status) Describe(LiveAgentSession session)
+    {
+        var pending = session.Pending;
+        if (pending.Count > 0)
+        {
+            var more = pending.Count > 1
+                ? string.Create(CultureInfo.InvariantCulture, $" and {pending.Count - 1} more")
+                : string.Empty;
+            return (WaitKind.Approval, $"Waiting on your approval: {StudioToolDescriptions.ForPeople(pending[0].ToolName, pending[0].Input)}{more}");
+        }
+
+        if (!session.TurnInFlight && OpenQuestions(session.Transcript) is { Count: > 0 } questions)
+        {
+            var more = questions.Count > 1
+                ? string.Create(CultureInfo.InvariantCulture, $" (and {questions.Count - 1} more)")
+                : string.Empty;
+            return (WaitKind.Question, $"Waiting on your answer: {Shorten(questions[0].Question)}{more}");
+        }
+
+        if (session.NetworkWait is { } network)
+        {
+            // Backlog 229: not the person's to answer, so no wait kind, but plainly not "ready" either. Backlog 235: the
+            // same wait for a fresh broker token leads with what it is waiting for.
+            // Backlog 246: the mint's "next attempt at" during a broker outage is in the person's zone.
+            return (WaitKind.None, $"{network.Headline}: {PersonTime.Format(network.WhatSentence, Zone?.Zone, TimeProvider.System.GetUtcNow())}");
+        }
+
+        return (WaitKind.None, session.Phase switch
+        {
+            AgentTurnPhase.Submitted => "Sent to the agent",
+            AgentTurnPhase.Thinking => "Thinking",
+            AgentTurnPhase.Composing => "Writing its answer",
+            AgentTurnPhase.ToolInput => "Preparing a tool call",
+            not null => "Working",
+            null when session.TurnInFlight => "Working",
+            null => "Ready for your next message",
+        });
+    }
+
+    /// <summary>
+    /// The questions the newest completed turn asked, while no user turn has answered them: the same test
+    /// the pane's question block uses (<see cref="AgentTurnQuestionsReader.WasAnswered"/>), so the card and
+    /// the conversation cannot disagree about whether something is still open.
+    /// </summary>
+    private static IReadOnlyList<AgentTurnQuestion> OpenQuestions(IReadOnlyList<AgentEvent> transcript)
+    {
+        for (var i = transcript.Count - 1; i >= 0; i--)
+        {
+            if (transcript[i] is MessageEmitted { Role: TranscriptRole.User })
+            {
+                return [];
+            }
+
+            if (transcript[i] is TurnCompleted turn)
+            {
+                return AgentTurnQuestionsReader.WasAnswered(transcript, i)
+                    ? []
+                    : AgentTurnQuestionsReader.Read(turn.Document);
+            }
+        }
+
+        return [];
+    }
+
+    private static string Shorten(string text)
+    {
+        var single = text.ReplaceLineEndings(" ").Trim();
+        return single.Length <= 90 ? single : single[..87] + "...";
+    }
+
+    private string CountText()
+    {
+        var waiting = _rows.Count(r => r.Waiting is not WaitKind.None);
+        var running = string.Create(CultureInfo.InvariantCulture, $"{_rows.Count} running");
+        return waiting == 0
+            ? running
+            : string.Create(CultureInfo.InvariantCulture, $"{running}, {waiting} waiting on you");
+    }
+
+    private static string WaitAttribute(WaitKind kind) => kind switch
+    {
+        WaitKind.Approval => "approval",
+        WaitKind.Question => "question",
+        _ => "none",
+    };
+
+    private static string StatusClass(WaitKind kind) =>
+        kind is WaitKind.None ? "live-session-status-working" : "live-session-status-waiting";
+
+    /// <summary>
+    /// Opens the conversation, which is where its approval or question is answered.
+    /// <para>
+    /// In this window's workspace it is a plain in-circuit navigation. In ANOTHER workspace it goes the way
+    /// backlog 29 switches a window: <see cref="RecentWorkspaceReopen.PrepareAsync"/> re-registers the
+    /// folder with the host (the grant list is per fravashi.exe process), then a full navigation carries the
+    /// target workspace's id, which the window adopts rather than re-imposing its own, and lands on the
+    /// session. A session whose folder has no recents row has nothing to register, so the ws query alone is
+    /// the switch (the same degrade the recent-conversations card takes).
+    /// </para>
+    /// <para>
+    /// A folder that re-registers under a DIFFERENT id cannot show this session (it belongs to the old id),
+    /// so the reader is told why and offered that folder's sessions area, instead of being moved to a pane
+    /// that silently does not contain what they clicked.
+    /// </para>
+    /// </summary>
+    private async Task OpenAsync(Row row)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        Clear();
+
+        if (string.Equals(BridgeContext.ActiveWorkspaceId, row.WorkspaceId, StringComparison.Ordinal))
+        {
+            Nav.NavigateTo(SessionRoute(row.Id, workspaceId: null));
+            return;
+        }
+
+        if (Workspaces.Get(row.WorkspaceId) is not { } workspace)
+        {
+            Nav.NavigateTo(SessionRoute(row.Id, row.WorkspaceId), forceLoad: true);
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var reopen = await RecentWorkspaceReopen.PrepareAsync(
+                BridgeContext, Bridge, Workspaces, workspace, CancellationToken.None);
+            if (reopen.Outcome == RecentReopenOutcome.Unreachable)
+            {
+                Say(row, $"{workspace.RootPath} could not be reached just now. If it is on a network drive "
+                    + "or a removable disk, connect it and try again.");
+                return;
+            }
+
+            if (reopen.Outcome == RecentReopenOutcome.Missing || reopen.WorkspaceId is not { Length: > 0 } adopted)
+            {
+                Say(row, $"{workspace.RootPath} was not found on this machine. It may have been moved or renamed.");
+                return;
+            }
+
+            if (!string.Equals(adopted, row.WorkspaceId, StringComparison.Ordinal))
+            {
+                Say(row, $"{workspace.RootPath} is now known to {ProductName.Short} under a different id, so this session "
+                    + "cannot be opened directly in it.");
+                _sessionsInstead = adopted;
+                return;
+            }
+
+            Nav.NavigateTo(SessionRoute(row.Id, adopted), forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Switching to the workspace {WorkspaceId} to open a live session failed.",
+                row.WorkspaceId);
+            Say(row, "The studio window could not be reached, so that folder could not be opened.");
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private void OpenWorkspaceSessions(string workspaceId) =>
+        Nav.NavigateTo($"/sessions?ws={Uri.EscapeDataString(workspaceId)}", forceLoad: true);
+
+    private static string SessionRoute(AgentSessionId id, string? workspaceId) =>
+        workspaceId is { Length: > 0 }
+            ? $"/sessions/{id.Value:D}?ws={Uri.EscapeDataString(workspaceId)}"
+            : $"/sessions/{id.Value:D}";
+
+    private void Say(Row row, string message)
+    {
+        _messageFor = row.Id;
+        _message = message;
+    }
+
+    private void Clear()
+    {
+        _messageFor = null;
+        _message = null;
+        _sessionsInstead = null;
+    }
+}

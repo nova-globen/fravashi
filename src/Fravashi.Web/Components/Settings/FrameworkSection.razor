@@ -1,0 +1,88 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Web.Components.Settings.Framework
+
+@* Settings > Agents > Framework (work item #357): the DB-backed artifact CRUD (ADR 0005) that used to be the
+   Framework tab, now one section of the single Settings sidebar. Its kinds (skills, agents, commands, hooks, MCP
+   servers, plugins) moved from that tab's own sidebar to a segmented row at the top of the section, and its
+   addresses did not move: /settings/framework/{kind}/{action}/{id} is still where each list, form and view lives. *@
+
+<div class="framework-detail" data-testid="framework-detail">
+    <nav class="cockpit-nav settings-nav framework-kinds" aria-label="Framework artifact types" data-testid="framework-kinds">
+        <div class="studio-segmented">
+            @foreach (var kind in Kinds)
+            {
+                <a class="studio-segment @(IsActive(kind.Slug) ? "active" : string.Empty)"
+                   href="@($"/settings/framework/{kind.Slug}")" data-testid="@($"framework-nav-{kind.Slug}")">@kind.Label</a>
+            }
+        </div>
+    </nav>
+
+    @* Backlog 80: every Framework route, list, form and detail view alike, carries the honesty banner,
+       because the authoring surface is where the wrong belief would form. *@
+    <FrameworkNotAppliedNotice />
+    @switch (Normalize(Kind))
+    {
+        case "skills":
+            <FrameworkSkillsSection Action="@Action" Id="@Id" />
+            break;
+        case "agents":
+            <FrameworkAgentsSection Action="@Action" Id="@Id" />
+            break;
+        case "commands":
+            <FrameworkCommandsSection Action="@Action" Id="@Id" />
+            break;
+        case "hooks":
+            <FrameworkHooksSection Action="@Action" Id="@Id" />
+            break;
+        case "mcp-servers":
+            <FrameworkMcpServersSection Action="@Action" Id="@Id" />
+            break;
+        case "plugins":
+            <FrameworkPluginsSection Action="@Action" Id="@Id" />
+            break;
+        default:
+            <div class="page-body-empty" data-testid="framework-empty">
+                <h2 class="settings-body-title">Framework</h2>
+                <p class="studio-muted">Select an artifact type above.</p>
+            </div>
+            break;
+    }
+</div>
+
+@code {
+    /// <summary>skills | agents | commands | hooks | mcp-servers | plugins; null for the landing state.</summary>
+    [Parameter] public string? Kind { get; set; }
+
+    /// <summary>new | edit | view (for a kind's CRUD routes); null for the kind's list.</summary>
+    [Parameter] public string? Action { get; set; }
+
+    /// <summary>The artifact id for edit/view routes.</summary>
+    [Parameter] public string? Id { get; set; }
+
+    /// <summary>A Framework artifact kind: its route key and its label.</summary>
+    public sealed record FrameworkKind(string Slug, string Label);
+
+    private static readonly IReadOnlyList<FrameworkKind> Kinds =
+    [
+        new("skills", "Skills"),
+        new("agents", "Agents"),
+        new("commands", "Commands"),
+        new("hooks", "Hooks"),
+        new("mcp-servers", "MCP servers"),
+        new("plugins", "Plugins"),
+    ];
+
+    private static string Normalize(string? kind)
+    {
+        if (string.IsNullOrWhiteSpace(kind))
+        {
+            return string.Empty;
+        }
+
+        var lowered = kind.ToLowerInvariant();
+        return Kinds.Any(k => k.Slug == lowered) ? lowered : string.Empty;
+    }
+
+    private bool IsActive(string slug) =>
+        string.Equals(Normalize(Kind), slug, StringComparison.OrdinalIgnoreCase);
+}

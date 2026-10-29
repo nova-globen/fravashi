@@ -1,0 +1,208 @@
+@using Fravashi.Application.Onboarding.Auth
+@using Fravashi.Application.Persistence
+@inject IConfigurationStore Config
+@inject ISecretStore Secrets
+@inject IConfigurationReloader Reloader
+
+@* Advanced: identity-provider overrides (ADR 0004). The product ships vendor-registered OAuth client ids
+   (VendorAppDefaults), so an end user never registers an app - they just grant the Fravashi app access. This
+   panel is the ADVANCED escape hatch: a client id here overrides the shipped default (GitHub Enterprise, a
+   sovereign Entra cloud, a fork), and it is the ONLY way to enable Atlassian sign-in (no vendor Atlassian app
+   ships - 3LO needs a secret that can't be shipped in a self-hosted product). Endpoint overrides point the
+   flow at a different authority (self-hosted / test IdP). Same settings keys as before; DB overrides win over
+   the shipped defaults. See docs/sso-setup.md. *@
+
+<div class="ob-signin-panel" data-testid="signin-config-panel">
+    <p class="ob-field-hint">
+        Blank fields use the client ids that ship with @(ProductName.Short). Fill one only to override the shipped app for
+        this installation, or to register your own Atlassian app (Atlassian sign-in is off by default).
+    </p>
+
+    <label class="ob-field">
+        <span class="ob-field-label">GitHub - OAuth App client id override (device flow)</span>
+        <FluentTextField @bind-Value="_gitHubClientId" data-testid="cfg-github-clientid" />
+        <span class="ob-field-hint">Overrides the shipped GitHub client id - e.g. a GitHub Enterprise OAuth App with device flow enabled. No secret needed.</span>
+    </label>
+
+    <label class="ob-field">
+        <span class="ob-field-label">Azure DevOps - Entra application (client) id override (device flow)</span>
+        <FluentTextField @bind-Value="_azureClientId" data-testid="cfg-azure-clientid" />
+        <span class="ob-field-hint">Overrides the shipped Entra client id - e.g. a single-tenant or sovereign-cloud public client with "Allow public client flows" enabled.</span>
+    </label>
+
+    <label class="ob-field">
+        <span class="ob-field-label">Atlassian - 3LO client id (Jira &amp; Confluence)</span>
+        <FluentTextField @bind-Value="_atlassianClientId" data-testid="cfg-atlassian-clientid" />
+        <span class="ob-field-hint">No Atlassian app ships with @(ProductName.Short). Register your own 3LO app to enable Atlassian sign-in; otherwise use an API token.</span>
+    </label>
+    <label class="ob-field">
+        <span class="ob-field-label">Atlassian - client secret</span>
+        <FluentTextField @bind-Value="_atlassianSecret" TextFieldType="TextFieldType.Password" data-testid="cfg-atlassian-secret"
+                         Placeholder="@(_hasAtlassianSecret ? "•••••• (stored)" : "")" />
+        <span class="ob-field-hint">
+            Stored encrypted in the secret store - this installation holds its own Atlassian secret. Register the
+            redirect URI <code>@RedirectUri</code> in the Atlassian developer console.
+        </span>
+    </label>
+
+    <div class="ob-field-group" data-testid="cfg-idp-section">
+        <p class="ob-field-hint">
+            <strong>Organization sign-in (auth-first gate).</strong> Signing in against this
+            identity provider is required before the studio serves anything (default in every
+            release; a publish can turn the gate off). Register the redirect URI
+            <code>@IdpRedirectUri</code> at the identity provider.
+        </p>
+        @if (_idpLocked)
+        {
+            <p class="ob-field-hint" data-testid="cfg-idp-locked">
+                This release fixes the identity provider at build time; the values below cannot
+                be changed on this installation.
+            </p>
+            <dl class="studio-detail">
+                <dt>Issuer</dt>
+                <dd><code data-testid="cfg-idp-locked-issuer">@_idpIssuer</code></dd>
+                <dt>Client id</dt>
+                <dd><code data-testid="cfg-idp-locked-clientid">@_idpClientId</code></dd>
+            </dl>
+        }
+        else
+        {
+            <label class="ob-field">
+                <span class="ob-field-label">Identity provider: issuer URL</span>
+                <FluentTextField @bind-Value="_idpIssuer" data-testid="cfg-idp-issuer"
+                                 Placeholder="https://idp.example.com" />
+                <span class="ob-field-hint">Discovery is read from {issuer}/.well-known/openid-configuration.</span>
+            </label>
+            <label class="ob-field">
+                <span class="ob-field-label">Identity provider: client id</span>
+                <FluentTextField @bind-Value="_idpClientId" data-testid="cfg-idp-clientid" />
+            </label>
+            <label class="ob-field">
+                <span class="ob-field-label">Identity provider: client secret (only for a confidential client)</span>
+                <FluentTextField @bind-Value="_idpSecret" TextFieldType="TextFieldType.Password" data-testid="cfg-idp-secret"
+                                 Placeholder="@(_hasIdpSecret ? "•••••• (stored)" : "")" />
+                <span class="ob-field-hint">Leave blank for a public client: the flow always uses PKCE either way.</span>
+            </label>
+        }
+    </div>
+
+    <details class="ob-advanced">
+        <summary>Endpoint overrides (self-hosted / sovereign / test IdPs)</summary>
+        @foreach (var (label, key) in _overrideKeys)
+        {
+            var captured = key;
+            <label class="ob-field">
+                <span class="ob-field-label">@label</span>
+                <FluentTextField Value="@(Config.Get(captured) ?? string.Empty)"
+                                 ValueChanged="v => Config.Set(captured, string.IsNullOrWhiteSpace(v) ? null : v.Trim())"
+                                 data-testid="@($"cfg-{captured}")" />
+            </label>
+        }
+        <span class="ob-field-hint">Blank uses the real IdP defaults. These point the flow at a different authority - GitHub Enterprise, a sovereign Entra cloud, or a local fake IdP for testing.</span>
+    </details>
+
+    <div class="ob-actions">
+        <button type="button" class="studio-btn" @onclick="Save" data-testid="cfg-save">Save overrides</button>
+        @if (_saved)
+        {
+            <span class="ob-saved" data-testid="cfg-saved">Saved.</span>
+        }
+    </div>
+</div>
+
+@code {
+    /// <summary>The app's base URL, used to show the exact localhost redirect URI to register. Optional.</summary>
+    [Parameter] public string? BaseUri { get; set; }
+
+    private string _gitHubClientId = string.Empty;
+    private string _azureClientId = string.Empty;
+    private string _atlassianClientId = string.Empty;
+    private string _atlassianSecret = string.Empty;
+    private bool _hasAtlassianSecret;
+    private string _idpIssuer = string.Empty;
+    private string _idpClientId = string.Empty;
+    private string _idpSecret = string.Empty;
+    private bool _hasIdpSecret;
+    private bool _idpLocked;
+    private bool _saved;
+
+    private static readonly (string Label, string Key)[] _overrideKeys =
+    [
+        ("GitHub - device-code URL", AuthSettings.GitHubDeviceCodeUrl),
+        ("GitHub - token URL", AuthSettings.GitHubTokenUrl),
+        ("GitHub - scope", AuthSettings.GitHubScope),
+        ("Azure DevOps - authority", AuthSettings.AzureDevOpsAuthority),
+        ("Azure DevOps - tenant", AuthSettings.AzureDevOpsTenant),
+        ("Azure DevOps - device-code URL", AuthSettings.AzureDevOpsDeviceCodeUrl),
+        ("Azure DevOps - token URL", AuthSettings.AzureDevOpsTokenUrl),
+        ("Azure DevOps - scope", AuthSettings.AzureDevOpsScope),
+        ("Atlassian - authorize URL", AuthSettings.AtlassianAuthorizeUrl),
+        ("Atlassian - token URL", AuthSettings.AtlassianTokenUrl),
+        ("Atlassian - accessible-resources URL", AuthSettings.AtlassianResourcesUrl),
+        ("Atlassian - scope", AuthSettings.AtlassianScope),
+        ("Atlassian - audience", AuthSettings.AtlassianAudience),
+    ];
+
+    private string RedirectUri => string.IsNullOrEmpty(BaseUri)
+        ? "http://localhost:<port>/auth/callback/atlassian"
+        : new Uri(new Uri(BaseUri), "auth/callback/atlassian").ToString();
+
+    private string IdpRedirectUri => string.IsNullOrEmpty(BaseUri)
+        ? "http://localhost:<port>/auth/callback/idp"
+        : new Uri(new Uri(BaseUri), "auth/callback/idp").ToString();
+
+    protected override void OnInitialized()
+    {
+        _gitHubClientId = Config.Get(AuthSettings.GitHubClientId) ?? string.Empty;
+        _azureClientId = Config.Get(AuthSettings.AzureDevOpsClientId) ?? string.Empty;
+        _atlassianClientId = Config.Get(AuthSettings.AtlassianClientId) ?? string.Empty;
+        _hasAtlassianSecret = !string.IsNullOrEmpty(Secrets.Get(AuthSettings.AtlassianClientSecretRef));
+        // A BYOD release bakes the IdP as image env: the fields lock and show the baked truth
+        // (DB rows are ignored by the resolution either way; this keeps the UI honest about it).
+        _idpLocked = Fravashi.Infrastructure.Onboarding.Auth.IdpCoordinates.Locked(Environment.GetEnvironmentVariable);
+        if (_idpLocked)
+        {
+            _idpIssuer = Environment.GetEnvironmentVariable(
+                Fravashi.Infrastructure.Onboarding.Auth.IdpCoordinates.IssuerEnv) ?? string.Empty;
+            _idpClientId = Environment.GetEnvironmentVariable(
+                Fravashi.Infrastructure.Onboarding.Auth.IdpCoordinates.ClientIdEnv) ?? string.Empty;
+        }
+        else
+        {
+            _idpIssuer = Config.Get(AuthSettings.IdpIssuer) ?? string.Empty;
+            _idpClientId = Config.Get(AuthSettings.IdpClientId) ?? string.Empty;
+        }
+
+        _hasIdpSecret = !string.IsNullOrEmpty(Secrets.Get(AuthSettings.IdpClientSecretRef));
+    }
+
+    private void Save()
+    {
+        Config.Set(AuthSettings.GitHubClientId, NullIfEmpty(_gitHubClientId));
+        Config.Set(AuthSettings.AzureDevOpsClientId, NullIfEmpty(_azureClientId));
+        Config.Set(AuthSettings.AtlassianClientId, NullIfEmpty(_atlassianClientId));
+        if (!string.IsNullOrWhiteSpace(_atlassianSecret))
+        {
+            Secrets.Set(AuthSettings.AtlassianClientSecretRef, _atlassianSecret.Trim());
+            _hasAtlassianSecret = true;
+            _atlassianSecret = string.Empty;
+        }
+
+        if (!_idpLocked)
+        {
+            Config.Set(AuthSettings.IdpIssuer, NullIfEmpty(_idpIssuer));
+            Config.Set(AuthSettings.IdpClientId, NullIfEmpty(_idpClientId));
+            if (!string.IsNullOrWhiteSpace(_idpSecret))
+            {
+                Secrets.Set(AuthSettings.IdpClientSecretRef, _idpSecret.Trim());
+                _hasIdpSecret = true;
+                _idpSecret = string.Empty;
+            }
+        }
+
+        Reloader.Reload();
+        _saved = true;
+    }
+
+    private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value?.Trim();
+}

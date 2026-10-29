@@ -1,0 +1,30 @@
+@namespace Fravashi.Web.Components.Shell
+
+<div class="studio-explorer">
+    @switch (Area)
+    {
+        case StudioArea.Home:
+            <div class="studio-explorer-hint">Recent activity across the connected tracker and plans.</div>
+            break;
+        case StudioArea.Source:
+            <div class="studio-explorer-hint">The read-only repository tree and file preview are on the Explorer page.</div>
+            break;
+        case StudioArea.Docs:
+            <div class="studio-explorer-hint">The docs tree and Wiki are on the Docs page.</div>
+            break;
+        case StudioArea.Authoring:
+            <div class="studio-explorer-hint">Edit skills and agents, and check drift / sync projections, on the Agent Authoring page.</div>
+            break;
+        case StudioArea.Sessions:
+            <div class="studio-explorer-hint">Active and recent agent sessions, with their live transcript, are on the Sessions page.</div>
+            break;
+        default:
+            <div class="studio-explorer-empty">No items yet.</div>
+            break;
+    }
+</div>
+
+@code {
+    [Parameter]
+    public StudioArea Area { get; set; }
+}

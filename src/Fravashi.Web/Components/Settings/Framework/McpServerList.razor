@@ -1,0 +1,55 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+
+@* The MCP servers list (UI11): a card per server showing its name and transport. *@
+
+<div class="skill-list" data-testid="mcp-list">
+    <div class="skill-list-header">
+        <h2>MCP servers</h2>
+        <a class="studio-btn" href="/settings/framework/mcp-servers/new" data-testid="mcp-new">New MCP server</a>
+    </div>
+
+    @if (_servers.Count == 0)
+    {
+        <div class="page-body-empty" data-testid="mcp-list-empty">
+            <p class="studio-muted">No MCP servers yet. Create one to get started.</p>
+        </div>
+    }
+    else
+    {
+        <div class="skill-cards">
+            @foreach (var item in _servers)
+            {
+                var server = item.Definition;
+                <a class="skill-card" href="@($"/settings/framework/mcp-servers/view/{item.Id}")"
+                   data-testid="@($"mcp-card-{server.Name}")">
+                    <SkillIconDisplay Icon="Icon" Size="44" Fallback="@server.Name"
+                                      TestId="@($"mcp-card-icon-{server.Name}")" />
+                    <div class="skill-card-text">
+                        <div class="skill-card-title">@server.Name</div>
+                        <div class="skill-card-subtitle">@(server.Transport == McpTransport.Stdio ? "stdio" : "http")</div>
+                        <div class="skill-card-name">@Detail(server)</div>
+                    </div>
+                </a>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly SkillIcon Icon = new("Server", null);
+
+    private sealed record Item(string Id, McpServerDefinition Definition);
+
+    private IReadOnlyList<Item> _servers = [];
+
+    protected override void OnInitialized() =>
+        _servers = Store.List(FrameworkArtifactKind.McpServer)
+            .Select(a => new Item(a.Id, FrameworkPayload<McpServerDefinition>.From(a)))
+            .ToList();
+
+    private static string Detail(McpServerDefinition s) =>
+        s.Transport == McpTransport.Stdio ? s.Command : s.Url;
+}

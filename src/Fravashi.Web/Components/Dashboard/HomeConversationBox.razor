@@ -1,0 +1,384 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using Fravashi.Application.AgentSync
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Web.Components.Sessions
+@inject LiveSessionRegistry Registry
+@inject BridgeWorkspaceContext Workspace
+@inject IWorkspaceStore Workspaces
+@inject IWorkspaceAgentSync Sync
+@inject IServiceProvider Services
+@using Microsoft.Extensions.DependencyInjection
+@implements IDisposable
+
+@* Work item #359: the STUDIO ASSISTANT's face, at the very top of Home (it was #350's plain conversation box). Sending
+   starts the folder's assistant conversation, or continues the one already running or last used (a settings row per
+   folder, StudioAssistantTopic, so it survives a restart). The assistant is its own kind of conversation with its own
+   slot (LiveSessionRegistry), so a report here never collides with an editing conversation running in the folder.
+   It talks the report through first, checks it against the code and the board, files the item, and asks before it
+   starts any work: AgentFirstTurnBriefing.AssistantNote says how, AgentAssistantTools what it may use.
+
+   Once there is a thread, the box grows to show it inline with the session pane's own components (SessionTranscript,
+   ApprovalPrompt, the reference preview), so references, labels and approval cards read and answer exactly as they
+   do in the Sessions area. "Open in Sessions" opens the same conversation there; "New topic" ends it and the next
+   message starts a fresh one. The composer is the session pane's (pickers pre-selected from Settings > Agents >
+   Default models and effort, studio assistant; image and long-text pasting with references). *@
+
+<CascadingValue Value="_previews" IsFixed="true">
+<section class="dash-panel fv-prompt@(_session is null ? string.Empty : " has-thread")" aria-label="@(ProductName.Short) assistant"
+         data-testid="home-prompt">
+    <div class="fv-prompt-head">
+        <span class="fv-prompt-title">
+            <strong>@AgentAssistantTools.Label</strong>
+            @if (_workspaceName is not null)
+            {
+                <span class="fv-prompt-folder"> in @_workspaceName</span>
+            }
+        </span>
+        @if (_editingRunning)
+        {
+            <span class="fv-prompt-note" data-testid="home-prompt-running">A building conversation is running in this folder; the assistant runs beside it.</span>
+        }
+        <span class="fv-prompt-spacer"></span>
+        @if (_session is not null)
+        {
+            <a class="studio-btn studio-btn-alt fv-prompt-secondary" data-testid="home-prompt-sessions"
+               href="@($"/sessions/{_session.Id.Value:D}")">Open in Sessions</a>
+            <button type="button" class="studio-btn studio-btn-alt fv-prompt-secondary" data-testid="home-prompt-new-topic"
+                    title="Ends this conversation; your next message starts a new one" disabled="@_sending"
+                    @onclick="NewTopic">New topic</button>
+        }
+        else
+        {
+            <a class="studio-btn studio-btn-alt fv-prompt-secondary" data-testid="home-prompt-sessions"
+               href="/sessions">Open sessions</a>
+        }
+    </div>
+
+    @if (_session is not null)
+    {
+        <div class="studio-assistant-thread" data-testid="home-assistant-thread">
+            <SessionTranscript Session="_session" Answer="SendAnswerAsync" />
+            @if (_session.Pending is { Count: > 0 } pendingCalls)
+            {
+                @* Approval cards are answered right here, through the same registry call the session pane makes. *@
+                <div class="session-pending" data-testid="home-assistant-pending">
+                    @foreach (var pending in pendingCalls)
+                    {
+                        <ApprovalPrompt @key="pending.RequestId" Request="pending" Busy="_answering" Answer="AnswerAsync" />
+                    }
+                </div>
+            }
+            <ReferencePreviewPanel State="_previews" Session="_session.Id" />
+        </div>
+    }
+
+    @if (_error is { Length: > 0 } error)
+    {
+        <p class="fv-prompt-error" role="alert" data-testid="home-prompt-error">@error</p>
+    }
+
+    @if (!CanStart)
+    {
+        <p class="fv-prompt-note" data-testid="home-prompt-no-folder">Open a folder to talk to the assistant about it.</p>
+    }
+    else
+    {
+        <SessionComposer @ref="_composer"
+                         Text="@_text" TextChanged="t => _text = t"
+                         Model="@_model" ModelChanged="OnModelChanged"
+                         Effort="@_effort" EffortChanged="OnEffortChanged"
+                         RunningEffort="@(_session?.IsRunning == true ? _session.Effort : null)"
+                         Running="@(_session?.IsRunning == true)"
+                         TurnInFlight="@(_session?.IsRunning == true && _session.TurnInFlight)"
+                         ModelLocked="@(_session?.IsRunning == true && _session.TurnInFlight)"
+                         RunningModel="@(_session?.IsRunning == true ? _session.Model : null)"
+                         Disabled="@(!CanStart)"
+                         Busy="@Busy"
+                         SendLabel="@(_session is null ? "Start" : "Send")"
+                         BusyLabel="@(_session is null ? "Starting ..." : "Sending ...")"
+                         DropUp="false"
+                         AllowAttach="true"
+                         ImageOffset="@ConversationImageCount"
+                         PlaceholderText="@Placeholder"
+                         HintText="Ctrl+Enter sends. The assistant talks it through, files an item, and asks before it starts any work."
+                         SessionLimitUsd="@Registry.SpendLimits.PerSessionUsd"
+                         Images="@_images" ImagesChanged="images => _images = images"
+                         Send="SendAsync" Stop="StopTurn" />
+    }
+</section>
+</CascadingValue>
+
+@code {
+    private readonly ReferencePreviewState _previews = new();
+    private SessionComposer? _composer;
+    private string _text = string.Empty;
+    private IReadOnlyList<AgentImageAttachment> _images = [];
+    private string? _model;
+    private AgentEffort? _effort;
+    private string? _error;
+    private bool _sending;
+    private bool _answering;
+    private bool _editingRunning;
+    private string? _workspaceName;
+
+    /// <summary>The folder's assistant conversation on screen: running, or the last one used (a stored copy).</summary>
+    private LiveAgentSession? _session;
+
+    private IConfigurationStore? _config;
+
+    private string? WorkspaceId => Workspace.ActiveWorkspaceId is { Length: > 0 } id ? id : null;
+
+    private bool CanStart => WorkspaceId is not null;
+
+    /// <summary>
+    /// Busy from the moment Start or Send is pressed until the turn starts streaming: while the studio starts the
+    /// conversation, and while the turn is submitted and the agent has said nothing yet.
+    /// </summary>
+    private bool Busy =>
+        _sending
+        || (_session is { IsRunning: true, TurnInFlight: true, Phase: AgentTurnPhase.Submitted } waiting
+            && waiting.PartialText.Length == 0);
+
+    /// <summary>How many images the conversation already carries, so a new one is "[Image N]" in the whole thread.</summary>
+    private int ConversationImageCount =>
+        _session?.Transcript.OfType<UserImagesAttached>().Sum(e => e.Images.Count) ?? 0;
+
+    private string Placeholder => _session?.IsRunning == true
+        ? "Reply to the assistant (Ctrl+Enter)"
+        : "Report something, ask about the code, or plan the next item ... (Ctrl+Enter)";
+
+    protected override void OnInitialized()
+    {
+        _config = Services.GetService<IConfigurationStore>();
+        if (_config is not null)
+        {
+            var defaults = AgentDefaultsSetting.Read(_config).StudioAssistant;
+            _model = defaults.Model;
+            _effort = defaults.Effort;
+        }
+
+        Registry.SessionsChanged += OnRegistryChanged;
+        if (WorkspaceId is { } id)
+        {
+            _workspaceName = Workspaces.Get(id)?.Name ?? id;
+        }
+
+        Refresh();
+    }
+
+    /// <summary>Finds the folder's assistant conversation and whether an editing one runs beside it.</summary>
+    private void Refresh()
+    {
+        if (WorkspaceId is not { } id)
+        {
+            Attach(null);
+            return;
+        }
+
+        _editingRunning = Registry.RunningFor(id) is not null;
+        if (Registry.RunningAssistantFor(id) is { } running)
+        {
+            Attach(running);
+            return;
+        }
+
+        if (_session is { } shown && Registry.Find(shown.Id) is { } held && ReferenceEquals(held, shown))
+        {
+            // The conversation on screen ended in this process: keep showing it, the next message continues it.
+            return;
+        }
+
+        var topic = _config is null ? null : StudioAssistantTopic.Read(_config, id);
+        Attach(topic is { } stored && Registry.IsAssistant(stored) ? Registry.ShowOf(stored) : null);
+    }
+
+    private void Attach(LiveAgentSession? session)
+    {
+        if (ReferenceEquals(session, _session))
+        {
+            return;
+        }
+
+        if (_session is not null)
+        {
+            _session.Changed -= OnSessionChanged;
+        }
+
+        _session = session;
+        if (_session is not null)
+        {
+            _session.Changed += OnSessionChanged;
+        }
+    }
+
+    private void OnRegistryChanged() => InvokeAsync(() =>
+    {
+        Refresh();
+        StateHasChanged();
+    });
+
+    private void OnSessionChanged() => InvokeAsync(StateHasChanged);
+
+    /// <summary>A question's answer goes back as words alone, like the session pane's.</summary>
+    private Task SendAnswerAsync(string text) => SendTurnAsync(text, []);
+
+    private Task SendAsync(string text) => SendTurnAsync(text, _images);
+
+    /// <summary>
+    /// Continues the running assistant conversation, resumes the last one when it can be, or starts a fresh one. The
+    /// registry refuses in words when it cannot (a spending ceiling, no contained copy yet), and those words are shown.
+    /// The busy state is rendered BEFORE the start, which is synchronous and can take a moment.
+    /// </summary>
+    private async Task SendTurnAsync(string text, IReadOnlyList<AgentImageAttachment> images)
+    {
+        if (WorkspaceId is not { } id || _sending || (string.IsNullOrWhiteSpace(text) && images.Count == 0))
+        {
+            return;
+        }
+
+        _error = null;
+        _sending = true;
+        StateHasChanged();
+        await Task.Yield();
+
+        try
+        {
+            if (_session is { IsRunning: true } running && Registry.Find(running.Id) is not null)
+            {
+                await Registry.SendAsync(running.Id, text, images);
+            }
+            else
+            {
+                Sync.EnsureStarted(id);
+                if (Sync.CopyPathFor(id) is not { Length: > 0 } copy)
+                {
+                    _error = Sync.StartFailureFor(id)
+                        ?? "This folder's working copy is not ready yet. Try again in a moment.";
+                    return;
+                }
+
+                var resumeOf = _session is { } last && Registry.CanResume(last.Id) ? last.Id : (AgentSessionId?)null;
+                LiveAgentSession started;
+                try
+                {
+                    started = Registry.Start(new SessionStartRequest(
+                        id, copy, text, _model, resumeOf, Images: images, Effort: _effort, Assistant: true));
+                }
+                catch (InvalidOperationException) when (Registry.RunningAssistantFor(id) is { } already)
+                {
+                    // Another window started the folder's assistant a moment ago: continue that one.
+                    started = already;
+                    await Registry.SendAsync(already.Id, text, images);
+                }
+
+                if (_config is not null)
+                {
+                    StudioAssistantTopic.Write(_config, id, started.Id);
+                }
+
+                Attach(started);
+            }
+
+            _text = string.Empty;
+            if (images.Count > 0)
+            {
+                _images = [];
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (ArgumentException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _sending = false;
+        }
+    }
+
+    /// <summary>Ends the current topic: a running assistant conversation is stopped, and the next message starts afresh.</summary>
+    private void NewTopic()
+    {
+        if (WorkspaceId is not { } id)
+        {
+            return;
+        }
+
+        if (_session is { IsRunning: true } running && Registry.Find(running.Id) is not null)
+        {
+            Registry.Stop(running.Id);
+        }
+
+        if (_config is not null)
+        {
+            StudioAssistantTopic.Clear(_config, id);
+        }
+
+        _error = null;
+        _previews.Close();
+        Attach(null);
+    }
+
+    private void StopTurn()
+    {
+        if (_session is { IsRunning: true } running)
+        {
+            Registry.Stop(running.Id);
+        }
+    }
+
+    /// <summary>A pick applies to the next start and, between turns, to the running conversation, as in the session pane.</summary>
+    private void OnModelChanged(string? model)
+    {
+        var previous = _model;
+        _model = model;
+        if (_session is { IsRunning: true } running && Registry.Find(running.Id) is not null
+            && !string.Equals(previous, model, StringComparison.Ordinal))
+        {
+            Registry.ChangeModel(running.Id, model);
+        }
+    }
+
+    private void OnEffortChanged(AgentEffort? effort)
+    {
+        _effort = effort;
+        if (_session is { IsRunning: true } running && Registry.Find(running.Id) is not null && running.Effort != effort)
+        {
+            Registry.ChangeEffort(running.Id, effort);
+        }
+    }
+
+    private async Task AnswerAsync((string RequestId, bool Approved, string? Reason) answer)
+    {
+        _answering = true;
+        try
+        {
+            Registry.Answer(
+                answer.RequestId,
+                answer.Approved,
+                ToolApprovalDecision.UserReason(answer.Approved, answer.Reason));
+        }
+        finally
+        {
+            _answering = false;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        Registry.SessionsChanged -= OnRegistryChanged;
+        if (_session is not null)
+        {
+            _session.Changed -= OnSessionChanged;
+        }
+    }
+}

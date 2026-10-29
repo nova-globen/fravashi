@@ -1,0 +1,28 @@
+@using Fravashi.Application.Persistence
+
+@* Shows what a provider step SAVED on a previous visit - its verified status and verified-at time, read from
+   the persisted connection record. Because tokens are never persisted as drafts (F13), a refresh clears the
+   token field; when a credential was stored but the field is now empty, this prompts the user to re-enter it to
+   re-test, while the earlier verified result stays visible. *@
+
+@if (Connection is not null)
+{
+    <div class="ob-prior" data-testid="@($"{Area}-prior")">
+        <span class="ob-prior-status ob-prior-@(Connection.Status.ToLowerInvariant())">@Connection.Status</span>
+        <span class="ob-prior-time">saved <LocalTime At="Connection.UpdatedUtc" Style="Fravashi.Web.Services.LocalTimeStyle.DateTime" /></span>
+        @if (TokenNeeded)
+        {
+            <span class="ob-prior-reenter" data-testid="@($"{Area}-reenter")">Token not kept - re-enter it to re-test.</span>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public ProviderConnection? Connection { get; set; }
+
+    /// <summary>True when a credential was stored earlier but the token field is currently empty.</summary>
+    [Parameter] public bool TokenNeeded { get; set; }
+
+    /// <summary>Test-id prefix for the area (source / wiki / board).</summary>
+    [Parameter] public string Area { get; set; } = string.Empty;
+}

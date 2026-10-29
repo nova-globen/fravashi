@@ -1,0 +1,137 @@
+@namespace Fravashi.Web.Components.Settings
+@using System.Globalization
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Backup
+@using Fravashi.Application.Notifications
+@inject IStudioBackupWriter Backups
+@inject INotificationHistory Notifications
+
+@* Settings > Data > Backup and restore (backlog 79). The user was told never to lose the database and given
+   nothing to protect it; this is the half the studio can own, because the studio holds the database open.
+   The page has to say four things the owner cannot infer: WHERE the file lands (it is a host folder they
+   can copy anywhere), that the archive carries the key ring and is therefore as sensitive as a credential,
+   that restoring is a launcher command rather than a button here, because the process being replaced
+   cannot replace itself, and what the archive leaves OUT, because the one thing an export must never do is
+   let an owner find out on the new machine that something they needed stayed behind. *@
+<div class="ob-step" data-testid="backup-settings">
+    <h2>Backup and export</h2>
+
+    <p class="studio-muted">
+        Writes one zip holding <strong>the database, the Data Protection key ring and the agent-session
+        artifacts</strong>, plus a manifest recording the product version, the database schema version,
+        when it was taken, and a SHA256 for every file in it. The database copy is taken through SQLite's
+        online backup, so it is <strong>safe to take while @(ProductName.Short) is running</strong>: you do not have to
+        stop anything and you will not get a half-copied file.
+    </p>
+
+    <p class="studio-muted" data-testid="backup-folder">
+        Backups land in <code>@Backups.Folder</code>. That is a folder on this machine, so copy the file
+        somewhere else as well: a backup that only exists beside the thing it protects is not one.
+    </p>
+
+    <p class="studio-muted" data-testid="backup-excluded">
+        <strong>What it does not carry:</strong> the agent CLIs' own sign-ins. @RuntimesKeepTheirCredentials,
+        and @(ProductName.Short)'s container-side git config, in the data directory's
+        <code>home</code> folder, which is gigabytes of caches and is deliberately left out, so
+        <strong>sign in to the agent CLIs again</strong> after restoring on another machine. Nothing else is
+        missing: logs, the agent-CLI installs and the integrity and update records are rebuilt on the next
+        start.
+    </p>
+
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn" data-testid="backup-write"
+                disabled="@_writing" @onclick="WriteAsync">
+            @(_writing ? "Writing..." : "Write a backup now")
+        </button>
+    </div>
+
+    @if (_backup is { } backup)
+    {
+        <div class="diag-result" data-testid="backup-result">
+            <p>Written to <code data-testid="backup-path">@backup.Path</code></p>
+            <p class="studio-muted">
+                @backup.SizeBytes.ToString(CultureInfo.InvariantCulture) bytes,
+                @backup.FileCount.ToString(CultureInfo.InvariantCulture) file(s),
+                database schema @(backup.SchemaVersion.ToString(CultureInfo.InvariantCulture)).
+            </p>
+            @if (backup.ConfiguredProviders.Count > 0)
+            {
+                <p class="studio-muted" data-testid="backup-providers">
+                    Configured providers recorded in it: @string.Join(", ", backup.ConfiguredProviders).
+                </p>
+            }
+        </div>
+    }
+    else if (_error is { Length: > 0 })
+    {
+        <div class="ob-warning" data-testid="backup-error">@_error</div>
+    }
+
+    <h3>Restoring</h3>
+    <p class="studio-muted" data-testid="backup-restore-help">
+        Restoring replaces the open database, so it cannot be a button here: it is a command, run with
+        @(ProductName.Short)'s own launcher. Open a terminal and run
+        <code>@(ProductName.Command) restore &lt;path to the zip&gt;</code>. It verifies every file against the manifest
+        first and refuses the whole archive if one hash does not match or the backup came from a newer
+        @(ProductName.Short). It then stops @(ProductName.Short), <strong>moves</strong> the current database, key ring and agent
+        sessions into a <code>pre-restore</code> folder beside the backups (it never deletes them), unpacks
+        the archive, starts @(ProductName.Short) again and reports the schema version it comes back up on.
+    </p>
+
+    <h3>Moving to another machine</h3>
+    <p class="studio-muted" data-testid="backup-export-help">
+        The export is the same file: copy it to the new machine and run <code>@(ProductName.Command) restore</code> there.
+        The key ring travels with it, so stored credentials decrypt on the destination. A credential the
+        <strong>provider</strong> bound to the old machine (a device-bound sign-in, a token issued for that
+        host) still has to be reconnected there, which is why the manifest lists which providers were
+        configured: that list is what to check after the move. The agent CLIs are the other half of that
+        list, because their sign-ins are not in the archive at all (see above); <code>@(ProductName.Command) restore</code>
+        prints both notes before it asks you to confirm.
+    </p>
+    <p class="studio-muted" data-testid="backup-sensitivity">
+        Because the key ring is inside it, <strong>treat this file like a credential</strong>: anyone who
+        has it can read the secrets stored in that database.
+    </p>
+</div>
+
+@code {
+    private bool _writing;
+    private StudioBackup? _backup;
+    private string? _error;
+
+    // The runtimes named come from the catalog rather than the markup (backlog 180): the page went on naming
+    // two runtimes for a week after they were parked for v2, telling a person to redo sign-ins that do not exist.
+    private static string RuntimesKeepTheirCredentials
+    {
+        get
+        {
+            var names = AgentRuntimeCatalog.All.Select(runtime => runtime.DisplayName).ToList();
+            return names.Count == 1
+                ? $"{names[0]} keeps its credentials"
+                : $"{string.Join(", ", names.Take(names.Count - 1))} and {names[^1]} keep their credentials";
+        }
+    }
+
+    private async Task WriteAsync()
+    {
+        _writing = true;
+        _error = null;
+        _backup = null;
+        try
+        {
+            // Off the render thread: this copies the whole database and zips the data directory's
+            // key ring and session artifacts.
+            _backup = await Task.Run(Backups.Write);
+            Notifications.Add("Backup written.", NotificationSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            _error = $"The backup could not be written: {ex.Message}";
+            Notifications.Add("The backup could not be written.", NotificationSeverity.Error);
+        }
+        finally
+        {
+            _writing = false;
+        }
+    }
+}

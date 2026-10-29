@@ -1,0 +1,502 @@
+@page "/onboarding/mapping"
+@layout OnboardingLayout
+@using System.Text.Json
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Onboarding
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Web.Services
+@inject IConfigurationStore Config
+@inject IBoardStatesProbe StatesProbe
+@inject ISecretStore Secrets
+@inject IProviderConnectionStore Connections
+@inject IAgentRuntimeService Runtimes
+@inject IBoardMappingSuggester Suggester
+@inject OnboardingDraft Draft
+
+@* O15 / F7 - map the board's structure & statuses to the canonical model
+   (docs/reports/2026-06-19_devops-board-migration.md §3 structure, §5 statuses). The structure is fixed
+   (Tier ⊃ Feature ⊃ Increment ⊃ Task). For a verified external board we read the user's REAL states and let
+   them assign each to a canonical status via a multi-select; a local board uses the canonical set directly; an
+   unverified board falls back to manual name entry. The confirmed mapping is persisted for deterministic sync. *@
+
+<div class="ob-step ob-step-wide">
+    <h2>Map your board</h2>
+
+    <div class="ob-policy" role="note">
+        <p>
+            @(ProductName.Short) runs an <strong>agentic software-delivery loop</strong>: product-neutral <strong>role-agents</strong>
+            (an analyst, a designer, an implementer, a reviewer) move each work item through one defined flow,
+            <strong>spec → design → build → verify</strong>. To do that deterministically the agents read and write
+            your <em>real</em> board, so @(ProductName.Short) normalises every board onto <strong>seven canonical statuses</strong>
+            in <strong>four categories</strong>.
+        </p>
+        <p style="margin-bottom:0">
+            This mapping is the foundation: it tells the agents which of <em>your</em> statuses means "ready to build"
+            or "in review", so moving a card in @(ProductName.Short) moves it correctly on your board - and vice versa. Map each
+            canonical status to your board's own status name(s) below.
+        </p>
+    </div>
+
+    @if (_mode == Mode.Local)
+    {
+        <p class="ob-note" data-testid="mapping-local">
+            Your <strong>local board</strong> uses the canonical statuses directly, so there is nothing to map - the
+            seven statuses below <em>are</em> your board. Confirm to record it.
+        </p>
+    }
+    else if (_mode == Mode.Manual)
+    {
+        <p class="ob-note" data-testid="mapping-manual-note">
+            @if (TokenAvailable)
+            {
+                <span>Load your board's real statuses to assign them, or type the names manually.</span>
+            }
+            else
+            {
+                <span>
+                    No verified board connection yet - go back to <strong>Board</strong> and enter a token to load your
+                    real statuses. Meanwhile you can type your board's status names manually.
+                </span>
+            }
+        </p>
+
+        @if (TokenAvailable)
+        {
+            <div class="ob-actions">
+                <FluentButton Appearance="Appearance.Accent" OnClick="LoadStatesAsync" Disabled="_busy" data-testid="mapping-load">
+                    @(_busy ? "Loading…" : "Load my board's states")
+                </FluentButton>
+            </div>
+        }
+
+        @if (_statesError is not null)
+        {
+            <p class="ob-warning" role="alert" data-testid="mapping-load-error">Could not read your board's statuses: @_statesError</p>
+        }
+    }
+
+    @if (_mode == Mode.Multi)
+    {
+        @* S16 - let a configured, authenticated runtime read the board states and pre-fill this mapping. It is a
+           suggestion the user still confirms; disabled with an honest reason when no runtime can run it. *@
+        <div class="ob-actions">
+            <button type="button" class="studio-btn" disabled="@(_suggestTool is null || _suggesting)"
+                    title="@_suggestReason" data-testid="mapping-suggest" @onclick="SuggestAsync">
+                @(_suggesting ? "Asking the agent…" : "Suggest mapping with AI")
+            </button>
+            @if (_suggestTool is null && _suggestReason is not null)
+            {
+                <span class="ob-hint" data-testid="mapping-suggest-disabled">@_suggestReason</span>
+            }
+        </div>
+
+        @if (_suggestError is not null)
+        {
+            <p class="ob-warning" role="alert" data-testid="mapping-suggest-error">The AI suggestion could not be used: @_suggestError</p>
+        }
+
+        <p class="ob-hint" data-testid="mapping-source">
+            @if (_source == MappingSource.AiSuggested)
+            {
+                <span><strong>AI-suggested</strong> mapping - review each row and adjust before confirming.</span>
+            }
+            else
+            {
+                <span>Prefilled by <strong>name match</strong>. Use “Suggest mapping with AI” for a smarter pass.</span>
+            }
+        </p>
+
+        @* Unmapped strip - ABOVE the grid so the states still needing a home are the first thing the user
+           sees. Shows EVERY board state not yet assigned to a canonical status (report §5: unknown natives
+           degrade gracefully; here they wait for a manual home). *@
+        <div class="ob-unmapped" role="note" data-testid="mapping-unmapped">
+            @if (_unmapped.Count == 0)
+            {
+                <span class="ob-unmapped-clear" data-testid="mapping-unmapped-clear">✓ Every board state is mapped.</span>
+            }
+            else
+            {
+                <span class="ob-unmapped-label">Unmapped states (@_unmapped.Count) - assign each below, or leave it out if it should not sync:</span>
+                <span class="ob-unmapped-chips">
+                    @foreach (var state in _unmapped)
+                    {
+                        <span class="ob-unmapped-chip" data-testid="@($"unmapped-{state.Replace(" ", string.Empty, StringComparison.Ordinal)}")">@state</span>
+                    }
+                </span>
+            }
+        </div>
+    }
+
+    <table class="ob-mapping" data-testid="mapping-table">
+        <thead>
+            <tr>
+                <th>Canonical status</th>
+                <th>Category</th>
+                <th>@(_mode == Mode.Multi ? "Your board's statuses" : "Your board's status name")</th>
+                <th>Common native names</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var row in _rows)
+            {
+                var slug = row.Canonical.Status.Replace(" ", string.Empty, StringComparison.Ordinal);
+                <tr>
+                    <td><strong>@row.Canonical.Status</strong></td>
+                    <td>@row.Canonical.Category</td>
+                    <td>
+                        @if (_mode == Mode.Multi)
+                        {
+                            <BoardStatusPicker TestId="@($"map-{slug}")"
+                                               AllStates="_boardStates"
+                                               Selected="row.SelectedStates"
+                                               AssignedElsewhere="@(state => AssignedElsewhere(state, row))"
+                                               OnToggle="@(state => ToggleState(row, state))"
+                                               OnRemove="@(state => RemoveState(row, state))" />
+                        }
+                        else if (_mode == Mode.Local)
+                        {
+                            <code data-testid="@($"map-{slug}")">@row.Canonical.Status</code>
+                        }
+                        else
+                        {
+                            <FluentTextField @bind-Value="row.Native" data-testid="@($"map-{slug}")" />
+                        }
+                    </td>
+                    <td class="ob-mapping-examples">@row.Canonical.NativeExamples</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    <div class="ob-actions">
+        <FluentButton Appearance="Appearance.Accent" OnClick="ConfirmAsync" data-testid="mapping-confirm">Confirm mapping</FluentButton>
+        <FluentButton OnClick="ResetDefaults" data-testid="mapping-reset">Reset to suggestions</FluentButton>
+    </div>
+
+    @if (_duplicates.Count > 0)
+    {
+        <div class="ob-warning" role="alert" data-testid="mapping-duplicate">
+            <p>Not saved: a status of your board can mean only one status here, and these are listed under more than one.</p>
+            <ul>
+                @foreach (var duplicate in _duplicates)
+                {
+                    <li>@duplicate.Sentence</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (_confirmed)
+    {
+        <p class="ob-saved" data-testid="mapping-saved">Mapping confirmed and saved.</p>
+    }
+</div>
+
+@code {
+    private enum Mode { Local, Manual, Multi }
+
+    private sealed class Row
+    {
+        public required CanonicalStatus Canonical { get; init; }
+        public string Native { get; set; } = string.Empty;
+        public List<string> SelectedStates { get; set; } = [];
+    }
+
+    private enum MappingSource { NameMatched, AiSuggested }
+
+    private readonly List<Row> _rows = [];
+    private IReadOnlyList<string> _boardStates = [];
+    private readonly List<string> _unmapped = [];
+    private Mode _mode = Mode.Manual;
+    private bool _confirmed;
+    private IReadOnlyList<DuplicateNativeStatus> _duplicates = [];
+    private bool _busy;
+    private string? _statesError;
+    private string _provider = OnboardingProviders.None;
+
+    // S16 - AI suggestion state.
+    private AgentTool? _suggestTool;
+    private string? _suggestReason;
+    private string? _suggestError;
+    private bool _suggesting;
+    private bool _suggestResolved;
+    private MappingSource _source = MappingSource.NameMatched;
+
+    private bool TokenAvailable => !string.IsNullOrWhiteSpace(EffectiveToken());
+
+    protected override void OnInitialized()
+    {
+        _provider = Config.Get("Onboarding:Board:Provider") ?? Draft.BoardProvider ?? OnboardingProviders.None;
+        _mode = _provider == OnboardingProviders.Local ? Mode.Local : Mode.Manual;
+        LoadOrSeed();
+    }
+
+    private void LoadOrSeed()
+    {
+        _rows.Clear();
+        var existing = Deserialize(Config.Get("Board:StatusMapping"));
+        foreach (var canonical in BoardStatusMapping.Catalog)
+        {
+            var native = existing?.Entries.FirstOrDefault(e => e.CanonicalStatus == canonical.Status)?.NativeStatus
+                ?? FirstExample(canonical);
+            _rows.Add(new Row { Canonical = canonical, Native = native });
+        }
+    }
+
+    private async Task LoadStatesAsync()
+    {
+        _busy = true;
+        _statesError = null;
+        try
+        {
+            var connection = Connections.Get("board");
+            var request = new BoardAccessRequest(
+                _provider,
+                NullIfEmpty(Draft.BoardBaseUrl) ?? connection?.BaseUrl,
+                NullIfEmpty(Draft.BoardProject),
+                NullIfEmpty(Draft.BoardEmail),
+                EffectiveToken());
+
+            var result = await StatesProbe.FetchAsync(request);
+            if (!result.HasStates)
+            {
+                _statesError = result.Error ?? "No statuses were returned.";
+                return;
+            }
+
+            _boardStates = result.States;
+            _mode = Mode.Multi;
+            _source = MappingSource.NameMatched;
+            Prefill();
+            RecomputeUnmapped();
+            await ResolveSuggestRuntimeAsync();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    /// <summary>
+    /// Picks the first selected runtime that a real check says is authenticated, for the AI suggestion (S16).
+    /// When none qualifies, records the honest reason the button shows disabled.
+    /// </summary>
+    private async Task ResolveSuggestRuntimeAsync()
+    {
+        if (_suggestResolved)
+        {
+            return;
+        }
+
+        _suggestResolved = true;
+        var selected = AgentRuntimeSelection.Read(Config);
+        if (selected.Count == 0)
+        {
+            _suggestReason = "Select and sign in an agent runtime on the first step to enable AI suggestions.";
+            return;
+        }
+
+        foreach (var tool in selected)
+        {
+            var status = await Runtimes.GetStatusAsync(tool);
+            if (status is { Installed: true, AuthState: AgentRuntimeAuthState.Authenticated })
+            {
+                _suggestTool = tool;
+                _suggestReason = null;
+                return;
+            }
+        }
+
+        _suggestReason = "No selected runtime is authenticated yet - sign one in on the Agent runtimes step first.";
+    }
+
+    /// <summary>Runs the configured runtime to suggest a mapping and applies it to the multi-select rows (S16).</summary>
+    private async Task SuggestAsync()
+    {
+        if (_suggestTool is null || _suggesting)
+        {
+            return;
+        }
+
+        _suggesting = true;
+        _suggestError = null;
+        try
+        {
+            var suggestion = await Suggester.SuggestAsync(
+                new BoardMappingSuggestionRequest(_suggestTool.Value, _boardStates.ToList()));
+
+            if (!suggestion.Success)
+            {
+                _suggestError = suggestion.Error ?? "The runtime did not return a usable mapping.";
+                return;
+            }
+
+            foreach (var row in _rows)
+            {
+                row.SelectedStates = suggestion.Assignments.TryGetValue(row.Canonical.Status, out var states)
+                    ? new List<string>(states)
+                    : new List<string>();
+            }
+
+            _source = MappingSource.AiSuggested;
+            _confirmed = false;
+            RecomputeUnmapped();
+        }
+        finally
+        {
+            _suggesting = false;
+        }
+    }
+
+    /// <summary>
+    /// Suggests an assignment for each of the board's real states by name: a state prefills to the first
+    /// canonical status whose own name or one of its common native names matches it (case-insensitive). Each
+    /// state is assigned to at most one canonical status; unmatched states are flagged as unmapped.
+    /// </summary>
+    private void Prefill()
+    {
+        foreach (var row in _rows)
+        {
+            row.SelectedStates = [];
+        }
+
+        foreach (var state in _boardStates)
+        {
+            var match = _rows.FirstOrDefault(r => CandidateNames(r.Canonical).Any(n => string.Equals(n, state, StringComparison.OrdinalIgnoreCase)));
+            match?.SelectedStates.Add(state);
+        }
+    }
+
+    /// <summary>
+    /// The canonical status a native state is mapped to on a row OTHER than <paramref name="current"/>, or
+    /// null when it is unmapped. Used to dim + label a state that already has a home elsewhere (exclusivity is
+    /// one canonical per native state - see the mapping step's owner-facing decision in the decision log).
+    /// </summary>
+    private string? AssignedElsewhere(string state, Row current) =>
+        _rows.FirstOrDefault(r => r != current
+            && r.SelectedStates.Contains(state, StringComparer.OrdinalIgnoreCase))?.Canonical.Status;
+
+    /// <summary>
+    /// Toggles a native state on a row. Adding it enforces exclusivity by first removing it from any other
+    /// canonical status, so one native state maps to exactly one canonical status.
+    /// </summary>
+    private void ToggleState(Row row, string state)
+    {
+        if (row.SelectedStates.Contains(state, StringComparer.OrdinalIgnoreCase))
+        {
+            row.SelectedStates.RemoveAll(s => string.Equals(s, state, StringComparison.OrdinalIgnoreCase));
+        }
+        else
+        {
+            foreach (var other in _rows)
+            {
+                other.SelectedStates.RemoveAll(s => string.Equals(s, state, StringComparison.OrdinalIgnoreCase));
+            }
+
+            row.SelectedStates.Add(state);
+        }
+
+        _confirmed = false;
+        RecomputeUnmapped();
+    }
+
+    private void RemoveState(Row row, string state)
+    {
+        row.SelectedStates.RemoveAll(s => string.Equals(s, state, StringComparison.OrdinalIgnoreCase));
+        _confirmed = false;
+        RecomputeUnmapped();
+    }
+
+    private void RecomputeUnmapped()
+    {
+        var assigned = _rows.SelectMany(r => r.SelectedStates).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _unmapped.Clear();
+        _unmapped.AddRange(_boardStates.Where(s => !assigned.Contains(s)));
+    }
+
+    private static IEnumerable<string> CandidateNames(CanonicalStatus canonical) =>
+        canonical.NativeExamples.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Prepend(canonical.Status);
+
+    private static string FirstExample(CanonicalStatus canonical) =>
+        canonical.NativeExamples.Split(',')[0].Trim();
+
+    private void ResetDefaults()
+    {
+        if (_mode == Mode.Multi)
+        {
+            Prefill();
+            RecomputeUnmapped();
+        }
+        else
+        {
+            foreach (var row in _rows)
+            {
+                row.Native = FirstExample(row.Canonical);
+            }
+        }
+
+        _confirmed = false;
+    }
+
+    private Task ConfirmAsync()
+    {
+        RecomputeUnmapped();
+        var mapping = new BoardStatusMapping(
+            _provider,
+            _rows.Select(r => new StatusMappingEntry(r.Canonical.Status, NativeFor(r))).ToList());
+
+        // Backlog 181: the picker keeps one status per state when a person toggles, but typed names and an AI
+        // suggestion do not, and a state under two statuses would read back as whichever came last. Checked here,
+        // at the one place a mapping is written, so every way of filling the rows is held to it.
+        _duplicates = mapping.Duplicates();
+        if (_duplicates.Count > 0)
+        {
+            _confirmed = false;
+            return Task.CompletedTask;
+        }
+
+        Config.Set("Board:StatusMapping", JsonSerializer.Serialize(mapping));
+        _confirmed = true;
+        return Task.CompletedTask;
+    }
+
+    // In Multi mode a canonical status may map to several native states; they are stored joined by "; " so the
+    // (not-yet-built) sync can split them. Local uses the canonical name as identity; Manual uses the typed name.
+    private string NativeFor(Row row) => _mode switch
+    {
+        Mode.Local => row.Canonical.Status,
+        Mode.Multi => string.Join("; ", row.SelectedStates),
+        _ => row.Native.Trim(),
+    };
+
+    private string? EffectiveToken()
+    {
+        if (!string.IsNullOrWhiteSpace(Draft.BoardToken))
+        {
+            return Draft.BoardToken;
+        }
+
+        return Connections.Get("board")?.CredentialRef is not null ? Secrets.Get("board:token") : null;
+    }
+
+    private static BoardStatusMapping? Deserialize(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<BoardStatusMapping>(json);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+}

@@ -1,0 +1,81 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Domain.AgentSessions
+
+@* One line, where a four-line stack used to eat a third of a narrow panel (backlog 18 and 19).
+
+   Context usage leads it because it is the number asked to be seen at all times, and it is the one
+   that decides whether the conversation still has room. It is honest in three separate states: a share of
+   the window when both halves are known, the raw occupancy when the window has not been reported yet (it
+   arrives with the first finished turn), and an explicit "not reported yet" before the agent has sent
+   anything at all. None of those is allowed to render as a full meter or as an empty one. *@
+<div class="session-usage" data-testid="session-usage">
+    <span class="session-usage-label">Context</span>
+    @if (Stats.ContextFraction is { } fraction)
+    {
+        <span class="session-usage-meter @(fraction >= HighWater ? "is-high" : null)"
+              data-testid="session-context-meter"
+              role="img"
+              aria-label="@($"Context {SessionUsageFormat.Percent(fraction)} of {SessionUsageFormat.Tokens(Stats.ContextWindow)} tokens")">
+            @* The fill splits into a dimmer fixed-prefix segment and the conversation's own when the
+               session's first reading is known: 39% after two short questions is TRUE, and the meter is
+               where the reason (roughly half of it was never typed by anyone) becomes visible. The two
+               widths sum to the single-segment width, so the split never changes how full the bar reads. *@
+            @if (Stats.BaselineFraction is { } baseline)
+            {
+                <i class="session-usage-meter-fixed" data-testid="session-context-fixed"
+                   style="width: @SessionUsageFormat.MeterWidth(baseline)"></i>
+                <i style="width: @SessionUsageFormat.ConversationWidth(fraction, baseline)"></i>
+            }
+            else
+            {
+                <i style="width: @SessionUsageFormat.MeterWidth(fraction)"></i>
+            }
+        </span>
+        <span class="session-usage-value" data-testid="session-context"
+              title="@SessionUsageFormat.ContextTitle(Stats)">
+            @SessionUsageFormat.Percent(fraction)
+        </span>
+    }
+    else if (Stats.ContextTokens > 0)
+    {
+        @* The occupancy is known and the window is not: showing a percentage here would mean inventing
+           the denominator, so the tokens stand on their own until the first turn finishes. *@
+        <span class="session-usage-value" data-testid="session-context"
+              title="@SessionUsageFormat.ContextTitle(Stats)">
+            @SessionUsageFormat.Tokens(Stats.ContextTokens)
+        </span>
+    }
+    else
+    {
+        <span class="session-usage-value session-usage-unknown" data-testid="session-context"
+              title="The agent has not reported context usage yet.">
+            not reported yet
+        </span>
+    }
+
+    <span class="session-usage-sep" aria-hidden="true">&middot;</span>
+    <span class="session-usage-value" data-testid="session-cost"
+          title="Cost of this conversation so far, as the agent CLI reports it">
+        @SessionUsageFormat.Cost(Stats.CostUsd)
+    </span>
+
+    <span class="session-usage-sep" aria-hidden="true">&middot;</span>
+    <span class="session-usage-value" data-testid="session-tools">@SessionUsageFormat.Tools(Stats.ToolCalls)</span>
+
+    @if (Stats.RateLimitHits > 0)
+    {
+        <span class="session-usage-sep" aria-hidden="true">&middot;</span>
+        <span class="session-usage-warn" data-testid="session-rate-limits"
+              title="Times the provider throttled this conversation">
+            @Stats.RateLimitHits throttled
+        </span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public AgentStatsSnapshot Stats { get; set; } = AgentStatsSnapshot.Empty;
+
+    /// <summary>Where the meter stops being informational and starts being a warning.</summary>
+    private const double HighWater = 0.8d;
+}

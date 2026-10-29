@@ -1,0 +1,44 @@
+<Project>
+  <!--
+    Build settings for every project in this repository. This file and Directory.Packages.props are
+    the repo root's own: MSBuild walks up from each project and stops here.
+
+    These settings arrived with the studio, where they served as a barrier isolating it from the
+    surrounding company-site repo's root props. There is nothing to isolate from now (Fravashi is the
+    repo), so they are simply the build config.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <LangVersion>preview</LangVersion>
+    <AnalysisLevel>latest</AnalysisLevel>
+  </PropertyGroup>
+
+  <!--
+    Release variant compile switch (I1 / ADR 0006 ruling 3). The release pipeline publishes with
+    `dotnet publish -p:FravashiVariant=<name>` (the Dockerfile threads the VARIANT build-arg into publish);
+    a plain local/dev/test build leaves it unset and compiles as `full` (every feature on). Each variant maps
+    to a DefineConstants symbol that CompiledVariant reads via #if, so a switched-off feature's default is
+    genuinely baked out of the binary rather than merely toggled at runtime. Keep names product-neutral.
+  -->
+  <PropertyGroup>
+    <FravashiVariant Condition="'$(FravashiVariant)' == ''">full</FravashiVariant>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(FravashiVariant)' == 'corp-vpn'">
+    <DefineConstants>$(DefineConstants);VARIANT_CORP_VPN</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(FravashiVariant)' == 'corp-broker'">
+    <DefineConstants>$(DefineConstants);VARIANT_CORP_BROKER</DefineConstants>
+  </PropertyGroup>
+
+  <!--
+    The service host (infra D28): `-p:FravashiServiceHost=<host>` builds for a test host; unset is production. It is
+    written as assembly metadata that Fravashi.Domain's ServiceHost reads, so the test host is a build input and never
+    a line in the repository.
+  -->
+  <ItemGroup Condition="'$(FravashiServiceHost)' != ''">
+    <AssemblyMetadata Include="Fravashi.ServiceHost" Value="$(FravashiServiceHost)" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,31 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+
+@* Dispatches the Agents CRUD routes under Settings › Framework › Agents:
+   /settings/framework/agents            → list
+   /settings/framework/agents/new        → create form
+   /settings/framework/agents/edit/{id}  → edit form
+   /settings/framework/agents/view/{id}  → read-only view (+ subagent markdown preview + delete) *@
+
+@switch (Action?.ToLowerInvariant())
+{
+    case "new":
+        <AgentForm />
+        break;
+    case "edit":
+        <AgentForm Id="@Id" />
+        break;
+    case "view":
+        <AgentView Id="@Id" />
+        break;
+    default:
+        <AgentList />
+        break;
+}
+
+@code {
+    /// <summary>new | edit | view; null for the list.</summary>
+    [Parameter] public string? Action { get; set; }
+
+    /// <summary>The artifact id for edit/view.</summary>
+    [Parameter] public string? Id { get; set; }
+}

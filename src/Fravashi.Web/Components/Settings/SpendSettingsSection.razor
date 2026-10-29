@@ -1,0 +1,137 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Infrastructure.Sessions
+@inject IConfigurationStore ConfigStore
+@inject IConfigurationReloader Reloader
+@inject INotificationHistory Notifications
+
+@* Settings > Agents > Spending and limits (backlog 62): three optional ceilings on what agent runs may cost.
+   Empty means no limit, which is what the studio ships with, so the form never invents one.
+
+   The per-session ceiling is handed to the agent CLI itself, which stops the invocation from inside.
+   The day and month ceilings are the studio's own, because no single invocation can see across
+   sessions, and they are UTC so that the boundary is a fixed instant rather than one that moves with
+   the machine's time zone. Both of those facts are said on the page rather than kept in the code. *@
+<div class="ob-step" data-testid="spend-settings">
+    <h2>Spending</h2>
+    <p class="studio-muted">
+        Ceilings on what agent runs may cost, in US dollars. Leave a field empty for no limit.
+        Days and months are counted in <strong>UTC</strong>, so a limit can reset in the middle of
+        your evening.
+    </p>
+
+    <label class="studio-modal-field">
+        <span>Per session</span>
+        <input class="studio-input" type="text" inputmode="decimal" spellcheck="false"
+               placeholder="no limit" data-testid="spend-limit-session"
+               @bind="_session" @bind:event="oninput" />
+    </label>
+    <p class="studio-muted">
+        Passed to the agent CLI as its own budget, so a run stops itself once it has spent this much.
+        That ceiling is enforced by the agent CLI, not by the studio, and it can overshoot: a run has
+        been measured spending about ten times its ceiling before it stopped.
+    </p>
+
+    <label class="studio-modal-field">
+        <span>Per day</span>
+        <input class="studio-input" type="text" inputmode="decimal" spellcheck="false"
+               placeholder="no limit" data-testid="spend-limit-day"
+               @bind="_day" @bind:event="oninput" />
+    </label>
+
+    <label class="studio-modal-field">
+        <span>Per month</span>
+        <input class="studio-input" type="text" inputmode="decimal" spellcheck="false"
+               placeholder="no limit" data-testid="spend-limit-month"
+               @bind="_month" @bind:event="oninput" />
+    </label>
+    <p class="studio-muted">
+        Summed across every session and workspace. When one is reached the studio refuses to start a
+        session or send a turn, and stops a running session at its next turn boundary.
+    </p>
+
+    @if (_problem is { Length: > 0 })
+    {
+        <div class="studio-error" data-testid="spend-limit-error">@_problem</div>
+    }
+
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn" data-testid="spend-limit-save"
+                disabled="@(!Dirty)" @onclick="Save">Save</button>
+    </div>
+</div>
+
+@code {
+    private string _session = string.Empty;
+    private string _day = string.Empty;
+    private string _month = string.Empty;
+
+    private string _savedSession = string.Empty;
+    private string _savedDay = string.Empty;
+    private string _savedMonth = string.Empty;
+
+    private string? _problem;
+
+    private bool Dirty =>
+        !string.Equals(_session, _savedSession, StringComparison.Ordinal)
+        || !string.Equals(_day, _savedDay, StringComparison.Ordinal)
+        || !string.Equals(_month, _savedMonth, StringComparison.Ordinal);
+
+    protected override void OnInitialized()
+    {
+        _savedSession = Stored(ConfigurationAgentSpendLimits.PerSessionKey);
+        _savedDay = Stored(ConfigurationAgentSpendLimits.PerDayKey);
+        _savedMonth = Stored(ConfigurationAgentSpendLimits.PerMonthKey);
+        (_session, _day, _month) = (_savedSession, _savedDay, _savedMonth);
+    }
+
+    /// <summary>
+    /// What the row holds, shown the way it will be READ. A stored value the reader cannot parse would
+    /// otherwise sit in the box looking like a limit while meaning none at all.
+    /// </summary>
+    private string Stored(string key) =>
+        ConfigurationAgentSpendLimits.Write(ConfigurationAgentSpendLimits.Read(ConfigStore.Get(key)));
+
+    private void Save()
+    {
+        // A typo must not silently become "no limit": that is the one direction the reader would never
+        // notice, because nothing stops and everything looks configured.
+        _problem = Invalid(_session) ?? Invalid(_day) ?? Invalid(_month);
+        if (_problem is not null)
+        {
+            return;
+        }
+
+        Store(ConfigurationAgentSpendLimits.PerSessionKey, ref _savedSession, _session);
+        Store(ConfigurationAgentSpendLimits.PerDayKey, ref _savedDay, _day);
+        Store(ConfigurationAgentSpendLimits.PerMonthKey, ref _savedMonth, _month);
+
+        Reloader.Reload();
+        Notifications.Add("Spend limits saved.", NotificationSeverity.Success);
+    }
+
+    private void Store(string key, ref string saved, string typed)
+    {
+        var normalised = ConfigurationAgentSpendLimits.Write(ConfigurationAgentSpendLimits.Read(typed));
+        ConfigStore.Set(key, normalised);
+        saved = normalised;
+    }
+
+    /// <summary>
+    /// Why a typed field cannot be a limit, or null when it can. Blank is valid: it is how the reader
+    /// says "no limit". Zero and negatives are not, because they read as a limit and behave as none.
+    /// </summary>
+    private static string? Invalid(string typed)
+    {
+        if (string.IsNullOrWhiteSpace(typed))
+        {
+            return null;
+        }
+
+        return ConfigurationAgentSpendLimits.Read(typed) is null
+            ? $"\"{typed.Trim()}\" is not an amount above zero. Use a plain number such as 5 or 2.50, "
+              + "or leave the field empty for no limit."
+            : null;
+    }
+}

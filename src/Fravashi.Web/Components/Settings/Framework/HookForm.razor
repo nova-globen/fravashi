@@ -1,0 +1,179 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Create / edit a Hook (UI11) - one command-type handler bound to an event. Emits the settings.json
+   hooks fragment (matcher + hooks[type=command, command, timeout]). *@
+
+<div class="skill-form" data-testid="hook-form">
+    <div class="skill-form-header">
+        <h2>@(IsEdit ? "Edit hook" : "New hook")</h2>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/hooks" data-testid="hook-form-cancel">Cancel</a>
+    </div>
+
+    @if (_saveError is not null)
+    {
+        <div class="studio-error" data-testid="hook-form-error">@_saveError</div>
+    }
+
+    <div class="skill-form-grid">
+        <label class="skill-field">
+            <span class="skill-field-label">Name (kebab-case, unique)</span>
+            <input class="studio-input" @bind="_name" @bind:event="oninput" placeholder="format-on-edit"
+                   data-testid="hook-name" disabled="@IsEdit" />
+            <span class="ob-field-hint">A label for this hook. @(IsEdit ? "The name is fixed after creation." : string.Empty)</span>
+            @FieldError("name")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Event</span>
+            <select class="studio-input" @bind="_event" data-testid="hook-event">
+                @foreach (var e in Events)
+                {
+                    <option value="@e">@e</option>
+                }
+            </select>
+            <span class="ob-field-hint">When the hook fires.</span>
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Matcher (optional)</span>
+            <input class="studio-input" @bind="_matcher" @bind:event="oninput" placeholder="Edit|Write"
+                   data-testid="hook-matcher" />
+            <span class="ob-field-hint">
+                Empty or <code>*</code> matches all. A plain name is exact (or a <code>|</code> list); other
+                characters are treated as a regex. What it matches depends on the event (tool name, session
+                source, or agent type).
+            </span>
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Timeout (seconds, optional)</span>
+            <input class="studio-input" type="number" min="1" @bind="_timeout" @bind:event="oninput"
+                   data-testid="hook-timeout" />
+            @FieldError("timeout")
+        </label>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Command</span>
+            <textarea class="studio-input skill-textarea-sm" @bind="_command" @bind:event="oninput"
+                      data-testid="hook-command"
+                      placeholder="prettier --write &quot;$CLAUDE_FILE_PATH&quot;"></textarea>
+            @FieldError("command")
+        </label>
+    </div>
+
+    <div class="skill-form-actions">
+        <button class="studio-btn" @onclick="Save" disabled="@_saving" data-testid="hook-save">
+            @(_saving ? "Saving…" : IsEdit ? "Save changes" : "Create hook")
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private static readonly HookEvent[] Events = Enum.GetValues<HookEvent>();
+
+    private bool IsEdit => !string.IsNullOrWhiteSpace(Id);
+
+    private string _name = string.Empty;
+    private HookEvent _event = HookEvent.PreToolUse;
+    private string _matcher = string.Empty;
+    private string _command = string.Empty;
+    private int? _timeout;
+
+    private IReadOnlyList<SkillValidationError> _errors = [];
+    private string? _saveError;
+    private bool _saving;
+
+    protected override void OnInitialized()
+    {
+        if (IsEdit && Store.Get(Id!) is { } artifact)
+        {
+            var hook = FrameworkPayload<HookDefinition>.From(artifact);
+            _name = hook.Name;
+            _event = hook.Event;
+            _matcher = hook.Matcher;
+            _command = hook.Command;
+            _timeout = hook.TimeoutSeconds;
+        }
+    }
+
+    private HookDefinition BuildDefinition() => new()
+    {
+        Name = _name.Trim(),
+        Event = _event,
+        Matcher = _matcher.Trim(),
+        Command = _command.Trim(),
+        TimeoutSeconds = _timeout,
+    };
+
+    private void Save()
+    {
+        _saveError = null;
+        var definition = BuildDefinition();
+        _errors = HookValidation.Validate(definition);
+
+        var clash = Store.GetByName(FrameworkArtifactKind.Hook, definition.Name);
+        if (clash is not null && clash.Id != Id)
+        {
+            _errors = [.. _errors, new SkillValidationError("name", $"A hook named '{definition.Name}' already exists.")];
+        }
+
+        if (_errors.Count > 0)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var payload = FrameworkPayload<HookDefinition>.Serialize(definition);
+            string artifactId;
+
+            if (IsEdit && Store.Get(Id!) is { } existing)
+            {
+                artifactId = existing.Id;
+                Store.Update(existing with { Name = definition.Name, PayloadJson = payload, UpdatedUtc = now });
+            }
+            else
+            {
+                artifactId = Guid.NewGuid().ToString("N");
+                Store.Add(new FrameworkArtifact(
+                    artifactId, FrameworkArtifactKind.Hook, definition.Name, payload, now, now));
+            }
+
+            Nav.NavigateTo($"/settings/framework/hooks/view/{artifactId}");
+        }
+        catch (DuplicateArtifactNameException ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private RenderFragment? FieldError(string field)
+    {
+        var error = _errors.FirstOrDefault(e => e.Field == field);
+        if (error is null)
+        {
+            return null;
+        }
+
+        return builder =>
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "skill-field-error");
+            builder.AddAttribute(2, "data-testid", $"hook-error-{field}");
+            builder.AddContent(3, error.Message);
+            builder.CloseElement();
+        };
+    }
+}

@@ -1,0 +1,457 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Framework
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.Framework
+@using Microsoft.AspNetCore.Components.Forms
+@inject IFrameworkArtifactStore Store
+@inject IConfigurationStore Config
+@inject IModelListResolver ModelResolver
+@inject NavigationManager Nav
+
+@* Create / edit a Skill (UI3 - UI7, UI12). Every field the owner specified, validated on the stated rules
+   (kebab name + uniqueness, 25-64 short description, hex colour, $skill-name in the default prompt). Icons via
+   the searchable FluentUI picker or an upload; targets are the configured runtimes (metadata now, D03-11); the
+   model dropdown draws from the selected targets' models (D03-12). *@
+
+<div class="skill-form" data-testid="skill-form">
+    <div class="skill-form-header">
+        <h2>@(IsEdit ? "Edit skill" : "New skill")</h2>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/skills" data-testid="skill-form-cancel">Cancel</a>
+    </div>
+
+    @if (_saveError is not null)
+    {
+        <div class="studio-error" data-testid="skill-form-error">@_saveError</div>
+    }
+
+    <div class="skill-form-grid">
+        <label class="skill-field">
+            <span class="skill-field-label">Name (kebab-case, unique)</span>
+            <input class="studio-input" @bind="_name" @bind:event="oninput" placeholder="weekly-status-update"
+                   data-testid="skill-name" disabled="@IsEdit" />
+            <span class="ob-field-hint">Referenced by prompts as <code>$@(string.IsNullOrWhiteSpace(_name) ? "name" : _name)</code>. @(IsEdit ? "The name is fixed after creation." : string.Empty)</span>
+            @FieldError("name")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Display name</span>
+            <input class="studio-input" @bind="_displayName" @bind:event="oninput" placeholder="Weekly status update"
+                   data-testid="skill-display-name" />
+            @FieldError("display_name")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Short description (@SkillValidation.ShortDescriptionMin - @SkillValidation.ShortDescriptionMax chars)</span>
+            <input class="studio-input" @bind="_shortDescription" @bind:event="oninput"
+                   data-testid="skill-short-description" />
+            <span class="ob-field-hint" data-testid="skill-short-count">@_shortDescription.Trim().Length characters - shown as the card subtitle.</span>
+            @FieldError("short_description")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Description (when to use - Claude reads this to invoke the skill)</span>
+            <textarea class="studio-input skill-textarea-sm" @bind="_description" @bind:event="oninput"
+                      data-testid="skill-description"
+                      placeholder="Use when the user asks for a concise weekly status update from recent commits and issues."></textarea>
+            @FieldError("description")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Allowed tools (optional, comma-separated)</span>
+            <input class="studio-input" @bind="_allowedToolsText" @bind:event="oninput"
+                   placeholder="Read, Grep, Edit" data-testid="skill-allowed-tools" />
+            <span class="ob-field-hint">Serialized as the <code>allowed-tools</code> frontmatter list. Leave blank to omit.</span>
+        </label>
+
+        <div class="skill-field">
+            <span class="skill-field-label">Brand colour</span>
+            <div class="skill-color-row">
+                <input type="color" class="skill-color-input" value="@ColorValue" @onchange="OnColorChanged"
+                       data-testid="skill-brand-color" />
+                <input class="studio-input skill-color-hex" @bind="_brandColor" @bind:event="oninput"
+                       placeholder="#7C4DFF" data-testid="skill-brand-color-hex" />
+            </div>
+            @FieldError("brand_color")
+        </div>
+
+        <div class="skill-field">
+            <span class="skill-field-label">Small icon</span>
+            <IconPicker Value="_iconSmall" ValueChanged="OnSmallIconChanged" OnUpload="RegisterUpload"
+                        BrandColor="@_brandColor" Fallback="@_displayName" TestId="icon-small" />
+        </div>
+
+        <div class="skill-field">
+            <span class="skill-field-label">Large icon (defaults to the small icon when unset)</span>
+            <IconPicker Value="_iconLarge" ValueChanged="OnLargeIconChanged" OnUpload="RegisterUpload"
+                        BrandColor="@_brandColor" Fallback="@_displayName" TestId="icon-large" />
+            @if (!_iconLarge.IsSet && _iconSmall.IsSet)
+            {
+                <span class="ob-field-hint" data-testid="icon-large-defaulted">
+                    Not set - the large icon uses the small icon.
+                </span>
+            }
+        </div>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Default prompt (must reference <code>@SkillDefinition.SkillNamePlaceholder</code>)</span>
+            <textarea class="studio-input skill-textarea-sm" @bind="_defaultPrompt" @bind:event="oninput"
+                      data-testid="skill-default-prompt"
+                      placeholder="Use $skill-name to draft a concise weekly status update."></textarea>
+            @FieldError("default_prompt")
+        </label>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Content (Markdown)</span>
+            <textarea class="studio-input skill-textarea-lg" @bind="_content" @bind:event="oninput"
+                      data-testid="skill-content" placeholder="# How to draft a weekly status update&#10;&#10;Steps…"></textarea>
+            @FieldError("content")
+        </label>
+
+        <div class="skill-field skill-field-wide">
+            <span class="skill-field-label">Target runtimes</span>
+            @if (_configuredRuntimes.Count == 0)
+            {
+                <p class="studio-muted" data-testid="skill-targets-empty">
+                    No agent runtimes are configured. Select runtimes in Settings › Agents › Runtimes and sign-in;
+                    they then appear here as targets.
+                </p>
+            }
+            else
+            {
+                <div class="skill-targets" data-testid="skill-targets">
+                    @foreach (var tool in _configuredRuntimes)
+                    {
+                        var t = tool;
+                        <label class="skill-target-chip @(_targets.Contains(t) ? "selected" : string.Empty)">
+                            <input type="checkbox" checked="@_targets.Contains(t)"
+                                   @onchange="e => ToggleTarget(t, (bool)e.Value!)"
+                                   data-testid="@($"skill-target-{t}")" />
+                            <span>@AgentRuntimeCatalog.For(t).DisplayName</span>
+                        </label>
+                    }
+                </div>
+                <span class="ob-field-hint">
+                    Claude is the canonical authoring format. Non-Claude targets are recorded as intent now and
+                    translated per-runtime when file-sync / execution arrives (untranslatable fields will show
+                    visibly rather than drop silently).
+                </span>
+            }
+        </div>
+
+        <div class="skill-field skill-field-wide">
+            <span class="skill-field-label">Pinned model (optional)</span>
+            @if (_targets.Count == 0)
+            {
+                <p class="studio-muted" data-testid="skill-model-empty">
+                    Select at least one target runtime to choose a model - the list comes from the selected
+                    runtimes' available models.
+                </p>
+            }
+            else
+            {
+                <select class="studio-input" value="@(_pinnedModel ?? string.Empty)" @onchange="OnModelChanged"
+                        data-testid="skill-model">
+                    <option value="">No pinned model (use the runtime default)</option>
+                    @foreach (var tool in _targets)
+                    {
+                        if (_modelsByTool.TryGetValue(tool, out var result) && result.Models.Count > 0)
+                        {
+                            <optgroup label="@AgentRuntimeCatalog.For(tool).DisplayName">
+                                @foreach (var m in result.Models)
+                                {
+                                    <option value="@m.Id">@m.Id@(m.Note is null ? "" : $" - {m.Note}")</option>
+                                }
+                            </optgroup>
+                        }
+                    }
+                </select>
+                <span class="ob-field-hint" data-testid="skill-model-provenance">@ModelProvenance</span>
+            }
+        </div>
+
+        <div class="skill-field skill-field-wide">
+            <span class="skill-field-label">Resources</span>
+            <label class="studio-btn studio-btn-alt skill-resource-add">
+                Add file
+                <InputFile OnChange="OnResourceUploadAsync" multiple class="icon-picker-upload-input" />
+            </label>
+            @if (_resourceError is not null)
+            {
+                <p class="ob-probe-fail-text" data-testid="skill-resource-error">@_resourceError</p>
+            }
+            <ul class="skill-resource-list" data-testid="skill-resource-list">
+                @foreach (var r in _existing.Where(r => !_removedExisting.Contains(r.Id)))
+                {
+                    var id = r.Id;
+                    <li class="skill-resource-item">
+                        <span>@r.FileName</span><span class="studio-muted">@FormatBytes(r.SizeBytes)</span>
+                        <button type="button" class="icon-picker-clear" @onclick="() => _removedExisting.Add(id)">Remove</button>
+                    </li>
+                }
+                @foreach (var p in _pending.Where(p => !_iconResourceIds.Contains(p.Id)))
+                {
+                    var pid = p.Id;
+                    <li class="skill-resource-item">
+                        <span>@p.FileName</span><span class="studio-muted">@FormatBytes(p.SizeBytes) · new</span>
+                        <button type="button" class="icon-picker-clear" @onclick="() => RemovePending(pid)">Remove</button>
+                    </li>
+                }
+            </ul>
+        </div>
+    </div>
+
+    <div class="skill-form-actions">
+        <button class="studio-btn" @onclick="SaveAsync" disabled="@_saving" data-testid="skill-save">
+            @(_saving ? "Saving…" : IsEdit ? "Save changes" : "Create skill")
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private bool IsEdit => !string.IsNullOrWhiteSpace(Id);
+
+    private string _name = string.Empty;
+    private string _displayName = string.Empty;
+    private string _shortDescription = string.Empty;
+    private string _description = string.Empty;
+    private string _allowedToolsText = string.Empty;
+    private string _brandColor = "#7C4DFF";
+    private string _defaultPrompt = string.Empty;
+    private string _content = string.Empty;
+    private SkillIcon _iconSmall = SkillIcon.None;
+    private SkillIcon _iconLarge = SkillIcon.None;
+    private readonly List<AgentTool> _targets = [];
+    private string? _pinnedModel;
+
+    private IReadOnlyList<AgentTool> _configuredRuntimes = [];
+    private readonly Dictionary<AgentTool, ModelListResult> _modelsByTool = [];
+
+    private readonly List<PendingResourceUpload> _pending = [];
+    private List<FrameworkResource> _existing = [];
+    private readonly HashSet<string> _removedExisting = [];
+    // Pending uploads that back an icon (so they are not also listed as generic resources).
+    private HashSet<string> _iconResourceIds => new(
+        new[] { _iconSmall.ResourceId, _iconLarge.ResourceId }.Where(x => x is not null)!);
+
+    private IReadOnlyList<SkillValidationError> _errors = [];
+    private string? _saveError;
+    private string? _resourceError;
+    private bool _saving;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _configuredRuntimes = AgentRuntimeSelection.Read(Config);
+
+        if (IsEdit && Store.Get(Id!) is { } artifact)
+        {
+            var skill = SkillPayload.From(artifact);
+            _name = skill.Name;
+            _displayName = skill.DisplayName;
+            _shortDescription = skill.ShortDescription;
+            _description = skill.Description;
+            _allowedToolsText = string.Join(", ", skill.AllowedTools);
+            _brandColor = string.IsNullOrWhiteSpace(skill.BrandColor) ? "#7C4DFF" : skill.BrandColor;
+            _defaultPrompt = skill.DefaultPrompt;
+            _content = skill.Content;
+            _iconSmall = skill.IconSmall;
+            _iconLarge = skill.IconLarge;
+            _targets.AddRange(skill.Targets);
+            _pinnedModel = skill.PinnedModel;
+            _existing = Store.ListResources(artifact.Id).ToList();
+        }
+
+        await ResolveModelsAsync();
+    }
+
+    private string ColorValue =>
+        SkillValidation.IsHexColor(_brandColor) && _brandColor.Length == 7 ? _brandColor : "#7C4DFF";
+
+    private void OnColorChanged(ChangeEventArgs e) => _brandColor = e.Value?.ToString() ?? _brandColor;
+
+    private async Task OnSmallIconChanged(SkillIcon icon) { _iconSmall = icon; await Task.CompletedTask; }
+
+    private async Task OnLargeIconChanged(SkillIcon icon) { _iconLarge = icon; await Task.CompletedTask; }
+
+    private void RegisterUpload(PendingResourceUpload upload) => _pending.Add(upload);
+
+    private void RemovePending(string id) => _pending.RemoveAll(p => p.Id == id);
+
+    private async Task ToggleTarget(AgentTool tool, bool on)
+    {
+        if (on && !_targets.Contains(tool))
+        {
+            _targets.Add(tool);
+        }
+        else if (!on)
+        {
+            _targets.Remove(tool);
+            // Drop a pinned model that belonged only to a now-deselected runtime.
+            if (_pinnedModel is not null && !ModelBelongsToSelectedTarget(_pinnedModel))
+            {
+                _pinnedModel = null;
+            }
+        }
+
+        await ResolveModelsAsync();
+    }
+
+    private bool ModelBelongsToSelectedTarget(string model) =>
+        _targets.Any(t => _modelsByTool.TryGetValue(t, out var r) && r.Models.Any(m => m.Id == model));
+
+    private void OnModelChanged(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        _pinnedModel = string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private async Task ResolveModelsAsync()
+    {
+        foreach (var tool in _targets)
+        {
+            if (!_modelsByTool.ContainsKey(tool))
+            {
+                _modelsByTool[tool] = await ModelResolver.ResolveAsync(tool);
+            }
+        }
+    }
+
+    private string ModelProvenance
+    {
+        get
+        {
+            var parts = _targets
+                .Where(t => _modelsByTool.ContainsKey(t))
+                .Select(t => $"{AgentRuntimeCatalog.For(t).DisplayName}: {_modelsByTool[t].Provenance}");
+            return string.Join("  ·  ", parts);
+        }
+    }
+
+    private async Task OnResourceUploadAsync(InputFileChangeEventArgs e)
+    {
+        _resourceError = null;
+        foreach (var file in e.GetMultipleFiles(maximumFileCount: 20))
+        {
+            if (file.Size > FrameworkArtifactLimits.MaxResourceBytes)
+            {
+                _resourceError = $"'{file.Name}' is over the {FrameworkArtifactLimits.MaxResourceLabel} limit.";
+                continue;
+            }
+
+            using var stream = file.OpenReadStream(FrameworkArtifactLimits.MaxResourceBytes);
+            using var memory = new MemoryStream();
+            await stream.CopyToAsync(memory);
+            _pending.Add(new PendingResourceUpload(
+                Guid.NewGuid().ToString("N"), file.Name, file.ContentType, memory.ToArray()));
+        }
+    }
+
+    private SkillDefinition BuildDefinition() => new()
+    {
+        Name = _name.Trim(),
+        DisplayName = _displayName.Trim(),
+        ShortDescription = _shortDescription.Trim(),
+        Description = _description.Trim(),
+        AllowedTools = _allowedToolsText
+            .Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        BrandColor = _brandColor.Trim(),
+        DefaultPrompt = _defaultPrompt,
+        Content = _content,
+        IconSmall = _iconSmall,
+        IconLarge = _iconLarge,
+        Targets = _targets.ToList(),
+        PinnedModel = _pinnedModel,
+    };
+
+    private async Task SaveAsync()
+    {
+        _saveError = null;
+        var definition = BuildDefinition();
+        _errors = SkillValidation.Validate(definition);
+
+        // Uniqueness (store concern): reject a name already used by a different skill.
+        var clash = Store.GetByName(FrameworkArtifactKind.Skill, definition.Name);
+        if (clash is not null && clash.Id != Id)
+        {
+            _errors = [.. _errors, new SkillValidationError("name", $"A skill named '{definition.Name}' already exists.")];
+        }
+
+        if (_errors.Count > 0)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var payload = SkillPayload.Serialize(definition);
+            string artifactId;
+
+            if (IsEdit && Store.Get(Id!) is { } existing)
+            {
+                artifactId = existing.Id;
+                Store.Update(existing with { Name = definition.Name, PayloadJson = payload, UpdatedUtc = now });
+            }
+            else
+            {
+                artifactId = Guid.NewGuid().ToString("N");
+                Store.Add(new FrameworkArtifact(
+                    artifactId, FrameworkArtifactKind.Skill, definition.Name, payload, now, now));
+            }
+
+            foreach (var id in _removedExisting)
+            {
+                Store.RemoveResource(id);
+            }
+
+            foreach (var pending in _pending)
+            {
+                Store.AddResource(new FrameworkResource(
+                    pending.Id, artifactId, pending.FileName, pending.ContentType, pending.Content, now));
+            }
+
+            Nav.NavigateTo($"/settings/framework/skills/view/{artifactId}");
+        }
+        catch (DuplicateArtifactNameException ex)
+        {
+            _saveError = ex.Message;
+        }
+        catch (ResourceTooLargeException ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private RenderFragment? FieldError(string field)
+    {
+        var error = _errors.FirstOrDefault(e => e.Field == field);
+        if (error is null)
+        {
+            return null;
+        }
+
+        return builder =>
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "skill-field-error");
+            builder.AddAttribute(2, "data-testid", $"skill-error-{field}");
+            builder.AddContent(3, error.Message);
+            builder.CloseElement();
+        };
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        return $"{bytes / (1024.0 * 1024):0.#} MB";
+    }
+}

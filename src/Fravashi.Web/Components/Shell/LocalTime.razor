@@ -1,0 +1,55 @@
+@namespace Fravashi.Web.Components.Shell
+@using System.Globalization
+@using Fravashi.Web.Services
+@implements IDisposable
+@inject IServiceProvider Services
+
+@* Backlogs 234 and 246: an instant shown in the PERSON's local time. The browser's zone is read once per circuit
+   (PersonTimeZone, set by PersonTimeZoneReader) and PersonTime is the one formatter; until the zone is known the time
+   is shown in UTC and says so. The markup also carries the instant as ISO 8601, so what was meant is never lost. *@
+<time datetime="@IsoOf(At)" data-zone="@(_zone?.Zone is null ? "utc" : "person")" data-testid="@TestId">@PersonTime.Format(At, _zone?.Zone, Now(), Style)</time>
+
+@code {
+    private PersonTimeZone? _zone;
+    private TimeProvider _clock = TimeProvider.System;
+
+    /// <summary>The instant to show.</summary>
+    [Parameter, EditorRequired]
+    public DateTimeOffset At { get; set; }
+
+    /// <summary>How to spell it: a clock time with the date on another day by default.</summary>
+    [Parameter]
+    public LocalTimeStyle Style { get; set; } = LocalTimeStyle.Clock;
+
+    /// <summary>An optional test id for the element.</summary>
+    [Parameter]
+    public string? TestId { get; set; }
+
+    /// <summary>The instant as ISO 8601 in UTC, to the second: what the element's <c>datetime</c> carries.</summary>
+    public static string IsoOf(DateTimeOffset at) =>
+        at.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+
+    protected override void OnInitialized()
+    {
+        // Looked up rather than injected, so a host that registers no zone (an older test, a static page) renders
+        // labelled UTC instead of failing.
+        _zone = Services.GetService(typeof(PersonTimeZone)) as PersonTimeZone;
+        _clock = Services.GetService(typeof(TimeProvider)) as TimeProvider ?? TimeProvider.System;
+        if (_zone is not null)
+        {
+            _zone.Changed += OnZoneChanged;
+        }
+    }
+
+    private DateTimeOffset Now() => _clock.GetUtcNow();
+
+    private void OnZoneChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        if (_zone is not null)
+        {
+            _zone.Changed -= OnZoneChanged;
+        }
+    }
+}

@@ -1,0 +1,24 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+
+@* Dispatches the Plugins CRUD routes under Settings › Framework › Plugins. *@
+
+@switch (Action?.ToLowerInvariant())
+{
+    case "new":
+        <PluginForm />
+        break;
+    case "edit":
+        <PluginForm Id="@Id" />
+        break;
+    case "view":
+        <PluginView Id="@Id" />
+        break;
+    default:
+        <PluginList />
+        break;
+}
+
+@code {
+    [Parameter] public string? Action { get; set; }
+    [Parameter] public string? Id { get; set; }
+}

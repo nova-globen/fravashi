@@ -1,0 +1,5 @@
+ssh: connect to host 2001:db8::1 port 22: Network is unreachable
+fatal: Could not read from remote repository.
+
+Please make sure you have the correct access rights
+and the repository exists.

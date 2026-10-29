@@ -1,0 +1,1046 @@
+@page "/wiki"
+@page "/wiki/{Number:int}"
+@using Microsoft.JSInterop
+@using Fravashi.Application.Mockups
+@using Fravashi.Application.Prototypes
+@using Fravashi.Application.Wiki
+@using Fravashi.Domain.Wiki
+@using Fravashi.Infrastructure.Rendering
+@using Fravashi.Infrastructure.Wiki
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Web.Components.Sessions
+@using Fravashi.Web.Components.Wiki
+@using Microsoft.Extensions.DependencyInjection
+@inject IWikiLibraries Wikis
+@inject WikiReferenceResolver References
+@inject WikiMarkdownRenderer Renderer
+@inject NavigationManager Nav
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+@inject Fravashi.Application.Projects.IProjectStore ProjectStore
+@inject WikiPublisher Publisher
+@inject IJSRuntime JS
+@inject IServiceProvider Services
+@implements IAsyncDisposable
+
+<PageTitle>@(ProductName.Short) · Wiki</PageTitle>
+
+@* Backlog 39: the wiki is the document store for everything that is not code. One page browses, reads and
+   edits, because they are three views of one item and splitting them across three components would mean
+   three places that each decide what an item is. Every reference in a rendered body is a real link into the
+   studio surface that shows the thing, and one that points at nothing is drawn as broken rather than as
+   ordinary text, because silence there reads as "the author meant nothing by it". *@
+<div class="studio-workitems wiki-page">
+    <PageBar Title="@BarTitle" />
+
+    @if (!CurrentProject.IsSetUp())
+    {
+        <FolderNotSetUp Surface="wiki" />
+    }
+    else
+    {
+    <PageSplit SidebarLabel="Wiki" SidebarTestId="wiki-sidebar" BodyTestId="wiki-body" SidebarCssClass="code-sidebar wiki-sidebar"
+               BodyCssClass="wiki-body-pane">
+        <Sidebar>
+            <button type="button" class="session-new" data-testid="new-wiki-item" @onclick="BeginCreate">
+                <span class="session-new-mark" aria-hidden="true">+</span>
+                <span>New document</span>
+            </button>
+            @* Backlog 197: a design built from nothing. It is created at once with one empty screen and opened in the
+               mockup editor, because the document form has no tree to offer; its title is renamed with Edit. *@
+            <button type="button" class="session-new" data-testid="new-design" @onclick="NewDesignAsync">
+                <span class="session-new-mark" aria-hidden="true">+</span>
+                <span>New design</span>
+            </button>
+            @* Backlog 52: a design from a drawing. The drawing goes to an agent in a conversation, which writes the tree
+               and saves the design; the panel in the body takes the image and says so when the runtime cannot see. *@
+            <button type="button" class="session-new" data-testid="new-design-from-drawing" @onclick="BeginDrawing">
+                <span class="session-new-mark" aria-hidden="true">+</span>
+                <span>New design from a drawing</span>
+            </button>
+
+            <PageSidebarSection Title="Find" TestId="wiki-find-section">
+                <input class="studio-input" data-testid="wiki-search" placeholder="Title or text contains"
+                       value="@_search" @onchange="OnSearch" />
+
+                <select class="studio-input wiki-type-filter" data-testid="wiki-type-filter" @onchange="OnType">
+                    <option value="">Every type</option>
+                    @foreach (var type in Types)
+                    {
+                        <option value="@WikiNames.ToName(type)" selected="@(_type == type)">@Label(type)</option>
+                    }
+                </select>
+            </PageSidebarSection>
+
+            @if (Publisher.CanPublishFor(CurrentProject.Require()) && _items.Count > 0)
+            {
+                @* Backlog 49: a project's whole wiki sent in one act, parents first so the site gets the same tree.
+                   Explicit, like every write to a provider, and each document still goes through the one-document
+                   publish, so a page edited on the site is still never overwritten by it. *@
+                <PageSidebarSection Title="@Publisher.Provider" TestId="wiki-publish-all-section">
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="wiki-publish-all"
+                            disabled="@_publishingAll" @onclick="PublishAllAsync">
+                        @(_publishingAll ? $"Publishing {_publishDone} of {_publishTotal} ..." : "Publish everything")
+                    </button>
+                    @if (_publishAll is { } all)
+                    {
+                        <div class="studio-muted" data-testid="wiki-publish-all-said">
+                            @all.Created new, @all.Updated updated, @all.Unchanged unchanged, @all.Refused.Count not published.
+                        </div>
+                        @if (all.Refused.Count > 0)
+                        {
+                            <ul class="work-item-list" data-testid="wiki-publish-all-refused">
+                                @foreach (var why in all.Refused)
+                                {
+                                    <li>@why</li>
+                                }
+                            </ul>
+                        }
+                    }
+                </PageSidebarSection>
+            }
+
+            <PageSidebarSection Title="Documents" TestId="wiki-list-section">
+                @if (_items.Count == 0)
+                {
+                    <div class="page-sidebar-empty" data-testid="wiki-empty">
+                        Nothing here yet. The New document button is above.
+                    </div>
+                }
+                else
+                {
+                    @* Work item #365: the documents grouped by kind, each group collapsible with its count and its most
+                       recently changed document first; backlog 49's folder tree is kept in the breadcrumb over an open
+                       document. Groups start closed except the open document's, so the list reads as a short index of
+                       kinds; a search or a type filter opens every group, because the matches are what was asked for. *@
+                    @foreach (var group in Groups)
+                    {
+                        var open = GroupOpen(group.Type);
+                        var name = WikiNames.ToName(group.Type);
+                        <div class="wiki-group" data-testid="wiki-group" data-type="@name">
+                            <button type="button" class="wiki-group-head" data-testid="wiki-group-toggle"
+                                    aria-expanded="@(open ? "true" : "false")" @onclick="@(() => ToggleGroup(group.Type))">
+                                <svg class="page-sidebar-section-chevron @(open ? "expanded" : string.Empty)" viewBox="0 0 16 16" fill="none"
+                                     stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="m6 4 4.5 4L6 12" />
+                                </svg>
+                                <span class="wiki-group-name">@GroupLabel(group.Type)</span>
+                                <span class="wiki-group-count" data-testid="wiki-group-count">@group.Documents.Count</span>
+                            </button>
+                            @if (open)
+                            {
+                                @foreach (var item in group.Documents)
+                                {
+                                    <button type="button" class="wiki-entry @(_item?.Id == item.Id ? "selected" : string.Empty)"
+                                            data-testid="wiki-entry" title="@item.Title" @onclick="@(() => Open(item))">
+                                        <span class="wiki-entry-title">@item.Title</span>
+                                        <span class="wiki-entry-number">@("@" + item.Number)</span>
+                                    </button>
+                                }
+                            }
+                        </div>
+                    }
+                }
+            </PageSidebarSection>
+        </Sidebar>
+
+        <Body>
+            @* Work item #365: a reading column and, beside it, the same reference preview the conversation uses, docked.
+               With nothing previewed the column helps find the way round the open document instead: its headings and
+               what links to it. The reading column scrolls on its own, so a preview never moves the document. *@
+            <div class="wiki-reader @(HasAside ? "has-aside" : string.Empty)" data-testid="wiki-reader" @ref="_reader">
+            <div class="wiki-reader-main" data-testid="wiki-reader-main">
+            @if (_error is { Length: > 0 } error)
+            {
+                <div class="session-error" data-testid="wiki-error">
+                    <span class="session-error-mark" aria-hidden="true">!</span>
+                    <span class="session-error-text">@error</span>
+                </div>
+            }
+
+            @if (_drawing)
+            {
+                <DesignFromDrawingPanel OnCancel="() => _drawing = false" />
+            }
+            else if (_draft is { } draft)
+            {
+                <div class="wiki-editor" data-testid="wiki-editor">
+                    <label class="work-item-field">
+                        <span class="work-item-field-label">Title</span>
+                        <input class="studio-input" data-testid="wiki-title" value="@draft.Title"
+                               @oninput="e => draft.Title = e.Value?.ToString() ?? string.Empty" />
+                    </label>
+
+                    <label class="work-item-field">
+                        <span class="work-item-field-label">Type</span>
+                        <select class="studio-input" data-testid="wiki-type"
+                                @onchange="e => draft.Type = ParseType(e.Value, draft.Type)">
+                            @foreach (var type in Types)
+                            {
+                                <option value="@WikiNames.ToName(type)" selected="@(type == draft.Type)">
+                                    @Label(type)
+                                </option>
+                            }
+                        </select>
+                    </label>
+
+                    <label class="work-item-field">
+                        <span class="work-item-field-label">Sits under</span>
+                        <select class="studio-input" data-testid="wiki-parent"
+                                @onchange="e => draft.ParentId = string.IsNullOrEmpty(e.Value?.ToString()) ? null : e.Value!.ToString()">
+                            <option value="" selected="@(draft.ParentId is null)">Nothing (top level)</option>
+                            @foreach (var candidate in ParentCandidates(draft.Existing))
+                            {
+                                <option value="@candidate.Id" selected="@(draft.ParentId == candidate.Id)">
+                                    @("@" + candidate.Number) @candidate.Title
+                                </option>
+                            }
+                        </select>
+                    </label>
+
+                    <label class="work-item-field">
+                        <span class="work-item-field-label">Body</span>
+                        <textarea class="studio-input wiki-body-input" data-testid="wiki-body-input" rows="18"
+                                  @oninput="e => draft.Body = e.Value?.ToString() ?? string.Empty">@draft.Body</textarea>
+                        <span class="work-item-field-label">
+                            Reference a work item with #12, a pull request with !34, another document with @@56.
+                        </span>
+                    </label>
+
+                    <div class="work-item-form-actions">
+                        <button type="button" class="studio-btn" data-testid="wiki-save" @onclick="SaveAsync">
+                            @(draft.Existing is null ? "Create" : "Save")
+                        </button>
+                        <button type="button" class="studio-btn studio-btn-alt" data-testid="wiki-cancel"
+                                @onclick="CancelEdit">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            }
+            else if (_item is { } item)
+            {
+                <article class="wiki-article" data-testid="wiki-article">
+                    @if (Ancestors(item) is { Count: > 0 } ancestors)
+                    {
+                        <nav class="wiki-breadcrumb" data-testid="wiki-breadcrumb" aria-label="Where this document sits">
+                            @foreach (var ancestor in ancestors)
+                            {
+                                <button type="button" class="studio-link-btn" @onclick="@(() => Open(ancestor))">@ancestor.Title</button>
+                                <span class="wiki-breadcrumb-sep" aria-hidden="true">/</span>
+                            }
+                        </nav>
+                    }
+                    <div class="wiki-article-head">
+                        <div class="wiki-article-heading">
+                            <span class="work-item-chip" data-testid="wiki-article-type">@Label(item.Type)</span>
+                            <span class="wiki-article-title">@item.Title</span>
+                            <span class="wiki-article-number">@("@" + item.Number)</span>
+                        </div>
+                        <div class="wiki-article-actions">
+                            @if (_design?.Block is not null)
+                            {
+                                @* Backlog 196: the mockup editor, for a design with exactly one block to edit. *@
+                                <a class="studio-btn" data-testid="wiki-design-edit" href="@($"/wiki/{item.Number}/design")">
+                                    Open in editor
+                                </a>
+                            }
+                            <button type="button" class="studio-btn" data-testid="wiki-edit" @onclick="BeginEdit">
+                                Edit
+                            </button>
+                        </div>
+                    </div>
+
+                    @* Backlog 193: a design is saved however broken its tree is, so what is wrong is SHOWN here, every
+                       error with its JSON path, rather than refused at save or left for the editor to discover. With
+                       exactly one block the preview shows them in the block's place instead (#194), so they are not
+                       listed twice; this section is for a body with no block or several, where there is no place. *@
+                    @if (_design is { Errors.Count: > 0, Block: null } broken)
+                    {
+                        <section class="work-item-section design-mockup-errors" data-testid="mockup-errors">
+                            <h3 class="work-item-section-title">
+                                The mockup has @broken.Errors.Count @(broken.Errors.Count == 1 ? "error" : "errors")
+                            </h3>
+                            <ul class="work-item-list">
+                                @foreach (var problem in broken.Errors)
+                                {
+                                    <li data-testid="mockup-error">
+                                        <code class="design-mockup-path">@problem.Path</code>
+                                        <span>@problem.Message</span>
+                                    </li>
+                                }
+                            </ul>
+                        </section>
+                    }
+
+                    @* Backlog 211: a prototype names its design, pinned, and lists its overlay in words; nothing
+                       renders as HTML yet (that is #212). A broken document shows every error, like a design's. *@
+                    @if (_prototype is { Document: null } brokenPrototype)
+                    {
+                        <section class="work-item-section design-mockup-errors" data-testid="prototype-errors">
+                            <h3 class="work-item-section-title">
+                                The prototype has @brokenPrototype.Errors.Count @(brokenPrototype.Errors.Count == 1 ? "error" : "errors")
+                            </h3>
+                            <ul class="work-item-list">
+                                @foreach (var problem in brokenPrototype.Errors)
+                                {
+                                    <li data-testid="prototype-error">
+                                        <code class="design-mockup-path">@problem.Path</code>
+                                        <span>@problem.Message</span>
+                                    </li>
+                                }
+                            </ul>
+                        </section>
+                    }
+                    else if (_prototype?.Document is { } prototypeDocument)
+                    {
+                        <section class="work-item-section" data-testid="prototype-section">
+                            <h3 class="work-item-section-title">Design</h3>
+                            @if (_prototypeDesign is { } design)
+                            {
+                                <div data-testid="prototype-design-link">
+                                    <button type="button" class="studio-link-btn" @onclick="@(() => Open(design))">
+                                        @("@" + design.Number) @design.Title
+                                    </button>
+                                    <span data-testid="prototype-design-version">
+                                        Pinned at version @prototypeDocument.Design.Version.
+                                    </span>
+                                </div>
+                                @if (design.Version > prototypeDocument.Design.Version)
+                                {
+                                    <div class="work-item-approved-design-changed" data-testid="prototype-design-changed">
+                                        The design has changed since (now at version @design.Version). Regenerate renders the
+                                        page from it and keeps every direct edit; any that no longer find their place are
+                                        listed for you to drop or re-anchor.
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                <div class="work-item-empty" data-testid="prototype-design-missing">
+                                    The design @("@" + prototypeDocument.Design.Number) this was generated from no longer exists.
+                                </div>
+                            }
+
+                            @* Backlog 213: the page itself, from the design at the pinned version, in a sandboxed frame.
+                               Backlog 214: and its Edit mode, saved against this item's version.
+                               Backlog 216: and Regenerate, from the design as it is now (the banner's own lookup). *@
+                            <h3 class="work-item-section-title">Prototype</h3>
+                            <Fravashi.Web.Components.Prototypes.PrototypeViewer
+                                Design="@_prototypeTree" Problem="@_prototypeTreeProblem"
+                                Overlay="@prototypeDocument.Overlay" Item="@item" Document="@prototypeDocument"
+                                Latest="@_prototypeDesign" OnReload="LoadAsync" />
+
+                            <h3 class="work-item-section-title">Overlay</h3>
+                            @if (prototypeDocument.Overlay.Count == 0)
+                            {
+                                <div class="work-item-empty" data-testid="prototype-overlay-empty">
+                                    No direct edits yet.
+                                </div>
+                            }
+                            else
+                            {
+                                <ul class="work-item-list" data-testid="prototype-overlay-list">
+                                    @foreach (var operation in prototypeDocument.Overlay)
+                                    {
+                                        <li data-testid="prototype-overlay-item">@PrototypeOverlayDescription.Describe(operation)</li>
+                                    }
+                                </ul>
+                            }
+                        </section>
+                    }
+
+                    @if (item.Body.Length == 0)
+                    {
+                        <div class="work-item-empty" data-testid="wiki-article-empty">
+                            This document has no body yet.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="wiki-article-body markdown-body" data-testid="wiki-article-body">
+                            @((MarkupString)_rendered)
+                            @if (_design?.Block is { } block)
+                            {
+                                @* The block's place in the prose holds the preview (#194): the tree drawn, or every
+                                   error when the reader refused it. The tree itself stays one click away, as stored. *@
+                                <figure class="design-mockup" data-testid="mockup-figure">
+                                    <figcaption class="design-mockup-caption">
+                                        Mockup: @(_design.Tree?.Document?.Title ?? item.Title)
+                                    </figcaption>
+                                    <MockupPreview Document="_design.Tree?.Document" Errors="_design.Errors" />
+                                    <details data-testid="mockup-json">
+                                        <summary>The tree as JSON</summary>
+                                        <pre><code>@block.Json</code></pre>
+                                    </details>
+                                </figure>
+                                @((MarkupString)_renderedAfter)
+                            }
+                        </div>
+                    }
+
+                    @if (item.Links.Count > 0)
+                    {
+                        <section class="work-item-section">
+                            <h3 class="work-item-section-title">Links</h3>
+                            <ul class="work-item-list">
+                                @foreach (var link in item.Links)
+                                {
+                                    <li data-testid="wiki-link">
+                                        @WikiNames.ToName(link.Kind): @(link.Label ?? link.Target)
+                                    </li>
+                                }
+                            </ul>
+                        </section>
+                    }
+
+                    <WikiSummaryPanel Item="item" />
+
+                    <WikiPublicationPanel Item="item" OnDocumentChanged="LoadAsync" />
+
+                </article>
+            }
+            else if (Number is not null)
+            {
+                <div class="page-body-empty" data-testid="wiki-missing">
+                    There is no document numbered @Number.
+                </div>
+            }
+            else
+            {
+                <div class="wiki-recent" data-testid="wiki-nothing-open">
+                    @if (Recent.Count == 0)
+                    {
+                        <div class="page-body-empty">Nothing here yet. Start a new document from the left.</div>
+                    }
+                    else
+                    {
+                        <h2 class="wiki-recent-title">Recently changed</h2>
+                        <ul class="wiki-recent-list">
+                            @foreach (var recent in Recent)
+                            {
+                                <li>
+                                    <button type="button" class="wiki-recent-entry" data-testid="wiki-recent" @onclick="@(() => Open(recent))">
+                                        <span class="wiki-recent-name">@recent.Title</span>
+                                        <span class="wiki-recent-facts">@Label(recent.Type) @("@" + recent.Number), changed @Changed(recent.UpdatedUtc)</span>
+                                    </button>
+                                </li>
+                            }
+                        </ul>
+                        <div class="wiki-recent-hint">Or pick any document from the list on the left, grouped by kind.</div>
+                    }
+                </div>
+            }
+            </div>
+
+            @if (HasAside)
+            {
+                <div class="wiki-aside" data-testid="wiki-aside">
+                    @if (_previews.IsOpen)
+                    {
+                        <ReferencePreviewPanel State="_previews" Docked="true" />
+                    }
+                    else if (_item is not null)
+                    {
+                        <nav class="wiki-aside-nav" aria-label="Find your way round this document">
+                            <section class="wiki-aside-section" data-testid="wiki-outline">
+                                <h3 class="wiki-aside-title">On this page</h3>
+                                @if (_headings.Count == 0)
+                                {
+                                    <div class="wiki-aside-empty" data-testid="wiki-outline-empty">This document has no headings.</div>
+                                }
+                                else
+                                {
+                                    <ul class="wiki-aside-list">
+                                        @foreach (var heading in _headings)
+                                        {
+                                            <li class="wiki-outline-level-@Math.Min(heading.Level, 4)">
+                                                <button type="button" class="wiki-outline-entry" data-testid="wiki-outline-entry"
+                                                        title="@heading.Text" @onclick="@(() => ScrollToAsync(heading.Id))">@heading.Text</button>
+                                            </li>
+                                        }
+                                    </ul>
+                                }
+                            </section>
+
+                            @* The other direction, which nobody maintains by hand: what points AT this document. Each entry
+                               previews here on a plain click, like a reference in the text. *@
+                            <section class="wiki-aside-section" data-testid="wiki-linked-from">
+                                <h3 class="wiki-aside-title">Linked from</h3>
+                                @if (_backlinks.Count == 0 && _linkingItems.Count == 0)
+                                {
+                                    <div class="wiki-aside-empty" data-testid="wiki-no-backlinks">
+                                        No other document or work item points at this one.
+                                    </div>
+                                }
+                                else
+                                {
+                                    <ul class="wiki-aside-list">
+                                        @foreach (var back in _backlinks)
+                                        {
+                                            <li>
+                                                <a class="wiki-ref wiki-aside-link" data-testid="wiki-backlink" data-ref="@("@" + back.Number)"
+                                                   href="@($"/wiki/{back.Number}")" title="@back.Title"><span class="wiki-aside-ref">@("@" + back.Number)</span> @back.Title</a>
+                                            </li>
+                                        }
+                                        @foreach (var linking in _linkingItems)
+                                        {
+                                            <li>
+                                                <a class="wiki-ref wiki-aside-link" data-testid="wiki-backlink-item" data-ref="@("#" + linking.Number)"
+                                                   href="@($"/workitems/{linking.Number}")" title="@linking.Title"><span class="wiki-aside-ref">@("#" + linking.Number)</span> @linking.Title</a>
+                                            </li>
+                                        }
+                                    </ul>
+                                }
+                            </section>
+                        </nav>
+                    }
+                </div>
+            }
+            </div>
+        </Body>
+    </PageSplit>
+    }
+</div>
+
+@code {
+    /// <summary>
+    /// Work item #365: the reading column hands a plain click on a reference or a file path to the preview beside it
+    /// (wikiPage.js), and a different document starts at its top. The sidebar no longer asks sections.js for sizes:
+    /// that gave Find a fixed share of the height, which left an empty band under it; Find and Publish are as tall as
+    /// what they hold and the document list takes the rest (studio.css, .wiki-sidebar).
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        try
+        {
+            if (firstRender)
+            {
+                _self = DotNetObjectReference.Create(this);
+                await JS.InvokeVoidAsync("fravashiWiki.attach", _reader, _self);
+            }
+
+            if (_scrollToTop)
+            {
+                _scrollToTop = false;
+                await JS.InvokeVoidAsync("fravashiWiki.top", _reader);
+            }
+        }
+        catch (JSException)
+        {
+            // Navigation help is cosmetic; a disconnected circuit must not fail the page.
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    /// <summary>A reference clicked in the document or the right-hand column, by its text ("#343"): previewed beside it.</summary>
+    [JSInvokable]
+    public Task OpenReference(string text)
+    {
+        if (SessionReferences.Parse(text) is not { } reference)
+        {
+            return Task.CompletedTask;
+        }
+
+        return InvokeAsync(() => _previews.Show(reference));
+    }
+
+    /// <summary>A file path clicked in the document: the start of the file previewed beside it.</summary>
+    [JSInvokable]
+    public Task OpenFile(string path)
+    {
+        if (WikiReading.ReadPath(path) is not { } clean)
+        {
+            return Task.CompletedTask;
+        }
+
+        return InvokeAsync(() => _previews.ShowFile(clean));
+    }
+
+    private async Task ScrollToAsync(string id)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiWiki.scrollTo", _reader, id);
+        }
+        catch (JSException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    protected override void OnInitialized() => _previews.Changed += OnPreviewChanged;
+
+    private void OnPreviewChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public async ValueTask DisposeAsync()
+    {
+        _previews.Changed -= OnPreviewChanged;
+        if (_self is not null)
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("fravashiWiki.detach", _reader);
+            }
+            catch (JSException)
+            {
+            }
+            catch (JSDisconnectedException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            _self.Dispose();
+        }
+    }
+
+    /// <summary>What the right-hand column previews (work item #365): the chat page's own state and panel.</summary>
+    private readonly ReferencePreviewState _previews = new();
+
+    private ElementReference _reader;
+    private DotNetObjectReference<WikiLibraryPage>? _self;
+    private bool _scrollToTop;
+    private int? _shownNumber;
+    private IReadOnlyList<WikiHeading> _headings = [];
+    private IReadOnlyList<WorkItem> _linkingItems = [];
+
+    /// <summary>How many recently changed documents the empty reading pane lists.</summary>
+    public const int RecentCount = 12;
+
+    private bool HasAside => _previews.IsOpen || (_item is not null && _draft is null && !_drawing);
+
+    private IReadOnlyList<WikiItem> Recent => WikiReading.Recent(_items, RecentCount);
+
+    private IReadOnlyList<WikiDocumentGroup> Groups => WikiReading.Group(_items);
+
+    /// <summary>A person's own choice per group, which wins over the default until the filter changes.</summary>
+    private readonly Dictionary<WikiItemType, bool> _groupChoice = [];
+
+    private bool GroupOpen(WikiItemType type) =>
+        _groupChoice.TryGetValue(type, out var chosen) ? chosen : Filtering || _item?.Type == type;
+
+    private void ToggleGroup(WikiItemType type) => _groupChoice[type] = !GroupOpen(type);
+
+    private static string GroupLabel(WikiItemType type) => Label(type);
+
+    private static string Changed(DateTimeOffset when)
+    {
+        var age = DateTimeOffset.UtcNow - when;
+        return age.TotalMinutes < 1 ? "just now"
+            : age.TotalHours < 1 ? $"{(int)age.TotalMinutes} min ago"
+            : age.TotalDays < 1 ? $"{(int)age.TotalHours} h ago"
+            : age.TotalDays < 30 ? $"{(int)age.TotalDays} d ago"
+            : when.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    // Backlog 121: the wiki of this window's project, asked for at each use so a rebinding is seen.
+    private IWikiLibrary Wiki => Wikis.For(CurrentProject.Require());
+
+    /// <summary>The document's number from the route, when one is open.</summary>
+    [Parameter]
+    public int? Number { get; set; }
+
+    private static readonly IReadOnlyList<WikiItemType> Types = [.. Enum.GetValues<WikiItemType>()];
+
+    private IReadOnlyList<WikiItem> _items = [];
+    private IReadOnlyList<WikiItem> _backlinks = [];
+    private WikiItem? _item;
+    private WikiDraft? _draft;
+    private string _rendered = string.Empty;
+    private DesignMockupRead? _design;
+    private PrototypeBodyRead? _prototype;
+    private WikiItem? _prototypeDesign;
+    private Fravashi.Application.Mockups.MockupDocument? _prototypeTree;
+    private string? _prototypeTreeProblem;
+    private string _renderedAfter = string.Empty;
+    private string _search = string.Empty;
+    private WikiItemType? _type;
+    private string? _error;
+
+    private bool _publishingAll;
+    private int _publishDone;
+    private int _publishTotal;
+    private WikiPublishAllReport? _publishAll;
+
+    private async Task PublishAllAsync()
+    {
+        _publishingAll = true;
+        _publishAll = null;
+        try
+        {
+            var everything = await Wiki.ListAsync(new WikiItemQuery { Limit = 1000 });
+            _publishAll = await Publisher.PublishAllAsync(everything, (done, total) =>
+            {
+                _publishDone = done;
+                _publishTotal = total;
+                _ = InvokeAsync(StateHasChanged);
+            });
+        }
+        finally
+        {
+            _publishingAll = false;
+        }
+
+        await LoadAsync();
+    }
+
+    private bool Filtering => _search.Length > 0 || _type is not null;
+
+    /// <summary>The documents above this one, top first, as far as they are in this project's list.</summary>
+    private List<WikiItem> Ancestors(WikiItem item)
+    {
+        var byId = _items.ToDictionary(i => i.Id, StringComparer.Ordinal);
+        var chain = new List<WikiItem>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (var at = item.ParentId; at is not null && seen.Add(at) && byId.TryGetValue(at, out var parent); at = parent.ParentId)
+        {
+            chain.Insert(0, parent);
+        }
+
+        return chain;
+    }
+
+    /// <summary>Where a document may be put: anywhere but under itself or its own descendants.</summary>
+    private IEnumerable<WikiItem> ParentCandidates(WikiItem? moving)
+    {
+        var excluded = new HashSet<string>(StringComparer.Ordinal);
+        if (moving is not null)
+        {
+            excluded.Add(moving.Id);
+            bool added;
+            do
+            {
+                added = false;
+                foreach (var item in _items.Where(i => i.ParentId is { } p && excluded.Contains(p) && !excluded.Contains(i.Id)))
+                {
+                    excluded.Add(item.Id);
+                    added = true;
+                }
+            }
+            while (added);
+        }
+
+        return _items.Where(i => !excluded.Contains(i.Id)).OrderBy(i => i.Number);
+    }
+
+    private string BarTitle => Fravashi.Application.Projects.ProjectTitle.With(_item is { } item ? item.Title : "Wiki", ProjectStore, CurrentProject.Id);
+
+    /// <summary>What the editor is editing. Mutable, because a half-typed document is not a valid item.</summary>
+    private sealed class WikiDraft
+    {
+        public WikiItem? Existing { get; init; }
+
+        public string Title { get; set; } = string.Empty;
+
+        public string Body { get; set; } = string.Empty;
+
+        public WikiItemType Type { get; set; } = WikiItemType.Draft;
+
+        public string? ParentId { get; set; }
+    }
+
+    /// <summary>
+    /// A type to filter by, by its stable name (<c>/wiki?type=plan</c>): where Home's Wiki card sends a person who
+    /// clicked one of its bars (work item #358).
+    /// </summary>
+    [SupplyParameterFromQuery(Name = "type")]
+    public string? TypeQuery { get; set; }
+
+    /// <summary>The query's type as last applied, so a person's own choice in the filter is not overwritten on every render.</summary>
+    private string? _appliedTypeQuery;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!string.Equals(TypeQuery, _appliedTypeQuery, StringComparison.Ordinal))
+        {
+            _appliedTypeQuery = TypeQuery;
+            if (Types.Where(t => string.Equals(WikiNames.ToName(t), TypeQuery, StringComparison.Ordinal))
+                    .Cast<WikiItemType?>().FirstOrDefault() is { } match)
+            {
+                _type = match;
+            }
+        }
+
+        if (Number != _shownNumber)
+        {
+            // A different document: the preview of something in the last one goes, and the new one starts at its top.
+            _shownNumber = Number;
+            _previews.Close();
+            _scrollToTop = true;
+        }
+
+        await LoadAsync();
+    }
+
+    private static string Label(WikiItemType type) => type switch
+    {
+        WikiItemType.Adr => "ADR",
+        _ => type.ToString(),
+    };
+
+    private async Task LoadAsync()
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        _items = await Wiki.ListAsync(new WikiItemQuery
+        {
+            Types = _type is { } type ? [type] : null,
+            Text = _search.Length == 0 ? null : _search,
+            Limit = 1000,
+        });
+
+        _item = Number is { } number ? await Wiki.GetByNumberAsync(number) : null;
+        if (_item is null)
+        {
+            _rendered = string.Empty;
+            _renderedAfter = string.Empty;
+            _design = null;
+            _prototype = null;
+            _prototypeDesign = null;
+            _prototypeTree = null;
+            _prototypeTreeProblem = null;
+            _backlinks = [];
+            _linkingItems = [];
+            _headings = [];
+            return;
+        }
+
+        // Resolved once for the whole body, then rendered synchronously: a renderer that queried per
+        // reference would stall the page on a document that cites fifty things.
+        var references = await References.ResolveAsync(CurrentProject.Require(), _item.Body);
+        _design = _item.Type == WikiItemType.Design ? DesignMockup.Read(_item.Body) : null;
+
+        // Backlog 211: a prototype names its design, pinned to a version, so the page can say "the design
+        // has changed since" without the reader doing I/O twice: one lookup here, for the banner's words.
+        _prototype = _item.Type == WikiItemType.Prototype ? await PrototypeBody.ReadAsync(_item.Body, Wiki) : null;
+        _prototypeDesign = _prototype?.Document is { } prototypeDocument
+            ? await Wiki.GetByNumberAsync(prototypeDocument.Design.Number)
+            : null;
+        (_prototypeTree, _prototypeTreeProblem) = await PinnedTreeAsync();
+
+        if (_design?.Block is { } block)
+        {
+            // The prose on either side of the block, rendered apart so the block's place can hold the placeholder.
+            // The block is a top-level fence, so cutting there splits no other markdown construct.
+            _rendered = Renderer.ToHtml(_item.Body[..block.Start], references);
+            _renderedAfter = Renderer.ToHtml(_item.Body[(block.Start + block.Length)..], references);
+        }
+        else
+        {
+            // None or several: the body renders as written, so every block's JSON is still on the page.
+            _rendered = Renderer.ToHtml(_item.Body, references);
+            _renderedAfter = string.Empty;
+        }
+
+        // Work item #365: file paths become previewable links, and the headings are what "On this page" lists.
+        _rendered = WikiReading.LinkFilePaths(_rendered);
+        _renderedAfter = WikiReading.LinkFilePaths(_renderedAfter);
+        _headings = [.. WikiReading.Headings(_rendered), .. WikiReading.Headings(_renderedAfter)];
+
+        _backlinks = await Wiki.BacklinksAsync(_item.Reference);
+        _linkingItems = await LinkingItemsAsync(_item.Number);
+    }
+
+    /// <summary>
+    /// The work items that name this document (work item #365): its plan reference or an @N in their text, one query
+    /// to the store (<see cref="WorkItemQuery.NamesWikiDocument"/>). None where the page has no tracker wired.
+    /// </summary>
+    private async Task<IReadOnlyList<WorkItem>> LinkingItemsAsync(int number)
+    {
+        if (Services.GetService<ITrackerResolver>() is not { } trackers)
+        {
+            return [];
+        }
+
+        var tracker = trackers.For(CurrentProject.Require());
+        var found = new List<WorkItem>();
+        string? cursor = null;
+        do
+        {
+            var page = await tracker.QueryAsync(new WorkItemQuery
+            {
+                NamesWikiDocument = number,
+                Limit = WorkItemQuery.MaxLimit,
+                Cursor = cursor,
+            });
+            found.AddRange(page.Items);
+            cursor = page.NextCursor;
+        }
+        while (cursor is not null);
+
+        return found;
+    }
+
+    /// <summary>
+    /// Backlog 213: the tree a prototype renders from is its design AT THE PINNED VERSION (the version is the
+    /// prototype's whole claim about what it was generated from; regenerating onto a newer one is #216's act, an explicit
+    /// button on the viewer), or
+    /// why there is none, in words. Read by <see cref="PrototypePinnedDesign"/>, the same reader the agent tools use.
+    /// </summary>
+    private async Task<(Fravashi.Application.Mockups.MockupDocument? Tree, string? Problem)> PinnedTreeAsync()
+    {
+        if (_prototype?.Document is not { } prototype)
+        {
+            return (null, null);
+        }
+
+        var pinned = await PrototypePinnedDesign.ReadAsync(Wiki, _prototypeDesign, prototype);
+        return (pinned.Tree, pinned.Problem);
+    }
+
+    private void Open(WikiItem item)
+    {
+        _draft = null;
+        _drawing = false;
+        Nav.NavigateTo($"/wiki/{item.Number}");
+    }
+
+    private async Task OnSearch(ChangeEventArgs e)
+    {
+        _search = e.Value?.ToString() ?? string.Empty;
+        _groupChoice.Clear();
+        await LoadAsync();
+    }
+
+    private async Task OnType(ChangeEventArgs e)
+    {
+        var name = e.Value?.ToString();
+        _type = string.IsNullOrEmpty(name) ? null : ParseType(name, WikiItemType.Draft);
+        _groupChoice.Clear();
+        await LoadAsync();
+    }
+
+    private void BeginCreate()
+    {
+        _error = null;
+        _drawing = false;
+        _draft = new WikiDraft();
+    }
+
+    /// <summary>True while the "New design from a drawing" panel holds the body (backlog 52).</summary>
+    private bool _drawing;
+
+    private void BeginDrawing()
+    {
+        _error = null;
+        _draft = null;
+        _drawing = true;
+    }
+
+    private async Task NewDesignAsync()
+    {
+        _error = null;
+        var created = await Wiki.CreateAsync(new NewWikiItem
+        {
+            Type = WikiItemType.Design,
+            Title = DesignMockup.NewTitle,
+            Body = DesignMockup.NewBody(),
+        });
+
+        if (!created.IsValid)
+        {
+            _error = string.Join(" ", created.Errors.Select(e => e.Message));
+            return;
+        }
+
+        Nav.NavigateTo($"/wiki/{created.Value.Number}/design");
+    }
+
+    private void BeginEdit()
+    {
+        _error = null;
+        _draft = _item is { } item
+            ? new WikiDraft { Existing = item, Title = item.Title, Body = item.Body, Type = item.Type, ParentId = item.ParentId }
+            : new WikiDraft();
+    }
+
+    private void CancelEdit()
+    {
+        _draft = null;
+        _error = null;
+    }
+
+    /// <summary>Saves through the port and shows the model's own refusal rather than one invented here.</summary>
+    private async Task SaveAsync()
+    {
+        if (_draft is not { } draft)
+        {
+            return;
+        }
+
+        _error = null;
+
+        if (draft.Existing is { } existing)
+        {
+            var updated = await Wiki.UpdateAsync(
+                existing.Id,
+                new WikiItemEdit
+                {
+                    Title = draft.Title,
+                    Body = draft.Body,
+                    Type = draft.Type,
+                    Parent = draft.ParentId == existing.ParentId ? null : new WikiParentChange(draft.ParentId),
+                },
+                existing.Version);
+
+            if (!updated.IsValid)
+            {
+                _error = string.Join(" ", updated.Errors.Select(e => e.Message));
+                await LoadAsync();
+                return;
+            }
+
+            _draft = null;
+            await LoadAsync();
+            return;
+        }
+
+        var created = await Wiki.CreateAsync(new NewWikiItem
+        {
+            Type = draft.Type,
+            Title = draft.Title,
+            Body = draft.Body,
+            ParentId = draft.ParentId,
+        });
+
+        if (!created.IsValid)
+        {
+            _error = string.Join(" ", created.Errors.Select(e => e.Message));
+            return;
+        }
+
+        _draft = null;
+        await LoadAsync();
+        Open(created.Value);
+    }
+
+    private static WikiItemType ParseType(object? value, WikiItemType current)
+    {
+        try
+        {
+            return WikiNames.Parse<WikiItemType>(value?.ToString());
+        }
+        catch (InvalidDataException)
+        {
+            // A value no type has means the browser sent something the page never offered; keep the choice
+            // that was already made rather than guessing a different one.
+            return current;
+        }
+    }
+}

@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Everything FravashiSetup.exe decides, as a cross-platform LIBRARY (backlog 296), so it is tested in
+    the Linux container and on the runner: the command line it accepts, the engine it runs and how, how the
+    token is handed over, how the engine's output becomes progress, and what an exit code means. The WinExe
+    beside it (src/Fravashi.WebSetup) is only the window and the process entry point, the same split as
+    fravashi.exe over Fravashi.Launcher.
+  -->
+  <PropertyGroup>
+    <RootNamespace>Fravashi.WebSetup</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fravashi.WebSetup.Tests" />
+  </ItemGroup>
+
+  <!-- The product's name is said in ONE file, Domain's ProductName, linked as source because this library takes no
+       project references (the same arrangement as the launcher's). -->
+  <ItemGroup>
+    <Compile Include="..\Fravashi.Domain\ProductName.cs" Link="ProductName.cs" />
+    <Compile Include="..\Fravashi.Domain\ServiceHost.cs" Link="ServiceHost.cs" />
+  </ItemGroup>
+
+  <!-- The engine is embedded from the ONE committed file, never copied, so the EXE always runs the engine that
+       sits beside it in git (EngineWorkspaceTests.The_embedded_engine_is_the_committed_file_byte_for_byte holds the resource equal to the file). -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\setup\webinstall\webinstall.ps1" LogicalName="Fravashi.WebSetup.webinstall.ps1" />
+  </ItemGroup>
+
+  <!-- The bridge release (docs/plans/rename-internal-names.md, phase 2): the former names an installed copy still carries
+       are read from ONE file, Domain's FormerNames, linked here as source and compiled internal (FORMER_NAMES_LINKED).
+       The cleanup release (phase 5) removes this link with the file. -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);FORMER_NAMES_LINKED</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Fravashi.Domain\FormerNames.cs" Link="FormerNames.cs" />
+  </ItemGroup>
+
+</Project>

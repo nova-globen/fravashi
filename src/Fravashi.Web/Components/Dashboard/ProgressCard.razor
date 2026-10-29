@@ -1,0 +1,304 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using System.Globalization
+@using Fravashi.Application.Projects
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.Projects
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Web.Components.Shared
+@inject IServiceProvider Services
+@inject ILogger<ProgressCard> Logger
+
+@* Work item #350: Home's Progress card (the owner's sketch, 7.png: "work items, in progress, blocked, etc." beside
+   "useful charts for the project progress"). Everything on it is counted from the project's own tracker, the same
+   port and the same paged query the board reads (WorkItemsPage.LoadAsync), so the card and the board can never
+   disagree about how many items there are. Two pictures, both plain SVG and CSS with no chart library (ADR 0012):
+   a ring of every item by status with the share that is done in its middle, and one bar per status. The figures
+   beside the ring are the questions the sketch asks: how many, how many open, how many in progress, how many in review, how many
+   blocked (an open item with the Blocked flag), how many done.
+
+   The project filter defaults to this window's project; "All projects" adds up every project's tracker. *@
+
+@* Item #373: a project's card, drawn only for a folder that is set up (Home leads with the "not set up" state). *@
+@if (CurrentProject.IsSetUp())
+{
+<section class="dash-panel progress-card" aria-label="Progress" data-testid="progress-card">
+    <div class="dash-panel-head">
+        <span>Progress</span>
+        <div class="dash-panel-tools">
+            <StudioDropdown TestId="progress-project" Class="dash-project-filter" Compact="true"
+                            Options="ProjectOptions" Value="@_scope" ValueChanged="ChooseScopeAsync"
+                            AriaLabel="Which project's work items to count" TitleText="Which project to count" />
+            @if (_counts is not null)
+            {
+                <span class="home-panel-count" data-testid="progress-total">@_counts.Total</span>
+            }
+        </div>
+    </div>
+
+    @if (_error is not null)
+    {
+        <p class="studio-muted insight-empty" role="alert" data-testid="progress-error">@_error</p>
+    }
+    else if (_counts is null)
+    {
+        <p class="studio-muted insight-empty">Counting the work items ...</p>
+    }
+    else if (_counts.Total == 0)
+    {
+        <p class="studio-muted insight-empty" data-testid="progress-empty">
+            No work items yet. File the first one on the <a href="/board">board</a>.
+        </p>
+    }
+    else
+    {
+        <div class="progress-body">
+            <svg class="progress-ring" viewBox="0 0 42 42" role="img" data-testid="progress-ring"
+                 aria-label="@RingLabel">
+                <circle class="progress-ring-track" cx="21" cy="21" r="15.9155" />
+                @foreach (var segment in Segments())
+                {
+                    <circle class="progress-ring-seg progress-tone-@Slug(segment.Status)" cx="21" cy="21" r="15.9155"
+                            stroke-dasharray="@segment.DashArray" stroke-dashoffset="@segment.DashOffset">
+                        <title>@Label(segment.Status): @segment.Count</title>
+                    </circle>
+                }
+                <text class="progress-ring-value" x="21" y="21">@DonePercent</text>
+                <text class="progress-ring-caption" x="21" y="27">done</text>
+            </svg>
+
+            <dl class="insight-figures progress-figures" data-testid="progress-figures">
+                <div class="insight-figure">
+                    <dt>Work items</dt>
+                    <dd><span class="insight-value" data-testid="progress-figure-total">@_counts.Total</span></dd>
+                </div>
+                <div class="insight-figure">
+                    <dt>Open</dt>
+                    <dd><span class="insight-value" data-testid="progress-figure-open">@_counts.Open</span></dd>
+                </div>
+                @* Work item #358: In progress and In review are two figures, as they are two bars below; one figure
+                   counting both while the bars told them apart read as a miscount. *@
+                <div class="insight-figure">
+                    <dt>In progress</dt>
+                    <dd><span class="insight-value" data-testid="progress-figure-in-progress">@_counts.Count(WorkItemStatus.InProgress)</span></dd>
+                </div>
+                <div class="insight-figure">
+                    <dt>In review</dt>
+                    <dd><span class="insight-value" data-testid="progress-figure-in-review">@_counts.Count(WorkItemStatus.InReview)</span></dd>
+                </div>
+                <div class="insight-figure">
+                    <dt>Blocked</dt>
+                    <dd>
+                        <span class="insight-value@(_counts.Blocked > 0 ? " progress-blocked" : string.Empty)"
+                              data-testid="progress-figure-blocked">@_counts.Blocked</span>
+                    </dd>
+                </div>
+                <div class="insight-figure">
+                    <dt>Done</dt>
+                    <dd><span class="insight-value" data-testid="progress-figure-done">@_counts.Count(WorkItemStatus.Done)</span></dd>
+                </div>
+            </dl>
+
+            <ul class="progress-bars" data-testid="progress-by-status" aria-label="Work items by status">
+                @foreach (var status in WorkItemStatuses.All)
+                {
+                    var count = _counts.Count(status);
+                    <li class="progress-bar-row" data-testid="progress-status-@Slug(status)" data-count="@count">
+                        <span class="progress-bar-label">
+                            <span class="progress-swatch progress-tone-@Slug(status)" aria-hidden="true"></span>
+                            @Label(status)
+                        </span>
+                        <span class="progress-bar-track" aria-hidden="true">
+                            <span class="progress-bar-fill progress-tone-@Slug(status)" style="width: @BarWidth(count)"></span>
+                        </span>
+                        <span class="progress-bar-count">@count</span>
+                    </li>
+                }
+            </ul>
+        </div>
+        <p class="dash-panel-link"><a href="/board">Open the board</a></p>
+    }
+</section>
+}
+
+@code {
+    private const string AllProjects = "all";
+
+    /// <summary>What was counted, by status, plus the blocked open items.</summary>
+    internal sealed record ProgressCounts(IReadOnlyDictionary<WorkItemStatus, int> ByStatus, int Blocked)
+    {
+        public int Count(WorkItemStatus status) => ByStatus.TryGetValue(status, out var n) ? n : 0;
+
+        public int Total => ByStatus.Values.Sum();
+
+        public int Open => ByStatus.Where(p => p.Key.IsOpen()).Sum(p => p.Value);
+
+        public static ProgressCounts Of(IEnumerable<WorkItem> items)
+        {
+            var list = items.ToList();
+            return new ProgressCounts(
+                list.GroupBy(i => i.Status).ToDictionary(g => g.Key, g => g.Count()),
+                list.Count(i => i.Status.IsOpen() && i.Flags.Blocked));
+        }
+    }
+
+    private sealed record Segment(WorkItemStatus Status, int Count, string DashArray, string DashOffset);
+
+    private ProgressCounts? _counts;
+    private string? _error;
+    private string _scope = string.Empty;
+    private IReadOnlyList<StudioDropdownOption> ProjectOptions { get; set; } = [];
+
+    private ICurrentProject CurrentProject =>
+        Services.GetService(typeof(ICurrentProject)) as ICurrentProject ?? SingleProject.Instance;
+
+    private IProjectStore? Projects => Services.GetService(typeof(IProjectStore)) as IProjectStore;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Item #373: a folder that is not set up reads no project at all.
+        if (CurrentProject.Id is not { } project)
+        {
+            return;
+        }
+
+        _scope = project.Value;
+        ProjectOptions = BuildOptions(project);
+        await LoadAsync();
+    }
+
+    private IReadOnlyList<StudioDropdownOption> BuildOptions(ProjectId current)
+    {
+        var options = new List<StudioDropdownOption> { new(AllProjects, "All projects") };
+        IReadOnlyList<Fravashi.Application.Projects.ProjectRecord> known = [];
+        try
+        {
+            known = Projects?.List() ?? [];
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Data.Common.DbException)
+        {
+            Logger.LogWarning(ex, "The project list could not be read for the Progress card.");
+        }
+
+        if (!known.Any(p => p.Id == current))
+        {
+            options.Add(new StudioDropdownOption(current.Value, "This project"));
+        }
+
+        options.AddRange(known.Select(p => new StudioDropdownOption(
+            p.Id.Value, p.Name, p.Id == current ? "this window's project" : null)));
+        return options;
+    }
+
+    private async Task ChooseScopeAsync(string value)
+    {
+        if (value == _scope)
+        {
+            return;
+        }
+
+        _scope = value;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _error = null;
+        if (Services.GetService(typeof(ITrackerResolver)) is not ITrackerResolver trackers)
+        {
+            _counts = new ProgressCounts(new Dictionary<WorkItemStatus, int>(), 0);
+            return;
+        }
+
+        IReadOnlyList<ProjectId> projects = _scope == AllProjects
+            ? [.. ProjectOptions.Where(o => o.Value != AllProjects).Select(o => new ProjectId(o.Value))]
+            : [new ProjectId(_scope)];
+        try
+        {
+            var items = new List<WorkItem>();
+            foreach (var project in projects)
+            {
+                items.AddRange(await TrackerReads.AllAsync(trackers.For(project)));
+            }
+
+            _counts = ProgressCounts.Of(items);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Data.Common.DbException or HttpRequestException)
+        {
+            Logger.LogWarning(ex, "The Progress card could not read the work items.");
+            _counts = null;
+            _error = "The work items could not be read just now.";
+        }
+    }
+
+    /// <summary>
+    /// The ring's arcs in board order. The circle's circumference is 100 (r = 100 / 2 pi), so a share in percent IS
+    /// its dash length, and the first arc starts at twelve o'clock (an offset of 25).
+    /// </summary>
+    private IEnumerable<Segment> Segments()
+    {
+        if (_counts is not { Total: > 0 } counts)
+        {
+            yield break;
+        }
+
+        var start = 0.0;
+        foreach (var status in WorkItemStatuses.All)
+        {
+            var count = counts.Count(status);
+            if (count == 0)
+            {
+                continue;
+            }
+
+            var share = 100.0 * count / counts.Total;
+            yield return new Segment(
+                status,
+                count,
+                string.Create(CultureInfo.InvariantCulture, $"{share:0.###} {100 - share:0.###}"),
+                string.Create(CultureInfo.InvariantCulture, $"{25 - start:0.###}"));
+            start += share;
+        }
+    }
+
+    /// <summary>Done out of everything that was not cancelled: a cancelled item is neither done nor still to do.</summary>
+    private string DonePercent
+    {
+        get
+        {
+            if (_counts is null)
+            {
+                return "0%";
+            }
+
+            var counted = _counts.Total - _counts.Count(WorkItemStatus.Cancelled);
+            return counted == 0
+                ? "0%"
+                : string.Create(CultureInfo.InvariantCulture, $"{Math.Round(100.0 * _counts.Count(WorkItemStatus.Done) / counted):0}%");
+        }
+    }
+
+    private string RingLabel => _counts is null
+        ? "No work items"
+        : string.Join(", ", WorkItemStatuses.All.Select(s => $"{Label(s)} {_counts.Count(s)}")) + $"; {DonePercent} done";
+
+    private string BarWidth(int count)
+    {
+        var max = _counts is null ? 0 : WorkItemStatuses.All.Max(s => _counts.Count(s));
+        var share = max == 0 ? 0 : 100.0 * count / max;
+        return string.Create(CultureInfo.InvariantCulture, $"{share:0.#}%");
+    }
+
+    internal static string Label(WorkItemStatus status) => status switch
+    {
+        WorkItemStatus.InProgress => "In progress",
+        WorkItemStatus.InReview => "In review",
+        _ => status.ToString(),
+    };
+
+    internal static string Slug(WorkItemStatus status) => status switch
+    {
+        WorkItemStatus.InProgress => "in-progress",
+        WorkItemStatus.InReview => "in-review",
+        _ => status.ToString().ToLowerInvariant(),
+    };
+}

@@ -1,0 +1,165 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Application.Notifications
+@inject INotificationHistory History
+@inject IWaitingForPersonList Waiting
+@inject NavigationManager Nav
+@inject ILogger<NotificationCenter> Logger
+@implements IDisposable
+
+@* Backlog 304 (ADR 0031 decision 12): a waiting count is CURRENT STATE, not a history entry, so it is read
+   from IWaitingForPersonList on its own poll, never written into History, and it disappears on its own once
+   the count reads zero rather than needing a Clear. The dot on the bell button makes it visible without
+   opening the flyout; the one row inside the flyout is the whole notice, never one per waiting entry. *@
+
+<div class="notification-center">
+    <button type="button"
+            class="studio-rail-btn notification-center-button"
+            title="Notifications"
+            aria-label="Notifications"
+            @onclick="Toggle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+             stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6.4 9.2a5.6 5.6 0 0 1 11.2 0c0 5.6 2.4 7.2 2.4 7.2H4s2.4-1.6 2.4-7.2" />
+            <path d="M10.4 20.2a1.85 1.85 0 0 0 3.2 0" />
+        </svg>
+        @if (_waitingCount > 0)
+        {
+            <span class="notification-waiting-dot" data-testid="notification-waiting-dot" aria-hidden="true"></span>
+        }
+        @if (_unread > 0)
+        {
+            <span class="notification-count">@_unread</span>
+        }
+    </button>
+    @if (_open)
+    {
+        <div class="notification-menu">
+            <div class="notification-menu-head">
+                <span>Notifications</span>
+                <button type="button" class="studio-link-btn" @onclick="Clear">Clear</button>
+            </div>
+            @if (_waitingCount > 0)
+            {
+                <button type="button" class="notification-item notification-waiting-row"
+                        data-testid="notification-waiting-row" @onclick="GoToWaiting">
+                    <div class="notification-message">@WaitingSummary()</div>
+                </button>
+            }
+            @if (_items.Count == 0 && _waitingCount == 0)
+            {
+                <div class="notification-empty">No notifications.</div>
+            }
+            @foreach (var item in _items)
+            {
+                <div class="notification-item notification-@item.Severity.ToString().ToLowerInvariant()">
+                    <div class="notification-message">@item.Message</div>
+                    <div class="notification-time"><LocalTime At="item.Timestamp" /></div>
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private bool _open;
+    private IReadOnlyList<StudioNotification> _items = [];
+    private int _unread;
+    private int _waitingCount;
+    private readonly CancellationTokenSource _stopPolling = new();
+
+    protected override void OnInitialized()
+    {
+        History.Changed += OnChanged;
+        Refresh();
+        _ = PollWaitingAsync(_stopPolling.Token);
+    }
+
+    private void Toggle()
+    {
+        _open = !_open;
+        if (_open)
+        {
+            History.MarkAllRead();
+        }
+    }
+
+    private void Clear()
+    {
+        History.Clear();
+        _open = false;
+    }
+
+    private void Refresh()
+    {
+        _items = History.Recent;
+        _unread = History.UnreadCount;
+    }
+
+    private void OnChanged() => InvokeAsync(() =>
+    {
+        Refresh();
+        StateHasChanged();
+    });
+
+    private string WaitingSummary() => _waitingCount == 1 ? "1 waiting for you" : $"{_waitingCount} waiting for you";
+
+    private void GoToWaiting()
+    {
+        _open = false;
+        Nav.NavigateTo("/");
+    }
+
+    /// <summary>
+    /// Polls IWaitingForPersonList every few seconds, since it raises no change event of its own. A read
+    /// failure is logged and skipped rather than ending the loop, the same posture the Autopilot card's own poll takes.
+    /// </summary>
+    private async Task PollWaitingAsync(CancellationToken ct)
+    {
+        await LoadWaitingAsync(ct);
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                await LoadWaitingAsync(ct);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task LoadWaitingAsync(CancellationToken ct)
+    {
+        try
+        {
+            var count = (await Waiting.CurrentAsync(ct)).Count;
+            await InvokeAsync(() =>
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                _waitingCount = count;
+                StateHasChanged();
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Could not read what is waiting on a person for the notification bell.");
+        }
+    }
+
+    public void Dispose()
+    {
+        History.Changed -= OnChanged;
+        _stopPolling.Cancel();
+        _stopPolling.Dispose();
+    }
+}

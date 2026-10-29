@@ -1,0 +1,800 @@
+@using System.Globalization
+@using System.Text.Json
+@using Fravashi.Application.Mockups
+@using Microsoft.AspNetCore.Components.Rendering
+
+@* Backlog 194: a mockup drawn as a neutral wireframe (ADR 0021 decision 3: no framework look), the read half of the
+   editor. It is drawn by the studio from the tree and never stored, which is what makes it NOT #53's prototype.
+   Interactions are not run here: a node with "on" is marked so a reader knows it does something. What a viewport
+   or a state changes is decided by MockupView; this only draws the answer. One component with recursive drawing
+   methods rather than a component per node, so the schema's 5000 nodes stay cheap. *@
+
+<div class="mk-preview" data-testid="mockup-preview">
+    @if (Errors.Count > 0)
+    {
+        <section class="mk-errors" data-testid="mockup-preview-errors">
+            <div class="mk-errors-title">
+                @if (Document is null)
+                {
+                    @($"The tree has {Count(Errors.Count, "error")}, so nothing is drawn:")
+                }
+                else
+                {
+                    @($"Drawn, with {Count(Errors.Count, "problem")}:")
+                }
+            </div>
+            <ul>
+                @foreach (var problem in Errors)
+                {
+                    <li data-testid="mockup-error"><code>@problem.Path</code> <span>@problem.Message</span></li>
+                }
+            </ul>
+        </section>
+    }
+
+    @if (Document is { } document)
+    {
+        var screen = document.Screens[Math.Min(_screen, document.Screens.Count - 1)];
+        var screenPath = MockupView.ScreenPath(_screen);
+        var places = MockupView.Walk(screen, screenPath).ToList();
+
+        <div class="mk-controls">
+            <label class="mk-control">
+                <span>Screen</span>
+                <select class="studio-input" data-testid="mockup-preview-screen" @onchange="ChooseScreen">
+                    @for (var i = 0; i < document.Screens.Count; i++)
+                    {
+                        <option value="@i" selected="@(i == _screen)">@ScreenName(document.Screens[i])</option>
+                    }
+                </select>
+            </label>
+            @if (document.Viewports.Count > 0)
+            {
+                <label class="mk-control">
+                    <span>Viewport</span>
+                    <select class="studio-input" data-testid="mockup-preview-viewport" @onchange="ChooseViewport">
+                        @foreach (var viewport in document.Viewports)
+                        {
+                            <option value="@viewport.Name" selected="@(viewport.Name == _viewport)">
+                                @($"{viewport.Name} ({viewport.Width.ToString(CultureInfo.InvariantCulture)} px)")
+                            </option>
+                        }
+                    </select>
+                </label>
+            }
+            @foreach (var dialog in places.Where(p => p.Node.Type == MockupComponent.Dialog))
+            {
+                var at = dialog.Path;
+                <label class="mk-control mk-control-check">
+                    <input type="checkbox" data-testid="mockup-preview-dialog" data-node="@at"
+                           checked="@_dialogs.Contains(at)" @onchange="e => ShowDialog(at, e)" />
+                    <span>@($"Show dialog {MockupView.Name(dialog.Node)}")</span>
+                </label>
+            }
+        </div>
+
+        @if (places.Any(p => p.Node.States is not null))
+        {
+            <details class="mk-states">
+                <summary>States</summary>
+                <div class="mk-states-list">
+                    @foreach (var place in places.Where(p => p.Node.States is not null))
+                    {
+                        var at = place.Path;
+                        var current = StateOf(at, place.Node);
+                        <label class="mk-control">
+                            <span>@MockupView.Name(place.Node)</span>
+                            <select class="studio-input" data-testid="mockup-preview-state" data-node="@at"
+                                    @onchange="e => ChooseState(at, e)">
+                                <option value="" selected="@(current is null)">at rest</option>
+                                @foreach (var state in place.Node.States!.Keys)
+                                {
+                                    <option value="@MockupVocabulary.Name(state)" selected="@(current == state)">
+                                        @MockupVocabulary.Name(state)
+                                    </option>
+                                }
+                            </select>
+                        </label>
+                    }
+                </div>
+            </details>
+        }
+
+        <div class="mk-stage">
+            <div class="mk-frame" data-testid="mockup-preview-frame" style="@FrameStyle(document)">
+                @{ Draw(__builder, screen, screenPath); }
+                @foreach (var dialog in places.Where(p => p.Node.Type == MockupComponent.Dialog && _dialogs.Contains(p.Path)))
+                {
+                    Draw(__builder, dialog.Node, dialog.Path, layer: true);
+                }
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    /// <summary>The tree to draw, or null when the reader refused it.</summary>
+    [Parameter] public MockupDocument? Document { get; set; }
+
+    /// <summary>Everything wrong. With no <see cref="Document"/> these are drawn instead of the wireframe.</summary>
+    [Parameter] public IReadOnlyList<MockupError> Errors { get; set; } = [];
+
+    /// <summary>
+    /// The node shown as selected, by its JSON path (#196: the editor's outline and this preview select together).
+    /// The preview follows it: to its screen, into its dialog, onto its tab.
+    /// </summary>
+    [Parameter] public string? Selected { get; set; }
+
+    /// <summary>
+    /// Set by an editor: clicking a drawn node then selects it (the deepest node under the pointer) and reports its
+    /// JSON path. Unset, as on a design's page, the drawing takes no clicks of its own.
+    /// </summary>
+    [Parameter] public EventCallback<string> OnSelect { get; set; }
+
+    /// <summary>
+    /// Set by an editor while the selected node's state override is being edited (#199): the preview shows the selected
+    /// node in that state, so the override being edited is the one on view. Unset again, the node goes back to the state
+    /// it starts in.
+    /// </summary>
+    [Parameter] public MockupState? ShowState { get; set; }
+
+    /// <summary>Set by an editor while a viewport override is being edited (#199): the preview switches to that viewport.</summary>
+    [Parameter] public string? ShowViewport { get; set; }
+
+    private MockupDocument? _shown;
+    private string? _followed;
+    private (string? Path, MockupState? State) _shownState;
+    private string? _shownViewport;
+    private int _screen;
+    private string? _viewport;
+    private readonly Dictionary<string, MockupState?> _states = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _dialogs = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _tabs = new(StringComparer.Ordinal);
+
+    protected override void OnParametersSet()
+    {
+        if (!ReferenceEquals(Document, _shown))
+        {
+            Keep(Document);
+            _shown = Document;
+        }
+
+        if (!string.Equals(Selected, _followed, StringComparison.Ordinal))
+        {
+            _followed = Selected;
+            Follow(Selected);
+        }
+
+        (string? Path, MockupState? State) showing = (ShowState is null ? null : Selected, ShowState);
+        if (showing != _shownState)
+        {
+            if (_shownState is { Path: { } before, State: not null })
+            {
+                _states.Remove(before);
+            }
+
+            if (showing is { Path: { } path, State: { } state })
+            {
+                _states[path] = state;
+            }
+
+            _shownState = showing;
+        }
+
+        if (!string.Equals(ShowViewport, _shownViewport, StringComparison.Ordinal))
+        {
+            _shownViewport = ShowViewport;
+            if (ShowViewport is { } viewport && Document?.Viewports.Any(v => v.Name == viewport) == true)
+            {
+                _viewport = viewport;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A different tree keeps what the reader chose wherever it still applies (#196: an edit must not throw the
+    /// preview back to its first screen), and lets go of whatever no longer names such a thing: a screen past the
+    /// end, a viewport no longer declared, a state or a dialog whose path now names another node.
+    /// </summary>
+    private void Keep(MockupDocument? document)
+    {
+        if (document is null)
+        {
+            return;
+        }
+
+        _screen = Math.Min(_screen, document.Screens.Count - 1);
+        if (_viewport is null || document.Viewports.All(v => v.Name != _viewport))
+        {
+            _viewport = document.Viewports.FirstOrDefault()?.Name;
+        }
+
+        var places = Enumerable.Range(0, document.Screens.Count)
+            .SelectMany(i => MockupView.Walk(document.Screens[i], MockupView.ScreenPath(i)))
+            .ToDictionary(p => p.Path, p => p.Node, StringComparer.Ordinal);
+
+        foreach (var (path, state) in _states.ToList())
+        {
+            if (!places.TryGetValue(path, out var node) || (state is { } named && node.States?.ContainsKey(named) != true)
+                || (state is null && node.States is null))
+            {
+                _states.Remove(path);
+            }
+        }
+
+        _dialogs.RemoveWhere(path => !places.TryGetValue(path, out var node) || node.Type != MockupComponent.Dialog);
+        foreach (var path in _tabs.Keys.ToList())
+        {
+            if (!places.TryGetValue(path, out var node) || node.Type != MockupComponent.Tabs)
+            {
+                _tabs.Remove(path);
+            }
+        }
+    }
+
+    /// <summary>Brings the selected node into view: its screen, every dialog it is inside, and every tab it is on.</summary>
+    private void Follow(string? selected)
+    {
+        if (selected is null || Document is not { } document || MockupOutline.NodeOf(selected) is not { Count: > 0 } path)
+        {
+            return;
+        }
+
+        if (path[0] >= document.Screens.Count)
+        {
+            return;
+        }
+
+        _screen = path[0];
+        var node = document.Screens[path[0]];
+        var at = MockupView.ScreenPath(path[0]);
+        for (var i = 1; i < path.Count; i++)
+        {
+            if (node.Children is not { } children || path[i] >= children.Count)
+            {
+                return;
+            }
+
+            if (node.Type == MockupComponent.Tabs)
+            {
+                _tabs[at] = path[i];
+            }
+
+            node = children[path[i]];
+            at = MockupView.ChildPath(at, path[i]);
+            if (node.Type == MockupComponent.Dialog)
+            {
+                _dialogs.Add(at);
+            }
+        }
+    }
+
+    private Task Select(string path) => OnSelect.InvokeAsync(path);
+
+    private void ChooseScreen(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
+        {
+            _screen = index;
+        }
+    }
+
+    private void ChooseViewport(ChangeEventArgs e) => _viewport = e.Value?.ToString();
+
+    private void ChooseState(string path, ChangeEventArgs e) =>
+        _states[path] = MockupVocabulary.TryParse<MockupState>(e.Value?.ToString(), out var state) ? state : null;
+
+    private void ShowDialog(string path, ChangeEventArgs e)
+    {
+        if (e.Value is true)
+        {
+            _dialogs.Add(path);
+        }
+        else
+        {
+            _dialogs.Remove(path);
+        }
+    }
+
+    private void ChooseTab(string path, int index) => _tabs[path] = index;
+
+    /// <summary>The state a node is shown in: what the reader chose, else the one the tree starts it in.</summary>
+    private MockupState? StateOf(string path, MockupNode node) =>
+        _states.TryGetValue(path, out var chosen) ? chosen : node.State;
+
+    private string FrameStyle(MockupDocument document) =>
+        document.Viewports.FirstOrDefault(v => v.Name == _viewport) is { } viewport
+            ? $"width: {viewport.Width.ToString(CultureInfo.InvariantCulture)}px"
+            : string.Empty;
+
+    private static string ScreenName(MockupNode screen) =>
+        screen.Text is { } title ? $"{title} ({screen.Id})" : screen.Id ?? "screen";
+
+    private static string Count(int count, string what) =>
+        $"{count.ToString(CultureInfo.InvariantCulture)} {what}{(count == 1 ? string.Empty : "s")}";
+
+    // ---- drawing ---------------------------------------------------------------------------------------------
+
+    private void Draw(RenderTreeBuilder __builder, MockupNode node, string path, bool layer = false)
+    {
+        if (node.Type == MockupComponent.Dialog && !layer)
+        {
+            // A dialog is drawn when somebody chooses to see it, as it is when something opens it: as a layer over
+            // the whole screen, never in its place in the tree, so the frame grows to hold it instead of cutting it.
+            return;
+        }
+
+        var state = StateOf(path, node);
+        var look = MockupView.Resolve(node, _viewport, state);
+
+        if (state == MockupState.Hidden)
+        {
+            <div class="mk-hidden" aria-hidden="true" data-mockup-path="@path" data-state="hidden">
+                @($"hidden: {MockupView.Name(node)}")
+            </div>
+            return;
+        }
+
+        if (node.On is { Count: > 0 } on)
+        {
+            <div class="mk-acts" title="@Actions(on)" data-mockup-on="@Events(on)">
+                @{ Shape(__builder, node, look, path, state); }
+                <span class="mk-acts-badge" aria-hidden="true">@Events(on)</span>
+            </div>
+        }
+        else
+        {
+            Shape(__builder, node, look, path, state);
+        }
+    }
+
+    private void Shape(RenderTreeBuilder __builder, MockupNode node, MockupNode look, string path, MockupState? state)
+    {
+        var attributes = Attributes(node, look, path, state, meaning: node.Type != MockupComponent.Field);
+        Selectable(attributes, path);
+        switch (node.Type)
+        {
+            case MockupComponent.Window:
+                <section @attributes="attributes">
+                    <div class="mk-titlebar" @attributes="HeadingOf(look)">@look.Text</div>
+                    @{ Body(__builder, look, path); }
+                </section>
+                break;
+
+            case MockupComponent.Dialog:
+                <div class="mk-dialog-backdrop">
+                    <div @attributes="attributes">
+                        <div class="mk-titlebar" @attributes="HeadingOf(look)">@look.Text</div>
+                        @{ Body(__builder, look, path); }
+                    </div>
+                </div>
+                break;
+
+            case MockupComponent.Panel:
+            case MockupComponent.Toolbar:
+            case MockupComponent.Form:
+            case MockupComponent.Container:
+                <div @attributes="attributes">
+                    @if (look.Text is { } caption)
+                    {
+                        <div class="mk-caption" @attributes="HeadingOf(look)">@caption</div>
+                    }
+                    @{ Body(__builder, look, path); }
+                </div>
+                break;
+
+            case MockupComponent.Tabs:
+                Tabs(__builder, look, path, attributes);
+                break;
+
+            case MockupComponent.Field:
+                Field(__builder, look, path, attributes);
+                break;
+
+            case MockupComponent.Button:
+                <button type="button" @attributes="attributes">
+                    @if (look.Text is { } words)
+                    {
+                        @words
+                    }
+                    else
+                    {
+                        <span class="mk-icon" aria-hidden="true"></span>
+                    }
+                </button>
+                break;
+
+            case MockupComponent.Link:
+                @* Backlog 290: a span with the link role, never an a, so nothing in the studio's own page can be followed. *@
+                <span role="link" @attributes="attributes">
+                    @if (look.Text is { } linkWords)
+                    {
+                        @linkWords
+                    }
+                    else
+                    {
+                        <span class="mk-icon" aria-hidden="true"></span>
+                    }
+                </span>
+                break;
+
+            case MockupComponent.Text:
+                if (look.A11y?.Heading is { } level)
+                {
+                    <div role="heading" aria-level="@level" @attributes="attributes">@look.Text</div>
+                }
+                else
+                {
+                    <p @attributes="attributes">@look.Text</p>
+                }
+                break;
+
+            case MockupComponent.Image:
+                <div role="@(look.A11y?.Decorative == true ? "presentation" : "img")" @attributes="attributes">
+                    <span class="mk-image-caption" aria-hidden="true">@(look.Text ?? look.A11y?.Label ?? "image")</span>
+                </div>
+                break;
+
+            case MockupComponent.List:
+            case MockupComponent.Tree:
+                Rows(__builder, look, state, attributes);
+                break;
+
+            case MockupComponent.Table:
+                Table(__builder, look, state, attributes);
+                break;
+        }
+    }
+
+    private void Body(RenderTreeBuilder __builder, MockupNode look, string path)
+    {
+        <div class="@($"mk-body mk-layout-{MockupVocabulary.Name(look.Layout ?? MockupLayout.Column)}")"
+             style="@(look.Layout == MockupLayout.Grid && look.Cols is { } cols ? $"grid-template-columns: repeat({cols.ToString(CultureInfo.InvariantCulture)}, minmax(0, 1fr))" : null)">
+            @if (look.Children is { } children)
+            {
+                for (var i = 0; i < children.Count; i++)
+                {
+                    Draw(__builder, children[i], MockupView.ChildPath(path, i));
+                }
+            }
+        </div>
+    }
+
+    private void Tabs(RenderTreeBuilder __builder, MockupNode look, string path, Dictionary<string, object> attributes)
+    {
+        var panels = look.Children ?? [];
+        var chosen = Math.Min(_tabs.GetValueOrDefault(path), Math.Max(panels.Count - 1, 0));
+        <div @attributes="attributes">
+            <div class="mk-tablist" role="tablist">
+                @for (var i = 0; i < panels.Count; i++)
+                {
+                    var index = i;
+                    <button type="button" role="tab" class="mk-tab" aria-selected="@(index == chosen ? "true" : "false")"
+                            data-testid="mockup-preview-tab" @onclick="() => ChooseTab(path, index)">
+                        @(panels[index].Text ?? $"Tab {(index + 1).ToString(CultureInfo.InvariantCulture)}")
+                    </button>
+                }
+            </div>
+            @if (panels.Count > 0)
+            {
+                // The chosen panel is the tab panel; its text is already the tab's label, so it has no caption.
+                var panelPath = MockupView.ChildPath(path, chosen);
+                var panel = MockupView.Resolve(panels[chosen], _viewport, StateOf(panelPath, panels[chosen]));
+                var panelAttributes = new Dictionary<string, object>(StringComparer.Ordinal) { ["class"] = "mk mk-tabpanel" };
+                Selectable(panelAttributes, panelPath);
+                <div role="tabpanel" aria-label="@(panel.A11y?.Label ?? panel.Text)"
+                     data-mockup-path="@panelPath" data-mockup-type="panel" @attributes="panelAttributes">
+                    @{ Body(__builder, panel, panelPath); }
+                </div>
+            }
+        </div>
+    }
+
+    private static void Field(RenderTreeBuilder __builder, MockupNode look, string path, Dictionary<string, object> attributes)
+    {
+        var input = look.Input ?? MockupInput.Text;
+        var label = look.A11y?.Label;
+        var value = look.Value is { ValueKind: JsonValueKind.String } text ? text.GetString()
+            : look.Value is { ValueKind: JsonValueKind.Number } number ? number.GetRawText()
+            : null;
+        var name = $"mk{path.GetHashCode(StringComparison.Ordinal).ToString("x8", CultureInfo.InvariantCulture)}";
+        var disabled = attributes.ContainsKey("aria-disabled") ? "true" : null;
+
+        <div @attributes="attributes">
+            @switch (input)
+            {
+                case MockupInput.Checkbox:
+                    <label class="mk-check">
+                        <input type="checkbox" checked="@(look.Value is { ValueKind: JsonValueKind.True })"
+                               data-mk-inert aria-label="@label" aria-required="@Required(look)"
+                               aria-disabled="@disabled" />
+                        <span>@look.Text</span>
+                    </label>
+                    break;
+
+                case MockupInput.Radio:
+                    <fieldset class="mk-radios" aria-label="@label" aria-disabled="@disabled">
+                        @if (look.Text is { } legend)
+                        {
+                            <legend>@legend@RequiredMark(look)</legend>
+                        }
+                        @foreach (var option in look.Options ?? [])
+                        {
+                            <label class="mk-check">
+                                <input type="radio" name="@name" checked="@(option == value)" data-mk-inert />
+                                <span>@option</span>
+                            </label>
+                        }
+                    </fieldset>
+                    break;
+
+                default:
+                    <label class="mk-label">
+                        @if (look.Text is { } words)
+                        {
+                            <span class="mk-label-text">@words@RequiredMark(look)</span>
+                        }
+                        @if (input == MockupInput.Select)
+                        {
+                            <select aria-label="@label" aria-required="@Required(look)" aria-disabled="@disabled">
+                                @if (value is null)
+                                {
+                                    <option value="" selected>@(look.Placeholder ?? "Choose...")</option>
+                                }
+                                @foreach (var option in look.Options ?? [])
+                                {
+                                    <option value="@option" selected="@(option == value)">@option</option>
+                                }
+                            </select>
+                        }
+                        else if (input == MockupInput.Textarea)
+                        {
+                            <textarea readonly rows="3" placeholder="@look.Placeholder" aria-label="@label"
+                                      aria-required="@Required(look)" aria-disabled="@disabled">@value</textarea>
+                        }
+                        else
+                        {
+                            <input type="@MockupVocabulary.Name(input)" readonly value="@value" placeholder="@look.Placeholder"
+                                   aria-label="@label" aria-required="@Required(look)" aria-disabled="@disabled" />
+                        }
+                    </label>
+                    break;
+            }
+        </div>
+    }
+
+    private void Rows(RenderTreeBuilder __builder, MockupNode look, MockupState? state, Dictionary<string, object> attributes)
+    {
+        var tree = look.Type == MockupComponent.Tree;
+        IReadOnlyList<MockupRow> rows = state == MockupState.Empty ? [] : MockupView.Rows(look, Document!);
+        <div @attributes="attributes">
+            @if (state == MockupState.Empty)
+            {
+                <div class="mk-empty">@(look.Text ?? "Nothing here.")</div>
+            }
+            else
+            {
+                @if (look.Text is { } caption)
+                {
+                    <div class="mk-caption">@caption</div>
+                }
+                @if (rows.Count == 0)
+                {
+                    <div class="mk-placeholder-rows" aria-hidden="true"><span></span><span></span><span></span></div>
+                }
+                else
+                {
+                    RowList(__builder, rows, tree, top: true);
+                }
+            }
+        </div>
+    }
+
+    private static void RowList(RenderTreeBuilder __builder, IReadOnlyList<MockupRow> rows, bool tree, bool top)
+    {
+        <ul class="mk-rows" role="@(tree ? (top ? "tree" : "group") : null)">
+            @foreach (var row in rows)
+            {
+                <li role="@(tree ? "treeitem" : null)" aria-expanded="@(tree && row.Children.Count > 0 ? "true" : null)">
+                    <span class="mk-row-text">@row.Text</span>
+                    @if (row.Children.Count > 0)
+                    {
+                        RowList(__builder, row.Children, tree, top: false);
+                    }
+                </li>
+            }
+        </ul>
+    }
+
+    private void Table(RenderTreeBuilder __builder, MockupNode look, MockupState? state, Dictionary<string, object> attributes)
+    {
+        var columns = look.Columns ?? [];
+        IReadOnlyList<JsonElement> records = state == MockupState.Empty ? [] : MockupView.Records(look, Document!);
+        <table @attributes="attributes">
+            @if (look.Text is { } caption && state != MockupState.Empty)
+            {
+                <caption>@caption</caption>
+            }
+            <thead>
+                <tr>
+                    @foreach (var column in columns)
+                    {
+                        <th scope="col">@(column.Text ?? column.Key)</th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @if (state == MockupState.Empty)
+                {
+                    <tr><td class="mk-empty" colspan="@Math.Max(columns.Count, 1)">@(look.Text ?? "Nothing here.")</td></tr>
+                }
+                else
+                {
+                    @foreach (var record in records)
+                    {
+                        <tr>
+                            @foreach (var column in columns)
+                            {
+                                <td>@MockupView.Cell(record, column.Key)</td>
+                            }
+                        </tr>
+                    }
+                }
+            </tbody>
+        </table>
+    }
+
+    // ---- attributes ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// What every drawn node carries: where it is in the tree, what it is, the state it is shown in, and (on the
+    /// element that carries its meaning) what it means to assistive technology. A label is the accessible name,
+    /// decorative hides it, live announces it (#78's accessibility intent, so the preview is itself readable).
+    /// </summary>
+    private static Dictionary<string, object> Attributes(
+        MockupNode node, MockupNode look, string path, MockupState? state, bool meaning)
+    {
+        var type = MockupVocabulary.Name(node.Type);
+        var css = $"mk mk-{type}";
+        var attributes = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["data-mockup-path"] = path,
+            ["data-mockup-type"] = type,
+        };
+
+        if (node.Id is { } id)
+        {
+            attributes["data-mockup-id"] = id;
+        }
+
+        if (state is { } named)
+        {
+            var name = MockupVocabulary.Name(named);
+            attributes["data-state"] = name;
+            css += $" mk-state-{name}";
+            if (named == MockupState.Disabled)
+            {
+                attributes["aria-disabled"] = "true";
+            }
+            else if (named == MockupState.Loading)
+            {
+                attributes["aria-busy"] = "true";
+            }
+            else if (named == MockupState.Error)
+            {
+                attributes["aria-invalid"] = "true";
+            }
+        }
+
+        attributes["class"] = css;
+        switch (node.Type)
+        {
+            case MockupComponent.Toolbar:
+                attributes["role"] = "toolbar";
+                break;
+            case MockupComponent.Form:
+                attributes["role"] = "form";
+                break;
+            case MockupComponent.Panel:
+            case MockupComponent.Container:
+                attributes["role"] = "group";
+                break;
+            case MockupComponent.Dialog:
+                attributes["role"] = "dialog";
+                attributes["aria-modal"] = "true";
+                break;
+            case MockupComponent.Window:
+                attributes["role"] = "region";
+                break;
+        }
+
+        if (look.A11y is { } a11y)
+        {
+            if (a11y.Decorative == true)
+            {
+                attributes["aria-hidden"] = "true";
+            }
+
+            if (a11y.Live is { } live)
+            {
+                attributes["aria-live"] = live;
+            }
+
+            if (meaning && a11y.Label is { } label)
+            {
+                attributes["aria-label"] = label;
+            }
+        }
+
+        // A window, dialog or panel with no label is named by its visible title, as a person would name it.
+        if (!attributes.ContainsKey("aria-label")
+            && node.Type is MockupComponent.Window or MockupComponent.Dialog or MockupComponent.Panel
+            && look.Text is { } title)
+        {
+            attributes["aria-label"] = title;
+        }
+
+        return attributes;
+    }
+
+    /// <summary>
+    /// In an editor (#196): the selected node is marked, and a click selects the node it lands on. The click stops
+    /// there, so the deepest drawn node under the pointer is the one selected rather than every box around it.
+    /// </summary>
+    private void Selectable(Dictionary<string, object> attributes, string path)
+    {
+        if (string.Equals(path, Selected, StringComparison.Ordinal))
+        {
+            attributes["class"] = $"{attributes["class"]} mk-selected";
+            attributes["data-selected"] = "true";
+        }
+
+        if (OnSelect.HasDelegate)
+        {
+            attributes["onclick"] = EventCallback.Factory.Create<MouseEventArgs>(this, () => Select(path));
+            attributes["__internal_stopPropagation_onclick"] = true;
+        }
+    }
+
+    private static Dictionary<string, object> HeadingOf(MockupNode look) =>
+        look.A11y?.Heading is { } level
+            ? new Dictionary<string, object> { ["role"] = "heading", ["aria-level"] = level }
+            : [];
+
+    private static string? Required(MockupNode look) => look.Required == true ? "true" : null;
+
+    private static string RequiredMark(MockupNode look) => look.Required == true ? " *" : string.Empty;
+
+    private static string Events(IReadOnlyDictionary<MockupEvent, MockupAction> on) =>
+        string.Join(" ", on.Keys.Select(MockupVocabulary.Name));
+
+    /// <summary>What each event does, in words, for the marker's title: the preview says it and does not run it.</summary>
+    private static string Actions(IReadOnlyDictionary<MockupEvent, MockupAction> on) =>
+        string.Join("; ", on.Select(pair => $"{MockupVocabulary.Name(pair.Key)}: {Action(pair.Value)}"));
+
+    private static string Action(MockupAction action)
+    {
+        var parts = new List<string>();
+        if (action.Go is { } go)
+        {
+            parts.Add($"go to {go}");
+        }
+
+        if (action.Open is { } open)
+        {
+            parts.Add($"open {open}");
+        }
+
+        if (action.Close is { } close)
+        {
+            parts.Add($"close {close}");
+        }
+
+        foreach (var (id, state) in action.Set ?? new Dictionary<string, string>())
+        {
+            parts.Add($"set {id} to {state}");
+        }
+
+        return string.Join(", ", parts);
+    }
+}

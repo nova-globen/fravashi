@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The host bridge library (docs/plans/fravashi-unified-exe-and-workspaces.md Phase 2, plan 2a):
+    file/git/search/watch services over REGISTERED host workspace folders, exposed as a
+    token-authenticated HTTP API that fravashi.exe hosts and the studio container consumes. Kestrel via
+    FrameworkReference (raw sockets, no URLACL, no new packages). All logic lives here so it is
+    unit- and integration-testable without the WinForms host.
+  -->
+  <PropertyGroup>
+    <RootNamespace>Fravashi.Bridge</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fravashi.Bridge.Tests" />
+  </ItemGroup>
+
+  <!-- The bridge release (docs/plans/rename-internal-names.md, phase 2): the former names an installed copy still carries
+       are read from ONE file, Domain's FormerNames, linked here as source and compiled internal (FORMER_NAMES_LINKED).
+       The cleanup release (phase 5) removes this link with the file. -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);FORMER_NAMES_LINKED</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Fravashi.Domain\FormerNames.cs" Link="FormerNames.cs" />
+  </ItemGroup>
+
+</Project>

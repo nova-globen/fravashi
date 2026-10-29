@@ -1,0 +1,435 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Projects
+@using Fravashi.Domain.Projects
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Bridge
+@inject IProjectStore Projects
+@inject IWorkspaceStore Workspaces
+@inject BridgeWorkspaceContext Workspace
+@inject ICurrentProject CurrentProject
+@inject WorkspaceProjectBinding Binding
+@inject IProjectProviders Providers
+@inject IProjectDelivery Delivery
+@inject IProjectEnvironment Variables
+@inject Fravashi.Application.Sessions.IWorkspaceTrust Trust
+@inject IServiceProvider Services
+
+@* Settings > Project > Project and variables (backlog 121, docs/plans/project-selection.md). The project FOLLOWS THE
+   WORKSPACE: a folder belongs to exactly one project, and the board, the wiki, the sync page and an agent's
+   tools in that folder's window all follow it. So choosing a project is an act on the folder, made here once,
+   never a filter on a page. Drawn only from classes the sections beside it already use: there is no approved
+   design for it, so it takes no new look. *@
+<div class="ob-step" data-testid="project-settings">
+    <h2>Project</h2>
+    <p class="studio-muted">
+        A folder belongs to one project. The board, the wiki, provider sync and the agent's tools in this
+        folder's window all show that project and nothing else. A folder opened for the first time is in no project
+        until it is set up.
+    </p>
+
+    @if (_workspace is null)
+    {
+        <p class="studio-muted" data-testid="project-no-folder">
+            No folder is open in this window. Open one from Home, then choose its project here.
+        </p>
+    }
+    else
+    {
+        @* Item #373, section 5: for a folder that is not set up, the section's first line is that, with the setup's
+           button; the move controls below stay as the manual way. *@
+        @if (_current is null)
+        {
+            <FolderNotSetUp Inline="true" Surface="settings" WorkspaceId="@_workspace.Id" />
+        }
+
+        <dl class="studio-detail">
+            <dt>Folder</dt>
+            <dd data-testid="project-folder">@_workspace.Name</dd>
+            <dt>Project</dt>
+            <dd data-testid="project-current">@(_current?.Name ?? "Not set up yet")</dd>
+        </dl>
+
+        @* Item #373: a folder that is not set up has no project's settings to show. What is left is the way into one:
+           the setup, and the move controls below as the manual way. Trust is the folder's own, so it stays. *@
+        @if (_current is not null)
+        {
+
+        @* Backlog 142: which providers this project follows. "None" is the owner's "disable the provider": the board
+           and the wiki become the source of truth, nothing is sent, and what was sent before is kept as a record. *@
+        <label class="studio-modal-field">
+            <span>Board provider</span>
+            <select class="studio-input" data-testid="project-board-provider" value="@Name(_choice.Board)"
+                    @onchange="e => Choose(e, board: true)">
+                <option value="install">The install's board connection (Settings, Project, Board and status mapping)</option>
+                <option value="none">None: this project's board is the source of truth</option>
+            </select>
+        </label>
+        <label class="studio-modal-field">
+            <span>Wiki provider</span>
+            <select class="studio-input" data-testid="project-wiki-provider" value="@Name(_choice.Wiki)"
+                    @onchange="e => Choose(e, board: false)">
+                <option value="install">The install's wiki connection (Settings, Project, Wiki and publishing)</option>
+                <option value="none">None: this project's documents are published nowhere</option>
+            </select>
+        </label>
+
+        @* Backlog 298 (ADR 0031 decision 3): how this project's autopilot delivers its work. *@
+        <label class="studio-modal-field">
+            <span>Autopilot delivery</span>
+            <select class="studio-input" data-testid="project-autopilot-delivery" value="@DeliveryName(_delivery)"
+                    @onchange="ChooseDelivery">
+                <option value="branch_and_pull_request">Branch and pull request (default)</option>
+                <option value="commit_to_main">Commit to main</option>
+            </select>
+        </label>
+
+        @* Item #373: this project's own model and effort for a new conversation, laid over the install's (Settings,
+           Agents) part by part. The setup's Agents step sets them; this is where they change afterwards. *@
+        @if (_config is not null)
+        {
+            <label class="studio-modal-field">
+                <span>New conversations in this project: model</span>
+                <select class="studio-input" data-testid="project-agent-model" value="@(_agents.Model ?? string.Empty)" @onchange="ChooseAgentModel">
+                    <option value="">The install's default</option>
+                    @foreach (var id in Fravashi.Application.Sessions.AgentDefaultsSetting.ModelIds)
+                    {
+                        <option value="@id">@id</option>
+                    }
+                </select>
+            </label>
+            <label class="studio-modal-field">
+                <span>New conversations in this project: effort</span>
+                <select class="studio-input" data-testid="project-agent-effort" value="@(_agents.Effort?.CliValue() ?? string.Empty)" @onchange="ChooseAgentEffort">
+                    <option value="">The install's default</option>
+                    @foreach (var effort in Fravashi.Domain.AgentSessions.AgentEfforts.All)
+                    {
+                        <option value="@effort.CliValue()">@effort.CliValue()</option>
+                    }
+                </select>
+            </label>
+        }
+
+        }
+
+        @* ADR 0028: how much agents may do in THIS FOLDER without asking. It is also on the session work strip, but that
+           strip exists only once a conversation does, and a person deciding before the first turn had nowhere to say
+           it (found in the self-hosting trial, 2026-09-27). The same store, so the two can never disagree. *@
+        <label class="studio-modal-field">
+            <span>Agents in this folder</span>
+            <select class="studio-input" data-testid="project-trust" value="@Fravashi.Domain.AgentSessions.WorkspaceTrustLevels.Name(_trust)"
+                    @onchange="ChooseTrust">
+                <option value="ask">@Fravashi.Domain.AgentSessions.WorkspaceTrustLevels.Describe(Fravashi.Domain.AgentSessions.WorkspaceTrust.Ask)</option>
+                <option value="edits">@Fravashi.Domain.AgentSessions.WorkspaceTrustLevels.Describe(Fravashi.Domain.AgentSessions.WorkspaceTrust.Edits)</option>
+            </select>
+        </label>
+
+        @if (_current is not null)
+        {
+        @* Backlog 154: the variables this project hands its agents. A secret is written once and never shown again;
+           its value joins what the approval gate and the sync engine look for. Drawn from the classes around it. *@
+        <h3>Variables for agents</h3>
+        <p class="studio-muted">
+            Every agent session in this project's folders gets these in its environment, and so does a scenario step.
+            A secret is stored protected and never shown again; a call that carries its value asks loudly, and a file
+            that carries it never reaches the host folder.
+        </p>
+        @if (_variables.Count > 0)
+        {
+            <dl class="studio-detail" data-testid="project-vars">
+                @foreach (var variable in _variables)
+                {
+                    <dt data-testid="project-var-row" data-name="@variable.Name">@variable.Name</dt>
+                    <dd>
+                        <span data-testid="project-var-value">@(variable.IsSecret ? "secret, stored" : variable.Value)</span>
+                        <button type="button" class="studio-link-btn" data-testid="project-var-remove"
+                                @onclick="() => RemoveVariable(variable.Name)">Remove</button>
+                    </dd>
+                }
+            </dl>
+        }
+        <label class="studio-modal-field">
+            <span>Name</span>
+            <input class="studio-input" type="text" spellcheck="false" placeholder="MY_SERVICE_TOKEN"
+                   data-testid="project-var-name" @bind="_varName" @bind:event="oninput" />
+        </label>
+        <label class="studio-modal-field">
+            <span>Value</span>
+            <input class="studio-input" type="@(_varSecret ? "password" : "text")" spellcheck="false" autocomplete="off"
+                   data-testid="project-var-input" @bind="_varValue" @bind:event="oninput" />
+        </label>
+        <label class="diag-check">
+            <input type="checkbox" data-testid="project-var-secret" @bind="_varSecret" />
+            <span>Secret: protect it and never show it again</span>
+        </label>
+        <div class="studio-form-actions">
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="project-var-add"
+                    disabled="@string.IsNullOrWhiteSpace(_varName)" @onclick="AddVariable">Add or replace</button>
+        </div>
+
+        <label class="studio-modal-field">
+            <span>Rename this project</span>
+            <input class="studio-input" type="text" spellcheck="false"
+                   data-testid="project-rename-name" @bind="_rename" @bind:event="oninput" />
+        </label>
+        <div class="studio-form-actions">
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="project-rename"
+                    disabled="@(string.IsNullOrWhiteSpace(_rename) || _rename.Trim() == _current?.Name)" @onclick="Rename">Rename</button>
+        </div>
+        }
+
+        <label class="studio-modal-field">
+            <span>@(_current is null ? "Put this folder in" : "Move this folder to")</span>
+            <select class="studio-input" data-testid="project-pick" @bind="_picked">
+                @if (_current is null)
+                {
+                    <option value="">Choose a project</option>
+                }
+                @foreach (var project in _projects)
+                {
+                    <option value="@project.Id.Value">@project.Name</option>
+                }
+            </select>
+        </label>
+        <div class="studio-form-actions">
+            <button type="button" class="studio-btn" data-testid="project-move"
+                    disabled="@(string.IsNullOrEmpty(_picked) || _picked == _current?.Id.Value)" @onclick="Move">@(_current is null ? "Put it there" : "Move")</button>
+        </div>
+
+        <label class="studio-modal-field">
+            <span>Or a new project</span>
+            <input class="studio-input" type="text" spellcheck="false" placeholder="its name"
+                   data-testid="project-new-name" @bind="_newName" @bind:event="oninput" />
+        </label>
+        <div class="studio-form-actions">
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="project-create"
+                    disabled="@string.IsNullOrWhiteSpace(_newName)" @onclick="MoveToNew">Create and move</button>
+        </div>
+        <p class="studio-muted">
+            Moving a folder does not move anything that was made in the project it leaves: its work items and
+            documents stay there. A folder with a conversation running cannot be moved until it ends.
+        </p>
+
+        @if (_refusal is { Length: > 0 })
+        {
+            <div class="studio-error" data-testid="project-refusal">@_refusal</div>
+        }
+        @if (_said is { Length: > 0 })
+        {
+            <p class="rt-ok" data-testid="project-said">@_said</p>
+        }
+
+        @if (_current is not null)
+        {
+            <RepositoryImportPanel />
+        }
+    }
+</div>
+
+@code {
+    private WorkspaceRecord? _workspace;
+    private ProjectRecord? _current;
+    private IReadOnlyList<ProjectRecord> _projects = [];
+    private string? _picked;
+    private string _newName = string.Empty;
+    private string _rename = string.Empty;
+    private ProjectProviderChoice _choice = ProjectProviderChoice.Default;
+    private Fravashi.Domain.Autopilot.AutopilotDeliveryMode _delivery = Fravashi.Domain.Autopilot.AutopilotDeliveryMode.BranchAndPullRequest;
+    private IReadOnlyList<ProjectVariable> _variables = [];
+    private Fravashi.Domain.AgentSessions.WorkspaceTrust _trust;
+
+    /// <summary>
+    /// The workspace id this picker actually reads and writes (backlog 312): the window's own workspace, or,
+    /// when that workspace is a worktree, the repository folder it was made from (a worktree never has its
+    /// own level; the session work strip resolves the same way).
+    /// </summary>
+    private string? _trustWorkspaceId;
+
+    private void ChooseTrust(ChangeEventArgs e)
+    {
+        // Null only when this window's own workspace is a worktree whose repository folder has no record
+        // (backlog 312): there is nothing to set a level ON. Refused in words and the picker's own value
+        // (bound to _trust, untouched here) stays exactly where it was, rather than accepting a choice that
+        // changes nothing.
+        if (_trustWorkspaceId is not { Length: > 0 } trustWorkspaceId)
+        {
+            _refusal = "This folder is a worktree whose repository is not registered, so its trust level cannot be set here.";
+            _said = null;
+            return;
+        }
+
+        _trust = Fravashi.Domain.AgentSessions.WorkspaceTrustLevels.Parse(e.Value?.ToString());
+        Trust.Set(trustWorkspaceId, _trust);
+        _refusal = null;
+        _said = _trust == Fravashi.Domain.AgentSessions.WorkspaceTrust.Edits
+            ? "Agents in this folder may now edit inside their copy without asking, once they have a work item and a plan. Commands and hidden paths still ask."
+            : "Agents in this folder ask before every change.";
+    }
+    private string _varName = string.Empty;
+    private string _varValue = string.Empty;
+    private bool _varSecret;
+
+    private static string Name(ProviderChoice choice) => choice == ProviderChoice.None ? "none" : "install";
+
+    private static string DeliveryName(Fravashi.Domain.Autopilot.AutopilotDeliveryMode mode) =>
+        mode == Fravashi.Domain.Autopilot.AutopilotDeliveryMode.CommitToMain ? "commit_to_main" : "branch_and_pull_request";
+
+    private void ChooseDelivery(ChangeEventArgs e)
+    {
+        if (_current is null)
+        {
+            return;
+        }
+
+        _delivery = e.Value?.ToString() == "commit_to_main"
+            ? Fravashi.Domain.Autopilot.AutopilotDeliveryMode.CommitToMain
+            : Fravashi.Domain.Autopilot.AutopilotDeliveryMode.BranchAndPullRequest;
+        Delivery.Set(_current.Id, _delivery);
+        _refusal = null;
+        _said = _delivery == Fravashi.Domain.Autopilot.AutopilotDeliveryMode.CommitToMain
+            ? "This project's autopilot now commits straight to main."
+            : "This project's autopilot now delivers each item on its own attempt branch as a pull request.";
+    }
+
+    private void AddVariable()
+    {
+        if (_current is null || string.IsNullOrWhiteSpace(_varName))
+        {
+            return;
+        }
+
+        var name = _varName.Trim();
+        _refusal = Variables.Set(_current.Id, name, _varValue, _varSecret);
+        if (_refusal is null)
+        {
+            _said = _varSecret ? $"{name} is stored as a secret; its value will not be shown again." : $"{name} is set.";
+            _varName = string.Empty;
+            _varValue = string.Empty;
+            _varSecret = false;
+            _variables = Variables.List(_current.Id);
+        }
+        else
+        {
+            _said = null;
+        }
+    }
+
+    private void RemoveVariable(string name)
+    {
+        if (_current is null)
+        {
+            return;
+        }
+
+        Variables.Remove(_current.Id, name);
+        _variables = Variables.List(_current.Id);
+        _refusal = null;
+        _said = $"{name} is removed.";
+    }
+
+    private void Choose(ChangeEventArgs e, bool board)
+    {
+        if (_current is null)
+        {
+            return;
+        }
+
+        var picked = e.Value?.ToString() == "none" ? ProviderChoice.None : ProviderChoice.Install;
+        _choice = board ? _choice with { Board = picked } : _choice with { Wiki = picked };
+        Providers.Set(_current.Id, _choice);
+        _refusal = null;
+        _said = (board ? "The board" : "The wiki") + (picked == ProviderChoice.None
+            ? " of this project now follows no provider. Nothing is sent from it, and what was sent before stays where it is."
+            : " of this project now follows the install's connection.");
+    }
+    private string? _refusal;
+    private string? _said;
+    private Fravashi.Application.Persistence.IConfigurationStore? _config;
+    private Fravashi.Application.Sessions.AgentDefault _agents = Fravashi.Application.Sessions.AgentDefault.None;
+
+    private void ChooseAgentModel(ChangeEventArgs e) => SetAgents(_agents with { Model = Fravashi.Application.Sessions.AgentDefaultsSetting.ValidModel(e.Value?.ToString()) });
+
+    private void ChooseAgentEffort(ChangeEventArgs e) => SetAgents(_agents with { Effort = Fravashi.Domain.AgentSessions.AgentEfforts.Parse(e.Value?.ToString()) });
+
+    private void SetAgents(Fravashi.Application.Sessions.AgentDefault value)
+    {
+        if (_current is null || _config is null)
+        {
+            return;
+        }
+
+        _agents = value;
+        Fravashi.Application.Sessions.ProjectAgentDefaults.Write(_config, _current.Id, value);
+        _refusal = null;
+        _said = "New conversations in this project start on that from now on.";
+    }
+
+    protected override void OnInitialized() => Load();
+
+    private void Load()
+    {
+        _workspace = Workspace.ActiveWorkspaceId is { Length: > 0 } id ? Workspaces.Get(id) : null;
+        _projects = Projects.List();
+        _current = CurrentProject.Id is { } project ? Projects.Get(project) : null;
+        _picked = _current?.Id.Value;
+        _rename = _current?.Name ?? string.Empty;
+        _choice = _current is null ? ProjectProviderChoice.Default : Providers.For(_current.Id);
+        _delivery = _current is null
+            ? Fravashi.Domain.Autopilot.AutopilotDeliveryMode.BranchAndPullRequest
+            : Delivery.For(_current.Id);
+        _variables = _current is null ? [] : Variables.List(_current.Id);
+        _config = Services.GetService(typeof(Fravashi.Application.Persistence.IConfigurationStore)) as Fravashi.Application.Persistence.IConfigurationStore;
+        _agents = _current is null || _config is null
+            ? Fravashi.Application.Sessions.AgentDefault.None
+            : Fravashi.Application.Sessions.ProjectAgentDefaults.Read(_config, _current.Id);
+        _trustWorkspaceId = _workspace is null ? null : Fravashi.Application.Sessions.WorkspaceTrustScope.For(Workspaces, _workspace.Id);
+        _trust = _trustWorkspaceId is null ? Fravashi.Domain.AgentSessions.WorkspaceTrust.Ask : Trust.For(_trustWorkspaceId);
+    }
+
+    /// <summary>
+    /// Renames the project this folder is in. A name is only a label: every number, link and mirror stays keyed by
+    /// the project's id, so nothing points somewhere else afterwards.
+    /// </summary>
+    private void Rename()
+    {
+        if (_current is null || string.IsNullOrWhiteSpace(_rename))
+        {
+            return;
+        }
+
+        var name = _rename.Trim();
+        _refusal = Projects.Rename(_current.Id, name) ? null : "That project is not there any more.";
+        Load();
+        _said = _refusal is null ? $"This project is now called {name}." : null;
+    }
+
+    private void Move() => Settle(
+        _workspace is not null && _picked is { Length: > 0 } picked
+            ? Binding.Move(_workspace.Id, new ProjectId(picked))
+            : ProjectMove.Refused("Pick a project first."));
+
+    private void MoveToNew()
+    {
+        if (_workspace is null)
+        {
+            return;
+        }
+
+        Settle(Binding.MoveToNew(_workspace.Id, _newName));
+    }
+
+    private void Settle(ProjectMove move)
+    {
+        _refusal = move.Refusal;
+        if (move.Moved)
+        {
+            _newName = string.Empty;
+            Load();
+            _said = $"This folder is now in {_current?.Name}. Its pages follow from the next one you open.";
+        }
+        else
+        {
+            _said = null;
+        }
+    }
+}

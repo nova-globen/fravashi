@@ -1,0 +1,572 @@
+@namespace Fravashi.Web.Components.Code
+@using Fravashi.Application.Search
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@implements IDisposable
+@inject IRepositorySearchService SearchService
+@inject FileIconCatalog Icons
+@inject IJSRuntime JS
+
+@* The Search sidebar section's body (plan phase 3, ADR 0015): VS Code semantics. Query + replace
+   inputs with the Aa / ab / .* toggles inside the search field, optional include/exclude glob
+   fields, results grouped as a folder tree (default) or a flat file list, and replace per match /
+   per file / across all files with a one-level undo for the disk writes. Replace routing for open
+   dirty buffers stays with CodePage (the owner of the Monaco bridge); this component only raises
+   the callbacks. The tree/list toggle and the clear/close buttons live on the section header
+   (CodePage), driving this component through its public surface. *@
+<div class="code-search" data-testid="code-search-panel">
+    <div class="code-search-input-row">
+        <input class="studio-input code-search-input" placeholder="Search" value="@_pattern"
+               data-testid="code-search-query" aria-label="Search pattern"
+               @oninput="OnPatternInput" @onkeydown="OnQueryKeyDown" />
+        <span class="code-search-toggles">
+            <button type="button" class="code-search-toggle @(_caseSensitive ? "on" : string.Empty)"
+                    title="Match Case" aria-label="Match case" aria-pressed="@(_caseSensitive ? "true" : "false")"
+                    data-testid="code-search-case" @onclick="() => ToggleAsync(() => _caseSensitive = !_caseSensitive)">Aa</button>
+            <button type="button" class="code-search-toggle @(_wholeWord ? "on" : string.Empty)"
+                    title="Match Whole Word" aria-label="Match whole word" aria-pressed="@(_wholeWord ? "true" : "false")"
+                    data-testid="code-search-word" @onclick="() => ToggleAsync(() => _wholeWord = !_wholeWord)">ab</button>
+            <button type="button" class="code-search-toggle @(_regex ? "on" : string.Empty)"
+                    title="Use Regular Expression" aria-label="Use regular expression" aria-pressed="@(_regex ? "true" : "false")"
+                    data-testid="code-search-regex" @onclick="() => ToggleAsync(() => _regex = !_regex)">.*</button>
+        </span>
+    </div>
+    <div class="code-search-input-row">
+        <input class="studio-input code-search-input" placeholder="Replace" @bind="_replacement" @bind:event="oninput"
+               data-testid="code-search-replace" aria-label="Replacement text" />
+        <button type="button" class="code-search-toggle" title="Replace All"
+                aria-label="Replace in all files" data-testid="code-search-replace-all"
+                disabled="@(_results is null || _results.TotalMatches == 0)"
+                @onclick="() => _confirmReplaceAll = true">
+            <CodeIcon Kind="CodeIcon.IconKind.ReplaceAll" />
+        </button>
+    </div>
+    <button type="button" class="code-search-filters-toggle" data-testid="code-search-filters-toggle"
+            @onclick="() => _filtersOpen = !_filtersOpen">
+        @(_filtersOpen ? "Hide" : "Show") include/exclude filters
+    </button>
+    @if (_filtersOpen)
+    {
+        <input class="studio-input code-search-input" placeholder="Files to include (e.g. src/**/*.cs)"
+               @bind="_includeGlobs" @bind:event="oninput" data-testid="code-search-include"
+               aria-label="Files to include" @onkeydown="OnQueryKeyDown" />
+        <input class="studio-input code-search-input" placeholder="Files to exclude"
+               @bind="_excludeGlobs" @bind:event="oninput" data-testid="code-search-exclude"
+               aria-label="Files to exclude" @onkeydown="OnQueryKeyDown" />
+    }
+
+    @if (_lastReplace is { Count: > 0 })
+    {
+        <div class="code-search-undo-row" data-testid="code-search-undo-row">
+            <span>Replaced on disk in @_lastReplace.Count file@(_lastReplace.Count == 1 ? "" : "s").</span>
+            <button type="button" class="studio-btn studio-btn-alt code-search-undo-btn" data-testid="code-search-undo"
+                    title="Restore those files to their content from before the replace"
+                    @onclick="UndoReplaceAsync">
+                <CodeIcon Kind="CodeIcon.IconKind.Undo" /> Undo
+            </button>
+        </div>
+    }
+    @if (_undoNote is not null)
+    {
+        <p class="code-search-summary" data-testid="code-search-undo-note">@_undoNote</p>
+    }
+
+    @if (_searching)
+    {
+        <p class="page-sidebar-empty">Searching…</p>
+    }
+    else if (_results is { Error: { } error })
+    {
+        <p class="studio-error" data-testid="code-search-error">@error</p>
+    }
+    else if (_results is { } results)
+    {
+        <p class="code-search-summary" data-testid="code-search-summary">
+            @(results.TotalMatches == 0
+                ? "No results."
+                : $"{results.TotalMatches} result{(results.TotalMatches == 1 ? "" : "s")} in {results.Files.Count} file{(results.Files.Count == 1 ? "" : "s")}")
+            @if (results.Truncated)
+            {
+                <span class="code-search-truncated"> (stopped at the cap; narrow the query)</span>
+            }
+        </p>
+        <div class="code-search-results" data-testid="code-search-results">
+            @if (_treeView && _tree is { } tree)
+            {
+                @foreach (var file in tree.Files)
+                {
+                    @FileBlock(file)
+                }
+                @foreach (var dir in tree.Dirs)
+                {
+                    @DirBlock(dir)
+                }
+            }
+            else
+            {
+                @foreach (var file in results.Files)
+                {
+                    @FileBlock(file)
+                }
+            }
+        </div>
+    }
+</div>
+
+@if (_confirmReplaceAll && _results is { } confirmTarget)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _confirmReplaceAll = false">
+        <div class="studio-modal" data-testid="code-replace-confirm" @onclick:stopPropagation="true">
+            <h2>Replace all</h2>
+            <p class="studio-muted">
+                Replace @confirmTarget.TotalMatches occurrence@(confirmTarget.TotalMatches == 1 ? "" : "s")
+                across @confirmTarget.Files.Count file@(confirmTarget.Files.Count == 1 ? "" : "s") with
+                "@_replacement"?
+            </p>
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _confirmReplaceAll = false">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="code-replace-confirm-go"
+                        @onclick="ReplaceAllAsync">Replace All</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>A match the user clicked; CodePage opens the file and reveals the range.</summary>
+    public sealed record OpenMatchRequest(string Path, int Line, int Column, int Length);
+
+    /// <summary>CodePage-owned replace routing for open dirty buffers (returns occurrences replaced).</summary>
+    public sealed record BufferReplaceRequest(
+        string Path, string Pattern, bool IsRegex, bool CaseSensitive, bool WholeWord,
+        string Replacement, int? Line, int? Column);
+
+    [Parameter]
+    public EventCallback<OpenMatchRequest> OnOpenMatch { get; set; }
+
+    /// <summary>Which open files hold unsaved edits (their replaces must go through the buffer).</summary>
+    [Parameter]
+    public Func<string, bool> IsBufferDirty { get; set; } = _ => false;
+
+    [Parameter]
+    public Func<BufferReplaceRequest, Task<int>> ReplaceInBuffer { get; set; } = _ => Task.FromResult(0);
+
+    private const string ViewPrefKey = "search-view";
+
+    private string _pattern = string.Empty;
+    private string _replacement = string.Empty;
+    private string _includeGlobs = string.Empty;
+    private string _excludeGlobs = string.Empty;
+    private bool _caseSensitive;
+    private bool _wholeWord;
+    private bool _regex;
+    private bool _filtersOpen;
+    private bool _searching;
+    private bool _confirmReplaceAll;
+    private bool _treeView = true;
+    private bool _prefLoaded;
+    private SearchResultSet? _results;
+    private SearchDirNode? _tree;
+    private IReadOnlyList<ReplacedFile>? _lastReplace;
+    private string? _undoNote;
+    private readonly HashSet<string> _collapsedFiles = [];
+    private readonly HashSet<string> _collapsedDirs = [];
+    private CancellationTokenSource? _debounce;
+
+    /// <summary>True while results group under their folders (the default); false is the flat list.</summary>
+    public bool TreeView => _treeView;
+
+    /// <summary>Flip tree/list (the section-header toggle); the choice persists across sessions.</summary>
+    public async Task ToggleViewAsync()
+    {
+        _treeView = !_treeView;
+        StateHasChanged();
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.setPref", ViewPrefKey, _treeView ? "tree" : "list");
+        }
+        catch (JSException)
+        {
+            // Persistence is best effort.
+        }
+    }
+
+    /// <summary>Clear everything back to an empty search (the section-header clear/close buttons).</summary>
+    public void Reset()
+    {
+        _debounce?.Cancel();
+        _pattern = string.Empty;
+        _replacement = string.Empty;
+        _includeGlobs = string.Empty;
+        _excludeGlobs = string.Empty;
+        _caseSensitive = false;
+        _wholeWord = false;
+        _regex = false;
+        _filtersOpen = false;
+        _results = null;
+        _tree = null;
+        _lastReplace = null;
+        _undoNote = null;
+        _collapsedFiles.Clear();
+        _collapsedDirs.Clear();
+        StateHasChanged();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_prefLoaded)
+        {
+            _prefLoaded = true;
+            try
+            {
+                var stored = await JS.InvokeAsync<string?>("fravashiCode.getPref", ViewPrefKey);
+                if (stored == "list")
+                {
+                    _treeView = false;
+                    StateHasChanged();
+                }
+            }
+            catch (JSException)
+            {
+                // Tree stays the default.
+            }
+        }
+    }
+
+    // One file's result block (header row + match lines), shared by the list and tree renderings;
+    // the tree already shows the folder, so only the flat list repeats the directory next to the name.
+    private RenderFragment<SearchFileResult> FileBlock => file =>
+        @<div class="code-search-file">
+            <div class="code-search-file-row" @onclick="() => ToggleFile(file.RelativePath)">
+                <span class="code-twisty @(_collapsedFiles.Contains(file.RelativePath) ? string.Empty : "expanded")"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></span>
+                <img class="code-icon" src="@Icons.FileIconUrl(FileNameOf(file.RelativePath))" alt="" aria-hidden="true" />
+                <span class="code-name">@FileNameOf(file.RelativePath)</span>
+                @if (!_treeView)
+                {
+                    <span class="code-search-file-dir">@DirectoryOf(file.RelativePath)</span>
+                }
+                <span class="code-search-count">@file.Matches.Count</span>
+                @if (_replacement.Length > 0)
+                {
+                    <button type="button" class="code-section-action" title="Replace all in this file"
+                            aria-label="@($"Replace all in {file.RelativePath}")"
+                            @onclick="() => ReplaceInFileAsync(file.RelativePath)" @onclick:stopPropagation="true">
+                        <CodeIcon Kind="CodeIcon.IconKind.Replace" />
+                    </button>
+                }
+            </div>
+            @if (!_collapsedFiles.Contains(file.RelativePath))
+            {
+                @foreach (var match in file.Matches)
+                {
+                    <div class="code-search-match" @onclick="() => OnOpenMatch.InvokeAsync(new OpenMatchRequest(file.RelativePath, match.Line, match.Column, match.Length))">
+                        @{ var (before, hit, after) = SplitLine(match); }
+                        <span class="code-search-line">
+                            <span class="code-search-context">@before</span><mark>@hit</mark><span class="code-search-context">@after</span>
+                        </span>
+                        @if (_replacement.Length > 0)
+                        {
+                            <button type="button" class="code-section-action code-search-match-replace" title="Replace this match"
+                                    aria-label="Replace this match"
+                                    @onclick="() => ReplaceOneAsync(file.RelativePath, match)" @onclick:stopPropagation="true">
+                                <CodeIcon Kind="CodeIcon.IconKind.Replace" />
+                            </button>
+                        }
+                    </div>
+                }
+            }
+        </div>;
+
+    // One folder of the tree view: a collapsible header (compressed path label, VS Code style) with
+    // its files and subfolders indented beneath.
+    private RenderFragment<SearchDirNode> DirBlock => dir =>
+        @<div class="code-search-dir">
+            <div class="code-search-file-row" @onclick="() => ToggleDir(dir.Key)">
+                <span class="code-twisty @(_collapsedDirs.Contains(dir.Key) ? string.Empty : "expanded")"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></span>
+                <img class="code-icon" src="@Icons.FolderIconUrl(FileNameOf(dir.Key), !_collapsedDirs.Contains(dir.Key))" alt="" aria-hidden="true" />
+                <span class="code-name">@dir.Label</span>
+                <span class="code-search-count">@dir.MatchCount</span>
+            </div>
+            @if (!_collapsedDirs.Contains(dir.Key))
+            {
+                <div class="code-search-dir-children">
+                    @foreach (var file in dir.Files)
+                    {
+                        @FileBlock(file)
+                    }
+                    @foreach (var child in dir.Dirs)
+                    {
+                        @DirBlock(child)
+                    }
+                </div>
+            }
+        </div>;
+
+    private SearchQuery Query => new(
+        _pattern,
+        CaseSensitive: _caseSensitive,
+        WholeWord: _wholeWord,
+        IsRegex: _regex,
+        IncludeGlobs: string.IsNullOrWhiteSpace(_includeGlobs) ? null : _includeGlobs,
+        ExcludeGlobs: string.IsNullOrWhiteSpace(_excludeGlobs) ? null : _excludeGlobs);
+
+    private async Task OnPatternInput(ChangeEventArgs e)
+    {
+        _pattern = e.Value?.ToString() ?? string.Empty;
+        await DebouncedSearchAsync();
+    }
+
+    private async Task OnQueryKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await RunSearchAsync();
+        }
+    }
+
+    private async Task ToggleAsync(Action flip)
+    {
+        flip();
+        await DebouncedSearchAsync(immediate: true);
+    }
+
+    /// <summary>Type-to-search with a 300 ms quiet window, VS Code style.</summary>
+    private async Task DebouncedSearchAsync(bool immediate = false)
+    {
+        _debounce?.Cancel();
+        var cts = new CancellationTokenSource();
+        _debounce = cts;
+        try
+        {
+            if (!immediate)
+            {
+                await Task.Delay(300, cts.Token);
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            return;
+        }
+
+        if (!cts.IsCancellationRequested)
+        {
+            await RunSearchAsync();
+        }
+    }
+
+    private async Task RunSearchAsync()
+    {
+        if (string.IsNullOrEmpty(_pattern))
+        {
+            _results = null;
+            _tree = null;
+            StateHasChanged();
+            return;
+        }
+
+        _searching = true;
+        StateHasChanged();
+        try
+        {
+            _results = await SearchService.SearchAsync(Query);
+            _tree = BuildTree(_results.Files);
+            _collapsedFiles.Clear();
+            _collapsedDirs.Clear();
+        }
+        finally
+        {
+            _searching = false;
+        }
+
+        StateHasChanged();
+    }
+
+    private void ToggleFile(string path)
+    {
+        if (!_collapsedFiles.Remove(path))
+        {
+            _collapsedFiles.Add(path);
+        }
+    }
+
+    private void ToggleDir(string key)
+    {
+        if (!_collapsedDirs.Remove(key))
+        {
+            _collapsedDirs.Add(key);
+        }
+    }
+
+    private async Task ReplaceOneAsync(string path, SearchMatch match)
+    {
+        if (IsBufferDirty(path))
+        {
+            await ReplaceInBuffer(new BufferReplaceRequest(
+                path, _pattern, _regex, _caseSensitive, _wholeWord, _replacement, match.Line, match.Column));
+        }
+        else
+        {
+            RecordReplace(await SearchService.ReplaceAsync(Query, _replacement, [path], (match.Line, match.Column)));
+        }
+
+        await RunSearchAsync();
+    }
+
+    private async Task ReplaceInFileAsync(string path)
+    {
+        if (IsBufferDirty(path))
+        {
+            await ReplaceInBuffer(new BufferReplaceRequest(
+                path, _pattern, _regex, _caseSensitive, _wholeWord, _replacement, null, null));
+        }
+        else
+        {
+            RecordReplace(await SearchService.ReplaceAsync(Query, _replacement, [path]));
+        }
+
+        await RunSearchAsync();
+    }
+
+    private async Task ReplaceAllAsync()
+    {
+        _confirmReplaceAll = false;
+        if (_results is not { } results)
+        {
+            return;
+        }
+
+        var dirtyFiles = results.Files.Select(f => f.RelativePath).Where(IsBufferDirty).ToList();
+        var diskFiles = results.Files.Select(f => f.RelativePath).Where(p => !IsBufferDirty(p)).ToList();
+        foreach (var path in dirtyFiles)
+        {
+            await ReplaceInBuffer(new BufferReplaceRequest(
+                path, _pattern, _regex, _caseSensitive, _wholeWord, _replacement, null, null));
+        }
+
+        if (diskFiles.Count > 0)
+        {
+            RecordReplace(await SearchService.ReplaceAsync(Query, _replacement, diskFiles));
+        }
+
+        await RunSearchAsync();
+    }
+
+    /// <summary>Keep the pre-images of the latest disk replace so it can be undone (one level deep).</summary>
+    private void RecordReplace(ReplaceResult result)
+    {
+        _undoNote = null;
+        if (result.Files is { Count: > 0 } files)
+        {
+            _lastReplace = files;
+        }
+    }
+
+    private async Task UndoReplaceAsync()
+    {
+        if (_lastReplace is not { Count: > 0 } files)
+        {
+            return;
+        }
+
+        _lastReplace = null;
+        var result = await SearchService.RestoreAsync(files);
+        _undoNote = result.Error
+            ?? $"Restored {result.FilesChanged} file{(result.FilesChanged == 1 ? "" : "s")} to the content from before the replace.";
+        await RunSearchAsync();
+    }
+
+    // ---- Tree building (VS Code's search tree: folders compressed along single-child chains) ----
+
+    private sealed class SearchDirNode
+    {
+        public string Label = string.Empty;
+        public string Key = string.Empty;
+        public List<SearchDirNode> Dirs { get; } = [];
+        public List<SearchFileResult> Files { get; } = [];
+
+        public int MatchCount => Files.Sum(f => f.Matches.Count) + Dirs.Sum(d => d.MatchCount);
+    }
+
+    private static SearchDirNode BuildTree(IReadOnlyList<SearchFileResult> files)
+    {
+        var root = new SearchDirNode();
+        var byPath = new Dictionary<string, SearchDirNode> { [string.Empty] = root };
+        foreach (var file in files)
+        {
+            var dir = DirectoryOf(file.RelativePath);
+            EnsureDir(byPath, dir).Files.Add(file);
+        }
+
+        Compress(root);
+        return root;
+    }
+
+    private static SearchDirNode EnsureDir(Dictionary<string, SearchDirNode> byPath, string path)
+    {
+        if (byPath.TryGetValue(path, out var existing))
+        {
+            return existing;
+        }
+
+        var parentPath = DirectoryOf(path);
+        var parent = EnsureDir(byPath, parentPath);
+        var node = new SearchDirNode { Label = FileNameOf(path), Key = path };
+        parent.Dirs.Add(node);
+        byPath[path] = node;
+        return node;
+    }
+
+    /// <summary>Merge folder chains with a single subfolder and no files into one row ("src/App/Models").</summary>
+    private static void Compress(SearchDirNode node)
+    {
+        foreach (var child in node.Dirs)
+        {
+            while (child.Files.Count == 0 && child.Dirs.Count == 1)
+            {
+                var only = child.Dirs[0];
+                child.Label = $"{child.Label}/{only.Label}";
+                child.Key = only.Key;
+                child.Files.AddRange(only.Files);
+                child.Dirs.Clear();
+                child.Dirs.AddRange(only.Dirs);
+            }
+
+            Compress(child);
+        }
+    }
+
+    private static string FileNameOf(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash < 0 ? path : path[(slash + 1)..];
+    }
+
+    private static string DirectoryOf(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash <= 0 ? string.Empty : path[..slash];
+    }
+
+    /// <summary>Split a match line into before/hit/after for highlight rendering (trimmed like VS Code).</summary>
+    private static (string Before, string Hit, string After) SplitLine(SearchMatch match)
+    {
+        var line = match.LineText;
+        var start = Math.Clamp(match.Column - 1, 0, line.Length);
+        var end = Math.Clamp(start + match.Length, start, line.Length);
+        var before = line[..start];
+        if (before.Length > 40)
+        {
+            before = "…" + before[^39..];
+        }
+
+        var after = line[end..];
+        if (after.Length > 80)
+        {
+            after = after[..79] + "…";
+        }
+
+        return (before, line[start..end], after);
+    }
+
+    public void Dispose() => _debounce?.Cancel();
+}

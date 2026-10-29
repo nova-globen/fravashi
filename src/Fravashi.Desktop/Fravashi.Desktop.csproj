@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    fravashi.exe (the AssemblyName is the one place that names it):
+    the merged host executable (docs/plans/fravashi-unified-exe-and-workspaces.md, Phase 1).
+    One WinExe owns the whole host side: launcher orchestration (via the Fravashi.Launcher library),
+    the splash progress window, the borderless studio window (formerly a separate window executable, ADR 0014), and
+    the tray icon (formerly a separate tray executable). GUI subsystem so shortcuts show no console; console verbs
+    (stop, status, update, logs, broker, ...) attach to the PARENT console via NativeConsole.
+    Windows-only for now (decided 2026-08-01); other OSes come later.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Fravashi.Desktop</RootNamespace>
+    <AssemblyName>fravashi</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>..\Fravashi.Launcher\fravashi.ico</ApplicationIcon>
+    <Nullable>enable</Nullable>
+    <!--
+      Per-monitor v2, not the WinForms generator's SystemAware default. fravashi.exe is ONE resident
+      process that outlives every window (closing the studio window leaves it in the tray), so a
+      process-wide DPI fixed at start goes stale the moment the display scale changes and stays stale
+      for the rest of the day: reopening the window cannot help, because it is the same process.
+      Measured symptom (backlog 93): the window opened at two thirds scale with dead space around it
+      after the scale changed under a resident fravashi.exe. PerMonitorV2 makes the window follow the
+      monitor instead; the runtime half lives in MainWindow (WM_DPICHANGED plus per-DPI system
+      metrics for the borderless frame).
+    -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" />
+    <ProjectReference Include="..\Fravashi.Launcher\Fravashi.Launcher.csproj" />
+    <ProjectReference Include="..\Fravashi.Bridge\Fravashi.Bridge.csproj" />
+    <ProjectReference Include="..\Fravashi.AppRunner\Fravashi.AppRunner.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Hosts the bridge WebApplication (Kestrel); flows from the Bridge project but declared
+         explicitly so the publish always carries the ASP.NET runtime assets. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The brand icon, embedded so window + tray icons work under single-file publish. -->
+    <EmbeddedResource Include="..\Fravashi.Launcher\fravashi.ico" LogicalName="Fravashi.Desktop.icon.ico" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,394 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Web.Components.Sessions
+@using Fravashi.Web.Services
+@inject LiveSessionRegistry Registry
+@inject IWorkspaceStore Workspaces
+@inject BridgeWorkspaceContext BridgeContext
+@inject BridgeClient Bridge
+@inject NavigationManager Nav
+@inject ILogger<RecentConversationsCard> Logger
+@inject IServiceProvider Services
+@implements IDisposable
+
+@* Backlog 34: the ten most recent conversations across EVERY workspace, which is what makes this a
+   home card rather than a second copy of the sessions sidebar. Each row says which folder it belongs
+   to, what it was called, when it started and how it ended; clicking it opens it, and resume, open and
+   delete are beside it. *@
+
+<section class="dash-panel dash-panel-wide recent-conversations" aria-label="Recent conversations"
+         data-testid="recent-conversations">
+    <div class="dash-panel-head">
+        <span>Recent conversations</span>
+        @if (_rows.Count > 0)
+        {
+            <span class="home-panel-count" data-testid="recent-conversations-count">@CountLabel</span>
+        }
+    </div>
+
+    @if (_rows.Count == 0)
+    {
+        <p class="studio-muted home-empty" data-testid="recent-conversations-empty">
+            No conversations yet. Open a folder and start one in the Sessions area.
+        </p>
+    }
+    else
+    {
+        @* The Home rework (requested 2026-09-21): this list grows for as long as the product is used, so
+           it scrolls inside its own panel instead of pushing the cards under it off the page, and it can be
+           narrowed by typing: the title, the folder it belongs to, or how it ended. *@
+        <input type="search" class="studio-input home-filter" data-testid="recent-conversations-filter"
+               placeholder="Type to find a conversation by title, folder or state"
+               aria-label="Find a conversation" spellcheck="false" value="@_filter"
+               @oninput="e => _filter = e.Value?.ToString() ?? string.Empty" />
+
+        @if (Filtered.Count == 0)
+        {
+            <p class="studio-muted home-empty" data-testid="recent-conversations-nomatch">
+                No conversation matches "@_filter.Trim()".
+            </p>
+        }
+
+        <ul class="recent-conversation-list home-scroll">
+            @foreach (var row in Filtered)
+            {
+                <li class="recent-conversation-row" data-testid="recent-conversation-row">
+                    <button type="button" class="recent-conversation" data-testid="recent-conversation"
+                            disabled="@_busy" @onclick="() => OpenAsync(row, resume: false)">
+                        <span class="recent-conversation-title">@TitleOf(row.Record)</span>
+                        <span class="recent-conversation-meta">
+                            <span class="recent-conversation-workspace">@row.WorkspaceLabel</span>
+                            <span class="recent-conversation-sep" aria-hidden="true">·</span>
+                            <span class="recent-conversation-state recent-conversation-state-@SessionStateText.CssSuffix(row.Record.State)">
+                                @SessionStateText.Label(row.Record.State)
+                            </span>
+                            <span class="recent-conversation-sep" aria-hidden="true">·</span>
+                            <span class="recent-conversation-when"><LocalTime At="row.Record.StartedUtc" Style="Fravashi.Web.Services.LocalTimeStyle.Short" /></span>
+                        </span>
+                    </button>
+                    @* Work item #363: the three actions are compact icon buttons, each named for assistive technology
+                       (aria-label) and for the pointer (title), so the row keeps its width for the title. Delete still
+                       asks first, and its confirmation stays in words because it is the one that cannot be undone. *@
+                    <div class="recent-conversation-actions">
+                        @if (_confirmingDelete == row.Record.Id)
+                        {
+                            <button type="button" class="studio-link-btn recent-conversation-danger"
+                                    data-testid="recent-conversation-delete" @onclick="() => Delete(row)">
+                                Delete it
+                            </button>
+                            <button type="button" class="studio-link-btn"
+                                    data-testid="recent-conversation-delete-cancel"
+                                    @onclick="() => _confirmingDelete = null">
+                                Keep it
+                            </button>
+                        }
+                        else
+                        {
+                            <button type="button" class="recent-conversation-icon" data-testid="recent-conversation-resume"
+                                    title="Resume this conversation" aria-label="Resume this conversation"
+                                    disabled="@_busy" @onclick="() => OpenAsync(row, resume: true)">
+                                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+                                     stroke-linejoin="round" aria-hidden="true"><path d="M5 3.5v9l7.5-4.5z" /></svg>
+                            </button>
+                            <button type="button" class="recent-conversation-icon" data-testid="recent-conversation-open"
+                                    title="Open in sessions" aria-label="Open in sessions"
+                                    disabled="@_busy" @onclick="() => OpenAsync(row, resume: false)">
+                                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+                                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M9 3h4v4M13 3L7.5 8.5M11.5 9.5V13H3V4.5h3.5" />
+                                </svg>
+                            </button>
+                            <button type="button" class="recent-conversation-icon recent-conversation-icon-danger"
+                                    data-testid="recent-conversation-delete-ask"
+                                    title="Delete this conversation (asks first)" aria-label="Delete this conversation"
+                                    @onclick="() => AskDelete(row)">
+                                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+                                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" />
+                                </svg>
+                            </button>
+                        }
+                    </div>
+                    @if (_confirmingDelete == row.Record.Id)
+                    {
+                        <p class="studio-muted recent-conversation-hint" data-testid="recent-conversation-delete-hint">
+                            This forgets the conversation and its transcript. Nothing in the folder is touched.
+                        </p>
+                    }
+                    @if (_messageFor == row.Record.Id && _message is not null)
+                    {
+                        <p class="recent-conversation-message" role="alert" data-testid="recent-conversation-message">
+                            @_message
+                        </p>
+                    }
+                    @if (_messageFor == row.Record.Id && _sessionsInstead is not null)
+                    {
+                        <button type="button" class="studio-link-btn" data-testid="recent-conversation-workspace-instead"
+                                @onclick="() => OpenWorkspaceSessions(_sessionsInstead)">
+                            Open that folder's sessions
+                        </button>
+                    }
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@code {
+    /// <summary>One listed conversation: the stored record plus the folder name to show for it.</summary>
+    private sealed record Row(SessionRecord Record, string WorkspaceLabel, string? RootPath);
+
+    private IReadOnlyList<Row> _rows = [];
+
+    /// <summary>
+    /// How many conversations the card holds. It was ten while the list could neither scroll nor be searched;
+    /// now that it does both, ten would make the search box a promise the list could not keep.
+    /// </summary>
+    private const int MostRecent = 100;
+
+    private string _filter = string.Empty;
+
+    private IReadOnlyList<Row> Filtered
+    {
+        get
+        {
+            var needle = _filter.Trim();
+            return needle.Length == 0
+                ? _rows
+                : [.. _rows.Where(r =>
+                    TitleOf(r.Record).Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || (r.Record.DisplayTitle ?? string.Empty).Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || r.WorkspaceLabel.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || SessionStateText.Label(r.Record.State).Contains(needle, StringComparison.OrdinalIgnoreCase))];
+        }
+    }
+
+    private string CountLabel => Filtered.Count == _rows.Count ? $"{_rows.Count}" : $"{Filtered.Count} of {_rows.Count}";
+    private AgentSessionId? _confirmingDelete;
+    private AgentSessionId? _messageFor;
+    private string? _message;
+    private string? _sessionsInstead;
+    private bool _busy;
+
+    protected override void OnInitialized()
+    {
+        Registry.SessionsChanged += OnSessionsChanged;
+        _titles = new ConversationTitleSource(Services);
+        _titles.Changed += OnTitleLinksChanged;
+        Load();
+    }
+
+    /// <summary>Work item #351: titled by the linked work item, read after the first render so the list is not held up.</summary>
+    private ConversationTitleSource? _titles;
+
+    private string TitleOf(SessionRecord record) =>
+        _titles?.Title(record.Id, record.CustomTitle, record.Title)
+        ?? ConversationTitles.Display(record.CustomTitle, record.Title);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await RefreshTitlesAsync();
+        }
+    }
+
+    private async Task RefreshTitlesAsync()
+    {
+        if (_titles is not null && await _titles.LoadAsync(_rows.Select(r => r.Record.Id)))
+        {
+            StateHasChanged();
+        }
+    }
+
+    private void OnTitleLinksChanged(AgentSessionId session) => _ = InvokeAsync(RefreshTitlesAsync);
+
+    public void Dispose()
+    {
+        Registry.SessionsChanged -= OnSessionsChanged;
+        if (_titles is not null)
+        {
+            _titles.Changed -= OnTitleLinksChanged;
+            _titles.Dispose();
+        }
+    }
+
+    private void OnSessionsChanged() => InvokeAsync(async () =>
+    {
+        Load();
+        StateHasChanged();
+        await RefreshTitlesAsync();
+    });
+
+    /// <summary>
+    /// The workspace label is resolved exactly as the home page's recents resolve theirs: the workspace
+    /// store's row, written with the name the BRIDGE registered for that host folder. A conversation can
+    /// outlive its recents row (the row is droppable, the conversation is not), so a missing row degrades
+    /// to the id rather than hiding the conversation.
+    /// </summary>
+    private void Load()
+    {
+        var projects = Services.GetService(typeof(Fravashi.Application.Projects.IProjectStore)) as Fravashi.Application.Projects.IProjectStore;
+        _rows = [.. Registry.RecentConversations(MostRecent).Select(record =>
+        {
+            var workspace = Workspaces.Get(record.WorkspaceId);
+            // Item #373: the card spans every project, so a row names its project beside its folder.
+            return new Row(record, ProjectLabels.ForFolder(Workspaces, projects, record.WorkspaceId) ?? record.WorkspaceId, workspace?.RootPath);
+        })];
+    }
+
+    private void AskDelete(Row row)
+    {
+        _confirmingDelete = row.Record.Id;
+        Clear();
+    }
+
+    /// <summary>
+    /// Reuses the store's own delete through the registry (transcript included), behind a confirmation,
+    /// because a conversation is not recoverable from anywhere else once it is gone.
+    /// </summary>
+    private void Delete(Row row)
+    {
+        _confirmingDelete = null;
+        Clear();
+
+        if (!Registry.Delete(row.Record.Id))
+        {
+            _messageFor = row.Record.Id;
+            _message = "That conversation is still running. Stop it in the Sessions area first.";
+            return;
+        }
+
+        Load();
+    }
+
+    /// <summary>
+    /// Opens a conversation, in this window's workspace or in another one.
+    /// <para>
+    /// A window is bound to ONE workspace and re-imposes its <c>?ws=</c> on every top-level navigation,
+    /// so a conversation in the CURRENT workspace is a plain in-circuit navigation to /sessions/{id}.
+    /// </para>
+    /// <para>
+    /// For a conversation in ANOTHER workspace the adoption path is the same one the home page's "open
+    /// another folder" affordance uses: re-register the host folder with the bridge (the grant list is
+    /// per fravashi.exe process, so a row from an earlier run has no grant), stamp recents, then a FULL
+    /// navigation carrying that workspace's id. That path CAN carry a target session: an explicit ws on
+    /// the URL wins over the window's own (MainWindow.OnNavigationStarting adopts it rather than
+    /// re-imposing), so /sessions/{id}?ws={other} switches the window AND lands on the conversation.
+    /// </para>
+    /// <para>
+    /// The one case it cannot carry: the folder re-registering under a DIFFERENT id (a recents row
+    /// written before path canonicalization). This conversation then belongs to an id that no longer
+    /// names the workspace, so landing on it would show a pane bound to the new id with the conversation
+    /// nowhere in it, which reads as "your conversation is gone". There the reader is told why and
+    /// offered that folder's sessions area instead, rather than being moved somewhere that quietly
+    /// answers a different question.
+    /// </para>
+    /// </summary>
+    private async Task OpenAsync(Row row, bool resume)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _confirmingDelete = null;
+        Clear();
+
+        var active = BridgeContext.ActiveWorkspaceId;
+        if (string.Equals(active, row.Record.WorkspaceId, StringComparison.Ordinal))
+        {
+            Nav.NavigateTo(SessionRoute(row.Record.Id, workspaceId: null, resume));
+            return;
+        }
+
+        if (!BridgeContext.IsBridgeConfigured || row.RootPath is not { Length: > 0 } path)
+        {
+            // Host `dotnet run` dev fallback, or a conversation whose folder is not in recents any more:
+            // there is nothing to register with, so the ws query alone is the whole switch.
+            Nav.NavigateTo(SessionRoute(row.Record.Id, row.Record.WorkspaceId, resume), forceLoad: true);
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var registration = await Bridge.RegisterWorkspaceAsync(path, CancellationToken.None);
+            if (registration.Outcome == BridgeRegistrationOutcome.Unreachable)
+            {
+                Say(row, $"{path} could not be reached just now. If it is on a network drive or a "
+                    + "removable disk, connect it and try again.");
+                return;
+            }
+
+            var registered = registration.Workspace;
+            if (registration.Outcome == BridgeRegistrationOutcome.Missing || registered is null)
+            {
+                Say(row, $"{path} was not found on this machine. It may have been moved or renamed.");
+                return;
+            }
+
+            if (!string.Equals(registered.Id, row.Record.WorkspaceId, StringComparison.Ordinal))
+            {
+                Say(row, $"{path} is now known to {ProductName.Short} under a different id, so this conversation "
+                    + "cannot be opened directly in it.");
+                _sessionsInstead = registered.Id;
+                return;
+            }
+
+            Workspaces.Touch(registered.Id, registered.Name, registered.RootPath);
+            Nav.NavigateTo(SessionRoute(row.Record.Id, registered.Id, resume), forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Adopting the workspace {WorkspaceId} to open a conversation failed.",
+                row.Record.WorkspaceId);
+            Say(row, "The studio window could not be reached, so that folder could not be opened.");
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private void OpenWorkspaceSessions(string workspaceId) =>
+        Nav.NavigateTo($"/sessions?ws={Uri.EscapeDataString(workspaceId)}", forceLoad: true);
+
+    /// <summary>
+    /// The conversation's route. <c>resume</c> arms the sessions page to continue the conversation
+    /// rather than only read it; <c>ws</c> rides along only when the window has to switch workspace.
+    /// </summary>
+    private static string SessionRoute(AgentSessionId id, string? workspaceId, bool resume)
+    {
+        var route = $"/sessions/{id.Value:D}";
+        var query = new List<string>();
+        if (workspaceId is { Length: > 0 })
+        {
+            query.Add($"ws={Uri.EscapeDataString(workspaceId)}");
+        }
+
+        if (resume)
+        {
+            query.Add("resume=true");
+        }
+
+        return query.Count == 0 ? route : route + "?" + string.Join("&", query);
+    }
+
+    private void Say(Row row, string message)
+    {
+        _messageFor = row.Record.Id;
+        _message = message;
+    }
+
+    private void Clear()
+    {
+        _messageFor = null;
+        _message = null;
+        _sessionsInstead = null;
+    }
+}

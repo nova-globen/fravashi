@@ -1,0 +1,132 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@using Fravashi.Web.Services
+@using Microsoft.AspNetCore.Components.Forms
+@inject FluentIconCatalog Icons
+
+@* A searchable FluentUI icon dropdown (enumerated from the installed Icons package) OR an uploaded image.
+   The search box filters the real icon set and the results render the actual icons; picking one sets the icon
+   name. "Upload an image instead" registers a pending blob and references it by id. *@
+
+<div class="icon-picker" data-testid="@TestId">
+    <div class="icon-picker-current">
+        <SkillIconDisplay Icon="Value" BrandColor="@BrandColor" Size="40" Fallback="@Fallback"
+                          TestId="@($"{TestId}-current")" />
+        <div class="icon-picker-current-label">
+            @if (Value.IsUpload)
+            {
+                <span data-testid="@($"{TestId}-upload-name")">Uploaded image</span>
+            }
+            else if (Value.FluentIconName is { Length: > 0 } n)
+            {
+                <span data-testid="@($"{TestId}-selected")">@n</span>
+            }
+            else
+            {
+                <span class="studio-muted">No icon selected</span>
+            }
+            @if (Value.IsSet)
+            {
+                <button type="button" class="icon-picker-clear" @onclick="Clear"
+                        data-testid="@($"{TestId}-clear")">Clear</button>
+            }
+        </div>
+    </div>
+
+    <div class="icon-picker-modes">
+        <input class="studio-input icon-picker-search" type="search" placeholder="Search icons…"
+               @bind="_search" @bind:event="oninput" data-testid="@($"{TestId}-search")" />
+        <label class="studio-btn studio-btn-alt icon-picker-upload-btn">
+            Upload image
+            <InputFile OnChange="OnUploadAsync" accept="image/*" class="icon-picker-upload-input" />
+        </label>
+    </div>
+
+    @if (_error is not null)
+    {
+        <p class="ob-probe-fail-text" data-testid="@($"{TestId}-error")">@_error</p>
+    }
+
+    <div class="icon-picker-grid" data-testid="@($"{TestId}-grid")">
+        @foreach (var name in Results)
+        {
+            var iconName = name;
+            var selected = string.Equals(Value.FluentIconName, iconName, StringComparison.Ordinal);
+            <button type="button" class="icon-picker-item @(selected ? "selected" : string.Empty)"
+                    title="@iconName" @onclick="() => PickAsync(iconName)"
+                    data-testid="@($"{TestId}-item-{iconName}")">
+                @if (Icons.TryGetSvg(iconName, out var svg))
+                {
+                    <span class="icon-picker-item-svg">@((MarkupString)svg)</span>
+                }
+            </button>
+        }
+        @if (Results.Count == 0)
+        {
+            <p class="studio-muted" data-testid="@($"{TestId}-noresults")">No icons match "@_search".</p>
+        }
+    </div>
+    <p class="ob-field-hint">
+        Showing @Results.Count of @Icons.Count installed FluentUI icons@(string.IsNullOrWhiteSpace(_search) ? " (search to narrow)" : string.Empty).
+    </p>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public SkillIcon Value { get; set; } = SkillIcon.None;
+    [Parameter] public EventCallback<SkillIcon> ValueChanged { get; set; }
+
+    /// <summary>Raised when an image is uploaded, so the parent form can persist the pending blob on save.</summary>
+    [Parameter] public EventCallback<PendingResourceUpload> OnUpload { get; set; }
+
+    [Parameter] public string? BrandColor { get; set; }
+    [Parameter] public string? Fallback { get; set; }
+    [Parameter, EditorRequired] public string TestId { get; set; } = "icon";
+
+    private const int ResultLimit = 60;
+    private string _search = string.Empty;
+    private string? _error;
+
+    // Recomputed each render so typing in the search box filters live (the search box binds on oninput).
+    private IReadOnlyList<string> Results => Icons.Search(_search, ResultLimit);
+
+    private async Task PickAsync(string name)
+    {
+        _error = null;
+        Value = new SkillIcon(name, null);
+        await ValueChanged.InvokeAsync(Value);
+    }
+
+    private async Task Clear()
+    {
+        _error = null;
+        Value = SkillIcon.None;
+        await ValueChanged.InvokeAsync(Value);
+    }
+
+    private async Task OnUploadAsync(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        var file = e.File;
+        if (file is null)
+        {
+            return;
+        }
+
+        if (file.Size > FrameworkArtifactLimits.MaxResourceBytes)
+        {
+            _error = $"'{file.Name}' is over the {FrameworkArtifactLimits.MaxResourceLabel} limit.";
+            return;
+        }
+
+        using var stream = file.OpenReadStream(FrameworkArtifactLimits.MaxResourceBytes);
+        using var memory = new MemoryStream();
+        await stream.CopyToAsync(memory);
+        var upload = new PendingResourceUpload(
+            Guid.NewGuid().ToString("N"), file.Name, file.ContentType, memory.ToArray());
+
+        await OnUpload.InvokeAsync(upload);
+        Value = new SkillIcon(null, upload.Id);
+        await ValueChanged.InvokeAsync(Value);
+    }
+}

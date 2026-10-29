@@ -1,0 +1,435 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using System.Globalization
+@using Fravashi.Application.AgentSync
+@using Fravashi.Application.Autopilot
+@using Fravashi.Application.Projects
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.Autopilot
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Infrastructure.Autopilot
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Web.Components.Autopilot
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@inject TimeProvider Clock
+@inject ILogger<AutopilotCard> Logger
+@implements IDisposable
+
+@* Work item #358: the autopilot page (backlog 303, ADR 0031 decisions 13 and 14) is retired and this card on Home
+   is where the autopilot lives now. With no run open it says in plain words what the autopilot does, lists the items
+   marked for it, and offers Dispatch, which opens AutopilotDispatchForm (the retired autopilot page's own form, unchanged) in a
+   dialog styled like the start dialog; the form dispatches exactly as it did there. With a run open it shows what
+   the retired autopilot page showed for one: the queue with each item's stage, every running item with its live session pane
+   and its limits, the run's limits used so far (and any item-scoped stop on the still-open run), and the two stop
+   controls. Past runs moved to the Recent dispatches card beside it. It reads the run store and the live registry
+   and never ticks the engine itself (AutopilotEngineHost does, on its own timer), so it re-reads every few seconds.
+   The card's id is "autopilot": the parked-item explanation in Waiting for you sends a person to /#autopilot. *@
+
+@* Item #373: a project's card, drawn only for a folder that is set up (Home leads with the "not set up" state). *@
+@if (CurrentProject.IsSetUp())
+{
+<section class="dash-panel dash-panel-wide autopilot-card" id="autopilot" aria-label="Autopilot" data-testid="autopilot-card">
+    <div class="dash-panel-head">
+        <span>Autopilot</span>
+        <div class="dash-panel-tools">
+            @if (_run is { } open)
+            {
+                <span class="autopilot-state autopilot-state-running" data-testid="autopilot-state">Running, @Plural(open.Queue.Count, "item")</span>
+            }
+            else if (Available)
+            {
+                <span class="home-panel-count" data-testid="autopilot-marked-count" title="Ready items marked for the autopilot">@_marked.Count marked</span>
+                <button type="button" class="studio-btn" data-testid="autopilot-dispatch-open" @onclick="OpenDialog">Dispatch</button>
+            }
+        </div>
+    </div>
+
+    @if (!Available)
+    {
+        <p class="studio-muted insight-empty" data-testid="autopilot-unavailable">The autopilot is not available in this studio.</p>
+    }
+    else if (_run is not { } run)
+    {
+        <div class="autopilot-idle" data-testid="autopilot-idle">
+            @* Work item #363: the explanation is muted and shows two lines until "More" opens it, a real button rather
+               than a hover, so a keyboard and a touch screen reach the rest too. *@
+            <p class="autopilot-explain home-explain@(_explainOpen ? " is-open" : string.Empty)" id="autopilot-explain"
+               data-testid="autopilot-explain">
+                The autopilot builds the Ready work items you mark for it, unattended. Each item gets its own agent
+                session in its own git worktree; the result is judged against the item's acceptance, its commits are
+                reviewed by a second agent, and it is delivered the way this project delivers (a branch and a pull
+                request per project, or a commit to main). At most @_cap item@(_cap == 1 ? " runs" : "s run") at once,
+                the cap under Settings. Anything it cannot decide waits for you under Waiting for you.
+            </p>
+            <button type="button" class="studio-link-btn home-explain-toggle" data-testid="autopilot-explain-toggle"
+                    aria-expanded="@(_explainOpen ? "true" : "false")" aria-controls="autopilot-explain"
+                    @onclick="() => _explainOpen = !_explainOpen">
+                @(_explainOpen ? "Less" : "More")
+            </button>
+            @if (_marked.Count == 0)
+            {
+                <p class="studio-muted home-empty" data-testid="autopilot-marked-none">
+                    No Ready item is marked for the autopilot. Mark one on the <a href="/board">board</a> to dispatch it.
+                </p>
+            }
+            else
+            {
+                <p class="studio-muted autopilot-marked-head">Marked and Ready, in board order (a dispatch takes them all):</p>
+                <ul class="autopilot-marked-list" data-testid="autopilot-marked">
+                    @foreach (var item in _marked.Take(MarkedShown))
+                    {
+                        <li><a href="@($"/workitems/{item.Number}")" data-testid="autopilot-marked-item">#@item.Number @item.Title</a></li>
+                    }
+                </ul>
+                @if (_marked.Count > MarkedShown)
+                {
+                    <p class="studio-muted">And @(_marked.Count - MarkedShown) more on the <a href="/board">board</a>.</p>
+                }
+            }
+            @if (_message is { Length: > 0 } said)
+            {
+                <p class="rt-ok" role="status" data-testid="autopilot-message">@said</p>
+            }
+        </div>
+    }
+    else
+    {
+        // #308: every item the run's own cap lets it actively work, not merely the first; Queued is excluded here
+        // (it is already shown, with its own stage badge, in the queue) so "running" means what it says even on a
+        // cap-1 run, where this is still exactly one item.
+        var running = run.ActiveItems.Where(i => i.Stage != AutopilotItemStage.Queued).ToList();
+
+        <div class="autopilot-run" data-testid="autopilot-run">
+            <section class="autopilot-section" data-testid="autopilot-queue">
+                <h3>Queue</h3>
+                <ul class="autopilot-list">
+                    @foreach (var queued in run.Queue)
+                    {
+                        <li class="autopilot-queue-row @(run.ActiveItems.Any(a => a.Item == queued.Item) ? "autopilot-queue-row-current" : string.Empty)"
+                            data-testid="autopilot-queue-item">
+                            <span class="autopilot-queue-label">@ItemLabel(queued.Item)</span>
+                            <span class="autopilot-queue-stage" data-testid="autopilot-queue-item-stage">@queued.Stage</span>
+                        </li>
+                    }
+                </ul>
+            </section>
+
+            <section class="autopilot-section" data-testid="autopilot-running-item">
+                <h3>Running items</h3>
+                @if (running.Count == 0)
+                {
+                    <p class="studio-muted" data-testid="autopilot-running-item-none">Nothing is open; the run is about to conclude.</p>
+                }
+                else
+                {
+                    @foreach (var activeItem in running)
+                    {
+                        <div class="autopilot-running-item-block" data-testid="autopilot-running-item-block">
+                            <p class="autopilot-running-item-label" data-testid="autopilot-running-item-label">@ItemLabel(activeItem.Item) (@activeItem.Stage)</p>
+                            @if (activeItem.WaitingForCapacityReason is { Length: > 0 } waitingReason)
+                            {
+                                <p class="studio-muted" data-testid="autopilot-running-item-waiting-capacity">@waitingReason</p>
+                            }
+                            @if (BuilderSessions?.SessionFor(activeItem.Item) is not { } sessionId)
+                            {
+                                <p class="studio-muted" data-testid="autopilot-running-item-no-session">
+                                    No agent session has started building this item yet.
+                                </p>
+                            }
+                            else if (RunningWorkspaceId(run, sessionId) is not { Length: > 0 } workspaceId)
+                            {
+                                @* The run recorded no workspace (dispatched before #310, or one whose workspace could
+                                   not be reached at dispatch time) and the live registry does not know this session's
+                                   workspace either: an honest sentence, never the "no session" message, since one is
+                                   genuinely building. *@
+                                <p class="studio-muted" data-testid="autopilot-running-item-no-workspace">
+                                    A session is building this item, but this run recorded no workspace to show it in.
+                                </p>
+                            }
+                            else
+                            {
+                                <div class="autopilot-running-item-pane" data-testid="autopilot-running-item-pane">
+                                    <SessionPane WorkspaceId="@workspaceId" WorkingDirectory="@WorkingDirectoryFor(workspaceId)"
+                                                 SessionId="sessionId" Compact="true" />
+                                </div>
+                            }
+
+                            <ul class="autopilot-list">
+                                <li data-testid="autopilot-limit-money-per-item">
+                                    Money on this item: @SessionUsageFormat.Cost(activeItem.SpentUsd) of @SessionUsageFormat.Cost(run.Settings.Limits.MoneyPerItemUsd)
+                                </li>
+                                <li data-testid="autopilot-limit-failed-reviews">
+                                    Failed commit reviews: @activeItem.FailedReviews of @run.Settings.Limits.FailedCommitReviewsPerItem
+                                </li>
+                                <li data-testid="autopilot-limit-time-per-item">
+                                    Time on this item: @Duration(ItemElapsed(activeItem)) of @Duration(run.Settings.Limits.TimePerItem)
+                                </li>
+                            </ul>
+                        </div>
+                    }
+                }
+            </section>
+
+            <section class="autopilot-section" data-testid="autopilot-limits">
+                <h3>Limits used so far (this run)</h3>
+                <ul class="autopilot-list">
+                    <li data-testid="autopilot-limit-money-per-run">
+                        Money on this run: @SessionUsageFormat.Cost(run.SpentUsd) of @SessionUsageFormat.Cost(run.Settings.Limits.MoneyPerRunUsd)
+                    </li>
+                    <li data-testid="autopilot-limit-no-progress">
+                        No progress for: @Duration(Clock.GetUtcNow() - run.LastProgressUtc) of @Duration(run.Settings.Limits.NoProgressWindow)
+                    </li>
+                    @* #321: an item-scoped limit (failed commit reviews among them) can stop an item while the RUN stays
+                       open (its siblings keep going), and the queue only shows the item's bare stage name, never the
+                       figure that explains it. Shown here, on the open run itself. *@
+                    @foreach (var stop in run.Stops)
+                    {
+                        <li data-testid="autopilot-run-stop">
+                            @stop.LimitName: @stop.Figure@(stop.Reason is { Length: > 0 } reason ? $" ({reason})" : string.Empty)
+                        </li>
+                    }
+                </ul>
+            </section>
+
+            <section class="autopilot-section" data-testid="autopilot-stop-controls">
+                <h3>Stop</h3>
+                <div class="studio-form-actions">
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="autopilot-stop-now" @onclick="StopNowAsync">
+                        Stop now
+                    </button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="autopilot-stop-after-item"
+                            disabled="@run.StopAfterCurrentItem" @onclick="StopAfterCurrentItemAsync">
+                        @(run.StopAfterCurrentItem ? "Stopping after this item" : "Stop after this item")
+                    </button>
+                </div>
+            </section>
+        </div>
+    }
+</section>
+}
+
+@if (_dialogOpen && CurrentProject.IsSetUp())
+{
+    <div class="start-dialog-backdrop" data-testid="autopilot-dialog-backdrop">
+        <div class="start-dialog-scrim" @onclick="CloseDialog"></div>
+        <div class="start-dialog autopilot-dialog" role="dialog" aria-modal="true" aria-labelledby="autopilot-dialog-title"
+             data-testid="autopilot-dialog" @onkeydown="OnDialogKeyDown">
+            <header class="start-dialog-head">
+                <div class="start-dialog-titles">
+                    <h2 class="start-dialog-brand" id="autopilot-dialog-title">Autopilot</h2>
+                    <span class="start-dialog-subtitle">Dispatch the marked Ready items (@_marked.Count)</span>
+                </div>
+                <button type="button" class="start-dialog-close" data-testid="autopilot-dialog-close"
+                        title="Close (Esc)" aria-label="Close the dispatch dialog" @onclick="CloseDialog">
+                    <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                        <path d="m2 2 8 8M10 2l-8 8" />
+                    </svg>
+                </button>
+            </header>
+            <div class="autopilot-dialog-body">
+                <AutopilotDispatchForm Dispatched="OnDispatchedAsync" />
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    /// <summary>Where a link to this card goes: Home, scrolled to it (the card's id).</summary>
+    public const string Route = "/#autopilot";
+
+    /// <summary>How many marked items are named on the card before "and N more".</summary>
+    private const int MarkedShown = 6;
+
+    private AutopilotRun? _run;
+    private IReadOnlyList<WorkItem> _marked = [];
+    private int _cap = 1;
+    private bool _dialogOpen;
+    private bool _explainOpen;
+    private string? _message;
+    private readonly Dictionary<WorkItemId, WorkItem> _itemCache = [];
+    private readonly CancellationTokenSource _disposed = new();
+
+    private IAutopilotRunStore? Runs => Services.GetService<IAutopilotRunStore>();
+
+    private AutopilotEngine? Engine => Services.GetService<AutopilotEngine>();
+
+    private AutopilotBuilderSessions? BuilderSessions => Services.GetService<AutopilotBuilderSessions>();
+
+    private ITrackerResolver? Trackers => Services.GetService<ITrackerResolver>();
+
+    private ICurrentProject CurrentProject => Services.GetService<ICurrentProject>() ?? SingleProject.Instance;
+
+    /// <summary>The autopilot needs its run store and its dispatcher; a wiring with neither shows one plain line.</summary>
+    private bool Available => Runs is not null && Services.GetService<AutopilotDispatcher>() is not null;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        if (Available)
+        {
+            _ = PollAsync(_disposed.Token);
+        }
+    }
+
+    public void Dispose()
+    {
+        _disposed.Cancel();
+        _disposed.Dispose();
+    }
+
+    /// <summary>The open run (if any) with its queued items cached for display, the marked items, and the cap.</summary>
+    private async Task LoadAsync()
+    {
+        // Item #373: a folder that is not set up reads no project at all.
+        if (CurrentProject.Id is not { } project)
+        {
+            return;
+        }
+
+        if (Runs is not { } runs)
+        {
+            return;
+        }
+
+        _cap = Services.GetService<IAutopilotConcurrencySettings>()?.Cap() ?? 1;
+        var open = await runs.OpenRunsAsync();
+        _run = open.FirstOrDefault(r => r.Project == project);
+        if (Trackers is not { } trackers)
+        {
+            return;
+        }
+
+        var tracker = trackers.For(project);
+        if (_run is { } run)
+        {
+            foreach (var queued in run.Queue)
+            {
+                if (!_itemCache.ContainsKey(queued.Item) && await tracker.GetAsync(queued.Item) is { } item)
+                {
+                    _itemCache[queued.Item] = item;
+                }
+            }
+        }
+        else
+        {
+            _marked = AutopilotSelection.MarkedReadyInBoardOrder(await TrackerReads.AllAsync(tracker));
+        }
+    }
+
+    /// <summary>
+    /// Re-reads every few seconds, as the retired autopilot page did: the engine's host ticks on its own timer and the store raises
+    /// no change event. Each reload runs under the renderer, because LoadAsync writes what the markup reads; a reload
+    /// that fails (a locked database) is logged and skipped rather than ending the loop for the card's life.
+    /// </summary>
+    private async Task PollAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                await InvokeAsync(async () =>
+                {
+                    try
+                    {
+                        await LoadAsync();
+                        StateHasChanged();
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        Logger.LogWarning(ex, "The Autopilot card's periodic reload failed; it will try again on the next tick.");
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private void OpenDialog()
+    {
+        _message = null;
+        _dialogOpen = true;
+    }
+
+    private void CloseDialog() => _dialogOpen = false;
+
+    private void OnDialogKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            CloseDialog();
+        }
+    }
+
+    /// <summary>A dispatch went through: the dialog closes and the card shows the run that started.</summary>
+    private async Task OnDispatchedAsync()
+    {
+        _dialogOpen = false;
+        await LoadAsync();
+        _message = _run is null ? "Dispatched." : null;
+    }
+
+    private async Task StopNowAsync()
+    {
+        if (_run is { } run && Engine is { } engine)
+        {
+            await engine.StopNowAsync(run.Id);
+            await LoadAsync();
+        }
+    }
+
+    private async Task StopAfterCurrentItemAsync()
+    {
+        if (_run is { } run && Engine is { } engine)
+        {
+            await engine.StopAfterCurrentItemAsync(run.Id);
+            await LoadAsync();
+        }
+    }
+
+    private string WorkingDirectoryFor(string workspaceId)
+    {
+        if (Services.GetService<IWorkspaceAgentSync>() is not { } sync)
+        {
+            return string.Empty;
+        }
+
+        sync.EnsureStarted(workspaceId);
+        return sync.CopyPathFor(workspaceId) ?? string.Empty;
+    }
+
+    /// <summary>
+    /// The workspace to show a bound session's live pane in: the run's own recorded workspace first, and the live
+    /// session's own workspace (what SessionPane itself resolves) when the run named none, so a session genuinely
+    /// building is never reported as absent just because #310's base-workspace fields are null.
+    /// </summary>
+    private string? RunningWorkspaceId(AutopilotRun run, AgentSessionId sessionId) =>
+        run.BaseWorkspaceId is { Length: > 0 } recorded
+            ? recorded
+            : Services.GetService<LiveSessionRegistry>()?.Find(sessionId)?.WorkspaceId;
+
+    private string ItemLabel(WorkItemId id) =>
+        _itemCache.TryGetValue(id, out var item)
+            ? $"#{item.Number.ToString(CultureInfo.InvariantCulture)} {item.Title}"
+            : id.Value;
+
+    private TimeSpan ItemElapsed(AutopilotRunItem? item) =>
+        item?.StartedUtc is { } started ? Clock.GetUtcNow() - started : TimeSpan.Zero;
+
+    private static string Plural(int count, string noun) =>
+        count.ToString(CultureInfo.InvariantCulture) + " " + noun + (count == 1 ? string.Empty : "s");
+
+    internal static string Duration(TimeSpan span)
+    {
+        var minutes = (int)Math.Ceiling(Math.Max(0, span.TotalMinutes));
+        return minutes.ToString(CultureInfo.InvariantCulture) + " min";
+    }
+}

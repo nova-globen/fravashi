@@ -1,0 +1,40 @@
+@namespace Fravashi.Web.Components.Shell
+
+<nav class="studio-activitybar" aria-label="Studio activities">
+    <a class="studio-activity-brand" href="/" title="@(ProductName.Short)" aria-label="@(ProductName.Short) home">
+        <img src="brand/favicon.svg" alt="" width="26" height="26" />
+    </a>
+    @foreach (var activity in StudioActivities.All)
+    {
+        <a class="studio-activity @(activity.Area == CurrentArea ? "active" : string.Empty)"
+           href="@activity.Route"
+           title="@activity.Label"
+           data-area="@activity.Area.ToString()">
+            <ActivityIcon Area="activity.Area" />
+            <span class="studio-visually-hidden">@activity.Label</span>
+        </a>
+    }
+    @* The bottom action group (top to bottom): agent panel, theme cycler, notifications, settings. The
+       theme toggle and notification center moved here from the retired status bar / page bar so pages
+       are free to drop those bars entirely (the Code page does).
+
+       The agent toggle here is the FALLBACK copy (backlog 23). The one a user sees lives beside the
+       window buttons in the title bar, which is drawn only under html.window-host; this one is hidden
+       by that same class, so it appears only where the title bar does not and the panel is never left
+       with no control at all. *@
+    <div class="studio-rail-bottom">
+        <AgentPanelToggle Class="studio-rail-btn studio-agent-fallback" TestId="rail-agent-toggle" />
+        <ThemeToggle />
+        <NotificationCenter />
+        <a class="studio-activity studio-activity-settings @(CurrentArea == StudioArea.Settings ? "active" : string.Empty)"
+           href="/settings" title="Settings" aria-label="Settings" data-testid="activitybar-settings">
+            <ActivityIcon Area="StudioArea.Settings" />
+            <span class="studio-visually-hidden">Settings</span>
+        </a>
+    </div>
+</nav>
+
+@code {
+    [Parameter]
+    public StudioArea CurrentArea { get; set; }
+}

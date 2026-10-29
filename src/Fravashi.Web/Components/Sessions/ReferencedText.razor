@@ -1,0 +1,22 @@
+@namespace Fravashi.Web.Components.Sessions
+
+@* Plain text with every #N, @N and !N in it as a link (work item #351). The text is otherwise shown verbatim, exactly
+   as before: a person's own words and a tool row's label are never reinterpreted as markup. Inside a conversation a
+   click on a link opens its preview beside it (sessionScroll.js); elsewhere it is the link. *@
+@foreach (var piece in SessionReferences.Split(Text))
+{
+    if (piece.Reference is { } reference)
+    {
+        <a class="@SessionReferences.LinkClass" data-testid="session-ref" href="@SessionReferences.Route(reference)"
+           title="@SessionReferences.Tooltip(reference)">@piece.Text</a>
+    }
+    else
+    {
+        @piece.Text
+    }
+}
+
+@code {
+    [Parameter]
+    public string? Text { get; set; }
+}

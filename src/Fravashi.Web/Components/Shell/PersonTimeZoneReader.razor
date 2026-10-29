@@ -1,0 +1,27 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
+@inject PersonTimeZone Zone
+
+@* Backlog 246: reads the browser's time zone once per circuit, so every LocalTime says the PERSON's clock. Renders
+   nothing. If the browser cannot say, times stay in labelled UTC. *@
+
+@code {
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        try
+        {
+            Zone.Set(await JS.InvokeAsync<string?>("fravashiTimeZone.read"));
+        }
+        catch (Exception e) when (e is JSException or JSDisconnectedException or TaskCanceledException or InvalidOperationException)
+        {
+            // Left unknown: times stay in UTC and say so.
+        }
+    }
+}

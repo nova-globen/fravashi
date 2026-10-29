@@ -1,0 +1,105 @@
+@namespace Fravashi.Web.Components.Code
+
+@* Small inline-SVG icon set for the Code page chrome (VS-Code-style outline icons, drawn in the same
+   stroke style as ActivityIcon). Chevron points right; rotate it via CSS (.expanded) when open. *@
+<svg class="code-svg-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    @switch (Kind)
+    {
+        case IconKind.Chevron:
+            <path d="m6 4 4.5 4L6 12" />
+            break;
+        case IconKind.Close:
+            <path d="m4 4 8 8M12 4l-8 8" />
+            break;
+        case IconKind.Pin:
+            <path d="M9.3 2.3 13.7 6.7 12 8.4l-.4 3.2-2.4-2.4L5.6 12.8M7.6 9.6 5.2 7.2 8.4 6.8 10.1 5.1" />
+            <path d="M5.4 10.6 2.6 13.4" />
+            break;
+        case IconKind.Refresh:
+            <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
+            <path d="M13.7 1.9v2.9h-2.9" />
+            break;
+        case IconKind.CollapseAll:
+            <rect x="2.5" y="2.5" width="8" height="8" rx="1" />
+            <path d="M5 6.5h3" />
+            <path d="M13.5 5.5v6a2 2 0 0 1-2 2h-6" />
+            break;
+        case IconKind.Preview:
+            <path d="M1.8 8s2.3-4.4 6.2-4.4S14.2 8 14.2 8 11.9 12.4 8 12.4 1.8 8 1.8 8Z" />
+            <circle cx="8" cy="8" r="2" />
+            break;
+        case IconKind.Code:
+            <path d="m5.5 5-3 3 3 3" />
+            <path d="m10.5 5 3 3-3 3" />
+            break;
+        case IconKind.SaveAll:
+            <path d="M10.5 2.5H4a1.5 1.5 0 0 0-1.5 1.5v7A1.5 1.5 0 0 0 4 12.5h6a1.5 1.5 0 0 0 1.5-1.5V4.5Z" />
+            <path d="M5 2.5v3h4v-3" />
+            <path d="M13.5 5.5v6a2 2 0 0 1-2 2h-6" />
+            break;
+        case IconKind.Replace:
+            <path d="M3.5 5.5a4.5 3 0 0 1 8-1" />
+            <path d="M11.8 1.9v2.9H8.9" />
+            <rect x="7.5" y="7.5" width="6" height="6" rx="1" />
+            <path d="M2.5 9.5h3v3" />
+            break;
+        case IconKind.ReplaceAll:
+            <path d="M3.5 4.7a4 2.6 0 0 1 7-1" />
+            <path d="M10.8 1.5v2.4H8.4" />
+            <rect x="8" y="8" width="5.5" height="5.5" rx="1" />
+            <rect x="5" y="6" width="2.5" height="2.5" rx="0.5" />
+            <path d="M2.5 10h2.5v2.5" />
+            break;
+        case IconKind.CloseAll:
+            <path d="m2.5 5 4.5 4.5M7 5 2.5 9.5" />
+            <path d="m8.5 6.5 4.5 4.5M13 6.5 8.5 11" />
+            break;
+        case IconKind.ListTree:
+            <path d="M6.5 3.5H14" />
+            <path d="M8.5 8H14" />
+            <path d="M8.5 12.5H14" />
+            <path d="M3.5 5v5a2 2 0 0 0 2 2h1" />
+            break;
+        case IconKind.ListFlat:
+            <path d="M3 3.5h10" />
+            <path d="M3 8h10" />
+            <path d="M3 12.5h10" />
+            break;
+        case IconKind.Undo:
+            <path d="M3 6.5h6.5a3.5 3.5 0 0 1 0 7H6" />
+            <path d="M5.8 3.7 3 6.5l2.8 2.8" />
+            break;
+        case IconKind.Fetch:
+            <path d="M8 2v7" />
+            <path d="M5 6.5 8 9.5l3-3" />
+            <path d="M2.5 9.5v3a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-3" />
+            break;
+        case IconKind.Pull:
+            <path d="M8 2.5v10" />
+            <path d="M4 9l4 4 4-4" />
+            break;
+        case IconKind.Push:
+            <path d="M8 13.5v-10" />
+            <path d="M4 7l4-4 4 4" />
+            break;
+        case IconKind.BranchPlus:
+            <circle cx="4.5" cy="3.5" r="1.8" />
+            <circle cx="4.5" cy="12.5" r="1.8" />
+            <path d="M4.5 5.3v5.4" />
+            <path d="M4.5 8h4a2 2 0 0 0 2-2" />
+            <path d="M12.5 8.5v5M10 11h5" />
+            break;
+    }
+</svg>
+
+@code {
+    public enum IconKind
+    {
+        Chevron, Close, Pin, Refresh, CollapseAll, Preview, Code, SaveAll, Replace, ReplaceAll,
+        CloseAll, ListTree, ListFlat, Undo, Fetch, Pull, Push, BranchPlus,
+    }
+
+    [Parameter, EditorRequired]
+    public IconKind Kind { get; set; }
+}

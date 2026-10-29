@@ -1,0 +1,44 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@inject ThemeState Theme
+@inject IJSRuntime JS
+@implements IDisposable
+
+@* The light/dark/system cycler, living at the bottom of the activity rail (moved out of the retired
+   status bar). Icon reflects the CURRENT mode: sun (light), moon (dark), half disc (system). *@
+<button type="button" class="studio-rail-btn" @onclick="CycleAsync" data-testid="rail-theme-toggle"
+        title="@($"Theme: {Theme.Mode} (click to change)")" aria-label="@($"Theme: {Theme.Mode}")">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        @switch (Theme.Mode)
+        {
+            case DesignThemeModes.Light:
+                <circle cx="12" cy="12" r="4.2" />
+                <path d="M12 2.5v2.4M12 19.1v2.4M21.5 12h-2.4M4.9 12H2.5M18.7 5.3l-1.7 1.7M7 17l-1.7 1.7M18.7 18.7 17 17M7 7 5.3 5.3" />
+                break;
+            case DesignThemeModes.Dark:
+                <path d="M20.6 13.4A8.4 8.4 0 1 1 10.6 3.4a6.6 6.6 0 0 0 10 10Z" />
+                break;
+            default:
+                <circle cx="12" cy="12" r="8.6" />
+                <path d="M12 3.4a8.6 8.6 0 0 1 0 17.2Z" fill="currentColor" stroke="none" />
+                break;
+        }
+    </svg>
+</button>
+
+@code {
+    private async Task CycleAsync()
+    {
+        var mode = Theme.Cycle();
+        await JS.InvokeVoidAsync("fravashiTheme.apply", mode.ToString());
+        StateHasChanged();
+    }
+
+    protected override void OnInitialized() => Theme.Changed += OnThemeChanged;
+
+    private void OnThemeChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Theme.Changed -= OnThemeChanged;
+}

@@ -1,0 +1,59 @@
+@page "/onboarding/data"
+@layout OnboardingLayout
+@using Fravashi.Application.Persistence
+@using Fravashi.Infrastructure.Persistence
+@using Fravashi.Web.Services
+@inject DataDirectory DataDir
+@inject IConfigurationStore Config
+@inject OnboardingDraft Draft
+
+@* O1 - data-location step. The actual path is chosen at the launcher/volume level; the web app can only
+   display and confirm it, so this step shows the resolved directory, warns that it must never be lost, and
+   records the user's confirmation. O2 (all settings live in the DB) is inherent - this very confirmation is
+   written to the settings table. *@
+
+<div class="ob-step">
+    <h2>Where your data lives</h2>
+    <p>
+        Everything @(ProductName.Short) remembers - your configuration, credentials, and the local wiki/board - is stored
+        in a single folder, the <strong>data directory</strong>. In Docker this folder is a volume you mount
+        from the host.
+    </p>
+
+    <div class="ob-datadir" data-testid="data-directory">
+        <span class="ob-datadir-label">Resolved data directory</span>
+        <code class="ob-datadir-path">@DataDir.Path</code>
+        <span class="ob-datadir-file">Database: <code>@DataDir.DatabasePath</code></span>
+    </div>
+
+    <div class="ob-warning" role="alert">
+        <strong>This folder must never be lost.</strong> If it is deleted or the container is recreated
+        without a persistent volume mapped here, every setting and credential is gone and you start over.
+        Make sure this path is on durable, backed-up storage - not a temporary or in-container location.
+    </div>
+
+    <p class="ob-note">
+        The path itself is set where the container starts (the launcher's volume mapping or
+        <code>FRAVASHI_DATA_DIR</code>), not here - this step confirms you have understood it.
+    </p>
+
+    <FluentCheckbox @bind-Value="_confirmed" @bind-Value:after="OnConfirmed"
+                    Label="I understand the data directory must be kept safe and persistent."
+                    data-testid="confirm-datadir" />
+</div>
+
+@code {
+    private bool _confirmed;
+
+    protected override void OnInitialized()
+    {
+        _confirmed = string.Equals(Config.Get("Onboarding:DataLocationConfirmed"), "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void OnConfirmed()
+    {
+        Config.Set("Onboarding:DataLocationConfirmed", _confirmed ? "true" : "false");
+        // Tell the wizard chrome so the Next button re-evaluates its gate across the component boundary.
+        Draft.NotifyChanged();
+    }
+}

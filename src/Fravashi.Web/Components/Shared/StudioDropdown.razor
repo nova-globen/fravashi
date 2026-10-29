@@ -1,0 +1,372 @@
+@namespace Fravashi.Web.Components.Shared
+@using Microsoft.JSInterop
+
+@* The house dropdown (backlog 24, decided 2026-08-05): the studio's ONE dropdown idiom.
+
+   It is the shape the studio had already hand-rolled twice, in the onboarding status picker and in the
+   title-bar branch menu, generalised into a single-select component and extended with a subtitle and an
+   optional icon per option. New dropdowns use this; the remaining native selects migrate to it
+   opportunistically rather than in one sweep.
+
+   Two properties are the reason it won over Fluent and over a native select:
+
+   1. It is JavaScript-FREE. The open state is component-tracked and an invisible backdrop closes it on an
+      outside click, so it renders and behaves identically under server-side and interactive rendering with
+      no interop at all. That matters most in the window chrome, which is drawn before the circuit is
+      necessarily connected. The one exception is the OPTIONAL filter box, which asks the browser for
+      focus when it opens and degrades to a click when there is nobody to ask; every dropdown without
+      Filterable still opens, chooses and closes without a single interop call.
+   2. An option can say more than one word. A native `<option>` renders text and nothing else, so a
+      subtitle or a glyph has nowhere to go but the title attribute.
+
+   It deliberately does not reuse the `.studio-input` class. That class carries a 240px minimum width for
+   full-width form fields, and inheriting it is exactly how a 240px control ended up inside the compact
+   session composer.
+
+   Backlog 31 added the two things a long list needs: an optional filter box, and a per-option state class
+   the CALLER's stylesheet gives meaning to. The second is deliberately not a colour vocabulary here. The
+   title bar's branch list has to match the Git page's branch colouring, and it does that by wearing the
+   Git page's own classes, so the two cannot drift apart the way copied hex values do. *@
+
+<div class="@RootClass" data-testid="@TestId" @onkeydown="OnKeyDown">
+    <button type="button" class="studio-dropdown-trigger" aria-haspopup="listbox"
+            aria-expanded="@(_open ? "true" : "false")" aria-label="@AriaLabel" title="@(TitleText ?? Chosen?.Label)"
+            disabled="@Disabled" @onclick="ToggleAsync" data-testid="@($"{TestId}-trigger")">
+        @if (Chosen is { } chosen)
+        {
+            @* Unlike the option list, the closed trigger has nothing to line up with, so an iconless
+               option gets no slot at all. It is 21px, which is the difference between "CLI default" and
+               "CLI d..." in a 280px agent panel (measured). *@
+            @if (chosen.Icon is { Length: > 0 })
+            {
+                <span class="studio-dropdown-icon" aria-hidden="true"
+                      data-testid="@($"{TestId}-chosen-icon")">@chosen.Icon</span>
+            }
+            <span class="studio-dropdown-value">@chosen.Label</span>
+        }
+        else
+        {
+            <span class="studio-dropdown-placeholder">@Placeholder</span>
+        }
+        <span class="studio-dropdown-caret" aria-hidden="true">&#9662;</span>
+    </button>
+
+    @if (_open)
+    {
+        <div class="studio-dropdown-backdrop" @onclick="Close"></div>
+        <div class="studio-dropdown-panel" role="listbox" data-testid="@($"{TestId}-panel")">
+            @if (Filterable)
+            {
+                @* The wrapper is what sticks to the top of the scrolling panel. The input alone cannot:
+                   the panel's own 4px padding would leave a sliver down each side for the rows to scroll
+                   through. *@
+                <div class="studio-dropdown-filter-row">
+                    <input type="text" class="studio-dropdown-filter" data-testid="@($"{TestId}-filter")"
+                           placeholder="@FilterPlaceholder" aria-label="@FilterPlaceholder"
+                           @ref="_filterBox" value="@_filter" @oninput="OnFilterInput" />
+                </div>
+            }
+            @if (Options.Count == 0)
+            {
+                <p class="studio-dropdown-none" data-testid="@($"{TestId}-empty")">@EmptyText</p>
+            }
+            else if (Visible.Count == 0)
+            {
+                <p class="studio-dropdown-none" data-testid="@($"{TestId}-nomatch")">@NoMatchText</p>
+            }
+            else
+            {
+                @foreach (var option in Visible.Where(o => !o.Pinned))
+                {
+                    var selected = IsChosen(option);
+                    <button type="button" role="option" aria-selected="@(selected ? "true" : "false")"
+                            class="@OptionClass(option, selected)"
+                            disabled="@option.Unavailable" aria-disabled="@(option.Unavailable ? "true" : "false")"
+                            @onclick="() => ChooseAsync(option)"
+                            data-testid="@($"{TestId}-opt-{Slug(option.Value)}")">
+                        <span class="studio-dropdown-opt-icon" aria-hidden="true"
+                              data-testid="@($"{TestId}-icon-{Slug(option.Value)}")">@option.Icon</span>
+                        <span class="studio-dropdown-opt-text">
+                            <span class="studio-dropdown-opt-label">@option.Label</span>
+                            @if (option.Subtitle is { Length: > 0 } subtitle)
+                            {
+                                <span class="studio-dropdown-opt-subtitle"
+                                      data-testid="@($"{TestId}-subtitle-{Slug(option.Value)}")">@subtitle</span>
+                            }
+                        </span>
+                    </button>
+                }
+            }
+            @if (Pinned.Count > 0)
+            {
+                @* Backlog 128. The wrapper is what sticks, for the reason the filter's wrapper does: the panel
+                   has its own padding, and a row that stuck by itself would leave a sliver for the list to
+                   scroll through. *@
+                <div class="studio-dropdown-pinned-row" data-testid="@($"{TestId}-pinned")">
+                    @foreach (var option in Pinned)
+                    {
+                        var selected = IsChosen(option);
+                        <button type="button" role="option" aria-selected="@(selected ? "true" : "false")"
+                                class="@OptionClass(option, selected)"
+                                disabled="@option.Unavailable" aria-disabled="@(option.Unavailable ? "true" : "false")"
+                                @onclick="() => ChooseAsync(option)"
+                                data-testid="@($"{TestId}-opt-{Slug(option.Value)}")">
+                            <span class="studio-dropdown-opt-icon" aria-hidden="true"
+                                  data-testid="@($"{TestId}-icon-{Slug(option.Value)}")">@option.Icon</span>
+                            <span class="studio-dropdown-opt-text">
+                                <span class="studio-dropdown-opt-label">@option.Label</span>
+                                @if (option.Subtitle is { Length: > 0 } subtitle)
+                                {
+                                    <span class="studio-dropdown-opt-subtitle"
+                                          data-testid="@($"{TestId}-subtitle-{Slug(option.Value)}")">@subtitle</span>
+                                }
+                            </span>
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    /// <summary>Stable test id / DOM key prefix for this dropdown (e.g. <c>model-picker</c>).</summary>
+    [Parameter, EditorRequired] public string TestId { get; set; } = string.Empty;
+
+    /// <summary>Everything the user can choose from, in the order they should read it.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<StudioDropdownOption> Options { get; set; } = [];
+
+    /// <summary>
+    /// The chosen value. Null and the empty string mean the same thing here, so a caller whose own model
+    /// uses null for "not set" can hand it straight over and still have an empty-valued option match.
+    /// </summary>
+    [Parameter] public string? Value { get; set; }
+
+    /// <summary>
+    /// Raised with the chosen option's raw <see cref="StudioDropdownOption.Value"/>, empty string included.
+    /// Mapping the empty string back to null is the caller's policy, not this control's.
+    /// </summary>
+    [Parameter] public EventCallback<string> ValueChanged { get; set; }
+
+    /// <summary>Shown on the closed trigger when no option matches <see cref="Value"/>.</summary>
+    [Parameter] public string Placeholder { get; set; } = "Choose";
+
+    /// <summary>Shown in the open panel when there is nothing to choose from.</summary>
+    [Parameter] public string EmptyText { get; set; } = "Nothing to choose from.";
+
+    /// <summary>
+    /// Show a filter box at the top of the open panel. Off by default: a five-option list does not want
+    /// one, and a branch list on a real repository is unusable without it (backlog 31).
+    /// </summary>
+    [Parameter] public bool Filterable { get; set; }
+
+    /// <summary>Placeholder and accessible name for the filter box.</summary>
+    [Parameter] public string FilterPlaceholder { get; set; } = "Filter";
+
+    /// <summary>
+    /// Shown when there ARE options but the filter matches none of them. Distinct from
+    /// <see cref="EmptyText"/> on purpose: "nothing here" and "nothing matching what you typed" send the
+    /// user to two different next moves.
+    /// </summary>
+    [Parameter] public string NoMatchText { get; set; } = "No match.";
+
+    /// <summary>Extra classes on the root, for a caller that has to fit the control into its own chrome.</summary>
+    [Parameter] public string? Class { get; set; }
+
+    /// <summary>
+    /// Raised when the panel opens, before it renders its options. A caller whose list is expensive (the
+    /// title bar's branches are two git invocations) loads it here instead of on every parent render.
+    /// </summary>
+    [Parameter] public EventCallback Opened { get; set; }
+
+    /// <summary>Accessible name for the trigger; without one a screen reader reads only the current value.</summary>
+    [Parameter] public string? AriaLabel { get; set; }
+
+    /// <summary>
+    /// Native tooltip for the trigger. Defaults to the chosen option's own label, because a compact
+    /// trigger truncates with an ellipsis and the full value has to be recoverable without opening it.
+    /// </summary>
+    [Parameter] public string? TitleText { get; set; }
+
+    [Parameter] public bool Disabled { get; set; }
+
+    /// <summary>A smaller trigger for toolbars and composers, where a full form field does not fit.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    /// <summary>
+    /// Open the panel upwards. Needed wherever the control sits at the bottom of its pane (the session
+    /// composer), because a downward panel there opens off the bottom of the window.
+    /// </summary>
+    [Parameter] public bool DropUp { get; set; }
+
+    private bool _open;
+    private string _filter = string.Empty;
+    private bool _focusFilter;
+    private ElementReference _filterBox;
+
+    private string RootClass
+    {
+        get
+        {
+            var classes = new List<string>(5) { "studio-dropdown" };
+            if (Compact)
+            {
+                classes.Add("is-compact");
+            }
+
+            if (DropUp)
+            {
+                classes.Add("is-dropup");
+            }
+
+            if (_open)
+            {
+                classes.Add("is-open");
+            }
+
+            if (Class is { Length: > 0 } extra)
+            {
+                classes.Add(extra);
+            }
+
+            return string.Join(' ', classes);
+        }
+    }
+
+    private StudioDropdownOption? Chosen => Options.FirstOrDefault(IsChosen);
+
+    /// <summary>
+    /// The options the open panel actually draws. The filter reads the subtitle and the caller's extra
+    /// filter text as well as the label, because an option's distinguishing word is often not in its
+    /// label at all (a branch's remote lives in its subtitle).
+    /// </summary>
+    /// <summary>
+    /// The actions that stay in sight (backlog 128). Taken from every option rather than from the filtered ones:
+    /// a filter narrows what is being looked for, and an action is not one of those things.
+    /// </summary>
+    private IReadOnlyList<StudioDropdownOption> Pinned => [.. Options.Where(o => o.Pinned)];
+
+    private IReadOnlyList<StudioDropdownOption> Visible
+    {
+        get
+        {
+            if (!Filterable || _filter.Length == 0)
+            {
+                return Options;
+            }
+
+            return [.. Options.Where(o => Matches(o, _filter))];
+        }
+    }
+
+    private static bool Matches(StudioDropdownOption option, string term) =>
+        option.Label.Contains(term, StringComparison.OrdinalIgnoreCase)
+        || (option.Subtitle?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+        || (option.FilterText?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false);
+
+    private static string OptionClass(StudioDropdownOption option, bool selected)
+    {
+        var classes = new List<string>(4) { "studio-dropdown-option" };
+        if (selected)
+        {
+            classes.Add("is-selected");
+        }
+
+        if (option.Unavailable)
+        {
+            classes.Add("is-unavailable");
+        }
+
+        if (option.StateClass is { Length: > 0 } state)
+        {
+            classes.Add(state);
+        }
+
+        return string.Join(' ', classes);
+    }
+
+    private bool IsChosen(StudioDropdownOption option) =>
+        string.Equals(option.Value, Value ?? string.Empty, StringComparison.Ordinal);
+
+    private async Task ToggleAsync()
+    {
+        _open = !_open;
+        // A stale filter would hide most of the list the next time the panel opens, with the reason for
+        // it sitting in a box the user has to look at to understand why.
+        _filter = string.Empty;
+        if (_open)
+        {
+            _focusFilter = Filterable;
+            await Opened.InvokeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Put the caret in the filter box when the panel opens, so "searchable by typing" means typing and
+    /// not clicking first. This is the ONE place the control talks to the browser, and it is deliberately
+    /// a request rather than a requirement: the plain HTML <c>autofocus</c> attribute was tried first and
+    /// measured not to fire at all, because a document processes autofocus once and this panel is inserted
+    /// long after that. Where there is no circuit to ask (prerender, a dropped connection) the box is
+    /// still there to click, so nothing that worked before stops working.
+    /// </summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_focusFilter)
+        {
+            return;
+        }
+
+        _focusFilter = false;
+        try
+        {
+            await _filterBox.FocusAsync();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSDisconnectedException)
+        {
+            // No renderer or no circuit. Clicking the box still works.
+        }
+    }
+
+    private void Close()
+    {
+        _open = false;
+        _filter = string.Empty;
+    }
+
+    private void OnFilterInput(ChangeEventArgs e) => _filter = e.Value?.ToString() ?? string.Empty;
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            Close();
+        }
+    }
+
+    private async Task ChooseAsync(StudioDropdownOption option)
+    {
+        // A disabled button already takes no click; this is for anything that calls in by another route.
+        if (option.Unavailable)
+        {
+            return;
+        }
+
+        Close();
+        await ValueChanged.InvokeAsync(option.Value);
+    }
+
+    /// <summary>
+    /// A DOM-safe suffix for an option's test id. An empty value is a real option (it is how "leave it
+    /// alone" is spelled), so it gets its own name rather than an empty suffix that reads as a typo.
+    /// </summary>
+    private static string Slug(string value)
+    {
+        if (value.Length == 0)
+        {
+            return "none";
+        }
+
+        var slug = new string([.. value.Select(c => char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : '-')]);
+        return slug;
+    }
+}

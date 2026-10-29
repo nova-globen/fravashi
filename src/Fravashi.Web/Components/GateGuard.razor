@@ -1,0 +1,104 @@
+@namespace Fravashi.Web.Components
+@using Fravashi.Web.Services
+@inject NavigationManager Nav
+@inject IServiceProvider Services
+@inject ILogger<GateGuard> Logger
+@implements IDisposable
+
+@* Backlog 282 (plan @100): the full-page gates are HTTP middleware, and the studio is one interactive circuit, so an
+   in-app navigation (a rail link, a NavigateTo, the title bar's history buttons, browser back and forward) makes no HTTP
+   request and never met them: measured on v0.9.74, a click on Wiki from /integrity-failed rendered /wiki with no
+   document load. Rendered once by Routes.razor, the interactive root every page goes through, this asks the SAME
+   decision the middleware asks (StudioGates.RedirectAsync) for every in-app navigation and, when a gate would
+   redirect, cancels it and loads the target as a full page instead, so the middleware answers with its redirect.
+   It renders nothing. It sees navigations only: a circuit action that navigates nowhere (the title bar's branch
+   switcher, a git checkout on the host) never reaches it, which is why MinimalWindowLayout does not offer that.
+   History: blazor.web.js undoes a popstate BEFORE it asks this handler (it steps history back, then asks), so the
+   forced load below starts from the entry the person was on and the prevented entry is not left behind.
+   A failure while asking (a store that throws) also forces the full load: the middleware is where the gates are
+   authoritative, and an unanswered question must not let the navigation through.
+   Registered after the first render because only an interactive circuit has location-changing handlers; a static
+   render (the re-executed Error page) has no in-app navigation to guard. *@
+
+@code {
+    private IDisposable? _registration;
+
+    // The forced load this guard itself started. The server's NavigationManager runs every location-changing handler
+    // for a programmatic NavigateTo, forced or not, so without this the forced load would come straight back here,
+    // still meet the closed gate, and force again for ever (synchronously, for a gate that answers without awaiting).
+    private string? _forcing;
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _registration = Nav.RegisterLocationChangingHandler(OnLocationChangingAsync);
+        }
+    }
+
+    private async ValueTask OnLocationChangingAsync(LocationChangingContext context)
+    {
+        if (_forcing is not null && !context.IsNavigationIntercepted
+            && string.Equals(_forcing, context.TargetLocation, StringComparison.Ordinal))
+        {
+            // Our own forced load passing through on its way to the browser, where the middleware answers it.
+            _forcing = null;
+            return;
+        }
+
+        var absolute = Nav.ToAbsoluteUri(context.TargetLocation);
+        if (!string.Equals(
+                new Uri(Nav.BaseUri).GetLeftPart(UriPartial.Authority),
+                absolute.GetLeftPart(UriPartial.Authority),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            // #372: a navigation that leaves the studio (the sign-in page sending the window to the identity provider)
+            // is no in-app route, and no gate here has anything to say about another site; the way back in is a full
+            // page load the middleware answers. Asking used to make the sign-in gate try to renew the expired session on
+            // every Sign in click, and record its refusal again.
+            return;
+        }
+
+        var path = AsRequestPath(absolute.AbsolutePath);
+        string? target;
+        try
+        {
+            target = await StudioGates.RedirectAsync(path, Services, context.CancellationToken);
+        }
+        catch (OperationCanceledException) when (context.CancellationToken.IsCancellationRequested)
+        {
+            // A newer navigation superseded this one; it is asked on its own.
+            return;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "A gate could not be asked about an in-app navigation to {Path}; loading it as a full page so the middleware answers.", path);
+            target = path;
+        }
+
+        if (target is null)
+        {
+            return;
+        }
+
+        context.PreventNavigation();
+        _forcing = context.TargetLocation;
+        Nav.NavigateTo(context.TargetLocation, forceLoad: true);
+    }
+
+    /// <summary>
+    /// The path as the middleware's Request.Path will hold it for the same URL: Kestrel percent-decodes every escape
+    /// except an encoded slash (%2F), which stays encoded so it cannot invent a segment. Asked on the undecoded form
+    /// instead, a path such as <c>/sign%2Din</c> or an escaped static asset route would differ from the middleware's
+    /// answer, because the gates' prefixes and StaticAssetRoutes compare the decoded text.
+    /// </summary>
+    internal static string AsRequestPath(string encodedPath)
+    {
+        var keptSlashes = encodedPath
+            .Replace("%2F", "%252F", StringComparison.Ordinal)
+            .Replace("%2f", "%252f", StringComparison.Ordinal);
+        return Uri.UnescapeDataString(keptSlashes);
+    }
+
+    public void Dispose() => _registration?.Dispose();
+}

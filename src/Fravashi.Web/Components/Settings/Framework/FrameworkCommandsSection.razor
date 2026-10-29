@@ -1,0 +1,24 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+
+@* Dispatches the Commands CRUD routes under Settings › Framework › Commands. *@
+
+@switch (Action?.ToLowerInvariant())
+{
+    case "new":
+        <CommandForm />
+        break;
+    case "edit":
+        <CommandForm Id="@Id" />
+        break;
+    case "view":
+        <CommandView Id="@Id" />
+        break;
+    default:
+        <CommandList />
+        break;
+}
+
+@code {
+    [Parameter] public string? Action { get; set; }
+    [Parameter] public string? Id { get; set; }
+}

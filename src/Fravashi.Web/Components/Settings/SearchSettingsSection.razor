@@ -1,0 +1,53 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Search
+@inject IConfigurationStore ConfigStore
+@inject IConfigurationReloader Reloader
+@inject INotificationHistory Notifications
+
+@* Settings > Advanced > Search ignore rules (ADR 0015): the ignore rules the Code page's find-in-files applies
+   on top of the repository's own .gitignore. Gitignore syntax, one pattern per line; stored in the
+   settings table and picked up by the next search, no restart. *@
+<div class="ob-step" data-testid="search-settings">
+    <h2>Search</h2>
+    <p class="studio-muted">
+        Paths excluded from find-in-files on the Code page, using gitignore syntax (one pattern per
+        line, <code>#</code> comments, <code>!</code> negation). These apply on top of the
+        repository's own <code>.gitignore</code>. Changes take effect on the next search.
+    </p>
+    <label class="studio-modal-field">
+        <span>Ignored paths</span>
+        <textarea class="studio-input code-ignore-rules" rows="16" spellcheck="false"
+                  data-testid="search-ignore-rules" @bind="_rules" @bind:event="oninput"></textarea>
+    </label>
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn studio-btn-alt" data-testid="search-ignore-reset"
+                @onclick="ResetToDefaults">Reset to defaults</button>
+        <button type="button" class="studio-btn" data-testid="search-ignore-save"
+                disabled="@(!_dirty)" @onclick="Save">Save</button>
+    </div>
+</div>
+
+@code {
+    private string _rules = string.Empty;
+    private string _saved = string.Empty;
+
+    private bool _dirty => !string.Equals(_rules, _saved, StringComparison.Ordinal);
+
+    protected override void OnInitialized()
+    {
+        _saved = ConfigStore.Get(SearchDefaults.IgnoreRulesKey) ?? SearchDefaults.IgnoreRules;
+        _rules = _saved;
+    }
+
+    private void ResetToDefaults() => _rules = SearchDefaults.IgnoreRules;
+
+    private void Save()
+    {
+        ConfigStore.Set(SearchDefaults.IgnoreRulesKey, _rules);
+        Reloader.Reload();
+        _saved = _rules;
+        Notifications.Add("Search ignore rules saved.", NotificationSeverity.Success);
+    }
+}

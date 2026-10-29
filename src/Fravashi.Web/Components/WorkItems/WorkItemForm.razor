@@ -1,0 +1,201 @@
+@namespace Fravashi.Web.Components.WorkItems
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.WorkItems
+
+@* Backlog 38: authoring an item from the studio. The form holds no rules of its own. It sends what was typed
+   and renders whatever the domain says back, placed under the field each refusal names, so a missing
+   description reads as the model's own sentence rather than one the UI invented and could let drift. *@
+<div class="work-item-form" data-testid="work-item-form">
+    <div class="work-item-form-head">
+        <span class="work-item-form-title">
+            @(Draft.IsNew ? "New work item" : $"Edit #{Draft.Existing!.Number}")
+        </span>
+    </div>
+
+    @if (Errors.Count > 0)
+    {
+        <div class="session-error" data-testid="work-item-form-errors">
+            <span class="session-error-mark" aria-hidden="true">!</span>
+            <span class="session-error-text">
+                @foreach (var error in Errors)
+                {
+                    <span class="work-item-form-error-line">@error.Message</span>
+                }
+            </span>
+        </div>
+    }
+
+    <label class="work-item-field">
+        <span class="work-item-field-label">Title</span>
+        <input class="studio-input" data-testid="work-item-title" value="@Draft.Title"
+               @oninput="e => Draft.Title = e.Value?.ToString() ?? string.Empty" />
+        @foreach (var message in For("title"))
+        {
+            <span class="work-item-field-error" data-testid="work-item-title-error">@message</span>
+        }
+    </label>
+
+    <label class="work-item-field">
+        <span class="work-item-field-label">Description</span>
+        <textarea class="studio-input work-item-textarea" data-testid="work-item-description" rows="5"
+                  @oninput="e => Draft.Description = e.Value?.ToString() ?? string.Empty">@Draft.Description</textarea>
+        @foreach (var message in For("description"))
+        {
+            <span class="work-item-field-error" data-testid="work-item-description-error">@message</span>
+        }
+    </label>
+
+    <label class="work-item-field">
+        <span class="work-item-field-label">Level</span>
+        <select class="studio-input" data-testid="work-item-level"
+                @onchange="e => Draft.Level = Parse(e.Value, Draft.Level)">
+            @foreach (var level in Levels)
+            {
+                <option value="@StableNames.ToName(level)" selected="@(level == Draft.Level)">@level</option>
+            }
+        </select>
+        @foreach (var message in For("level"))
+        {
+            <span class="work-item-field-error" data-testid="work-item-level-error">@message</span>
+        }
+    </label>
+
+    @if (Draft.IsNew)
+    {
+        @* Only on a new item: an existing item's status moves by a transition, which is a different act with
+           its own rules, and offering it here as a plain field would quietly bypass them. *@
+        <label class="work-item-field">
+            <span class="work-item-field-label">Status</span>
+            <select class="studio-input" data-testid="work-item-status"
+                    @onchange="e => Draft.Status = Parse(e.Value, Draft.Status)">
+                @foreach (var status in Statuses)
+                {
+                    <option value="@StableNames.ToName(status)" selected="@(status == Draft.Status)">@status</option>
+                }
+            </select>
+        </label>
+    }
+
+    <label class="work-item-field">
+        <span class="work-item-field-label">Next action</span>
+        <input class="studio-input" data-testid="work-item-next-action" value="@Draft.NextAction"
+               @oninput="e => Draft.NextAction = e.Value?.ToString() ?? string.Empty" />
+        @foreach (var message in For("next_action"))
+        {
+            <span class="work-item-field-error" data-testid="work-item-next-action-error">@message</span>
+        }
+    </label>
+
+    @* Requested 2026-10-22 (model and effort per work item): what a conversation started from this item runs
+       on. Default on either leaves that conversation exactly as it would have been started without the field. The
+       model offers the three family aliases the session model menu offers, so the item keeps meaning "the current
+       one of that family" while it waits; the commit reviewer and the autopilot operator never read either. *@
+    <label class="work-item-field">
+        <span class="work-item-field-label">Suggested model</span>
+        <select class="studio-input" data-testid="work-item-suggested-model"
+                @onchange="e => Draft.SuggestedModel = AgentModelAliases.Parse(e.Value?.ToString())">
+            <option value="" selected="@(Draft.SuggestedModel is null)">Default</option>
+            @foreach (var alias in AgentModelAliases.All)
+            {
+                <option value="@alias.CliId()" selected="@(alias == Draft.SuggestedModel)">@alias.CliId()</option>
+            }
+        </select>
+        @foreach (var message in For("suggestedModel"))
+        {
+            <span class="work-item-field-error" data-testid="work-item-suggested-model-error">@message</span>
+        }
+    </label>
+
+    <label class="work-item-field">
+        <span class="work-item-field-label">Suggested effort</span>
+        <select class="studio-input" data-testid="work-item-suggested-effort"
+                @onchange="e => Draft.SuggestedEffort = AgentEfforts.Parse(e.Value?.ToString())">
+            <option value="" selected="@(Draft.SuggestedEffort is null)">Default</option>
+            @foreach (var effort in AgentEfforts.All)
+            {
+                <option value="@effort.CliValue()" selected="@(effort == Draft.SuggestedEffort)">@effort.CliValue()</option>
+            }
+        </select>
+        @foreach (var message in For("suggestedEffort"))
+        {
+            <span class="work-item-field-error" data-testid="work-item-suggested-effort-error">@message</span>
+        }
+    </label>
+
+    @* Backlog 178: the done-test is written here by a person, not only by an agent's tools. A row is sent as
+       typed, blank included, so a blank one is refused in the domain's own sentence rather than dropped by the
+       form; the store's refusal to drop a criterion that evidence points at lands here too. *@
+    <div class="work-item-field" data-testid="work-item-criteria">
+        <span class="work-item-field-label">Acceptance criteria</span>
+        @foreach (var criterion in Draft.Criteria)
+        {
+            <div class="work-item-criterion-row" @key="criterion">
+                <input class="studio-input" data-testid="work-item-criterion-input" value="@criterion.Text"
+                       placeholder="What is true when this is done"
+                       @oninput="e => criterion.Text = e.Value?.ToString() ?? string.Empty" />
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-criterion-remove"
+                        @onclick="@(() => Draft.Criteria.Remove(criterion))">
+                    Remove
+                </button>
+            </div>
+        }
+        <button type="button" class="studio-btn studio-btn-alt work-item-criterion-add"
+                data-testid="work-item-criterion-add" @onclick="@(() => Draft.Criteria.Add(new CriterionDraft(string.Empty)))">
+            Add criterion
+        </button>
+        @foreach (var message in For("agentLayer").Concat(For("acceptanceCriteria")))
+        {
+            <span class="work-item-field-error" data-testid="work-item-criteria-error">@message</span>
+        }
+    </div>
+
+    <div class="work-item-form-actions">
+        <button type="button" class="studio-btn" data-testid="work-item-save" @onclick="OnSave">
+            @(Draft.IsNew ? "Create" : "Save")
+        </button>
+        <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-cancel" @onclick="OnCancel">
+            Cancel
+        </button>
+    </div>
+</div>
+
+@code {
+    /// <summary>What is being edited.</summary>
+    [Parameter, EditorRequired]
+    public WorkItemDraft Draft { get; set; } = default!;
+
+    /// <summary>The domain's refusals from the last save attempt.</summary>
+    [Parameter]
+    public IReadOnlyList<ValidationError> Errors { get; set; } = [];
+
+    /// <summary>The levels offered.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItemLevel> Levels { get; set; } = [];
+
+    /// <summary>The statuses offered on a new item.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItemStatus> Statuses { get; set; } = [];
+
+    /// <summary>Called with the draft when the user saves.</summary>
+    [Parameter]
+    public EventCallback<WorkItemDraft> Save { get; set; }
+
+    /// <summary>Called when the user abandons the form.</summary>
+    [Parameter]
+    public EventCallback Cancel { get; set; }
+
+    private IEnumerable<string> For(string field) =>
+        Errors.Where(e => string.Equals(e.Field, field, StringComparison.Ordinal)).Select(e => e.Message);
+
+    private Task OnSave() => Save.InvokeAsync(Draft);
+
+    private Task OnCancel() => Cancel.InvokeAsync();
+
+    /// <summary>A selected stable name back to its value; an unreadable one keeps what was already chosen.</summary>
+    private static TEnum Parse<TEnum>(object? value, TEnum current)
+        where TEnum : struct, Enum
+    {
+        var parsed = StableNames.Parse<TEnum>(value?.ToString(), "value");
+        return parsed.IsValid ? parsed.Value : current;
+    }
+}

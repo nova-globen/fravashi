@@ -1,0 +1,66 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Infrastructure.Autopilot
+@inject IConfigurationStore ConfigStore
+@inject IConfigurationReloader Reloader
+@inject INotificationHistory Notifications
+
+@* Settings > Agents > Autopilot concurrency (ADR 0031 decision 16, #307): how many agent CLI sessions may run at
+   once against one repository (the person's own folder plus every worktree made from it, #306). A dispatch
+   can lower this for one run; nothing can raise it there. *@
+<div class="ob-step" data-testid="autopilot-concurrency-settings">
+    <h2>Concurrency</h2>
+    <p class="studio-muted">
+        How many agent CLI sessions may run at once against one repository (the folder you opened, plus every
+        worktree the autopilot makes from it). A dispatch can lower this for one run; it can never raise it.
+    </p>
+
+    <label class="studio-modal-field">
+        <span>Concurrency cap</span>
+        <input class="studio-input" type="text" inputmode="numeric" spellcheck="false"
+               data-testid="autopilot-concurrency-cap" @bind="_cap" @bind:event="oninput" />
+    </label>
+
+    @if (_problem is { Length: > 0 })
+    {
+        <div class="studio-error" data-testid="autopilot-concurrency-error">@_problem</div>
+    }
+
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn" data-testid="autopilot-concurrency-save"
+                disabled="@(!Dirty)" @onclick="Save">Save</button>
+    </div>
+</div>
+
+@code {
+    private string _cap = string.Empty;
+    private string _savedCap = string.Empty;
+    private string? _problem;
+
+    private bool Dirty => !string.Equals(_cap, _savedCap, StringComparison.Ordinal);
+
+    protected override void OnInitialized()
+    {
+        _savedCap = ConfigurationAutopilotConcurrencySettings.Write(
+            ConfigurationAutopilotConcurrencySettings.Read(ConfigStore.Get(ConfigurationAutopilotConcurrencySettings.CapKey)));
+        _cap = _savedCap;
+    }
+
+    private void Save()
+    {
+        if (!int.TryParse(_cap, out var typed) || typed <= 0)
+        {
+            _problem = $"\"{_cap.Trim()}\" is not a whole number above zero. Use a plain number such as 2.";
+            return;
+        }
+
+        _problem = null;
+        ConfigStore.Set(ConfigurationAutopilotConcurrencySettings.CapKey, ConfigurationAutopilotConcurrencySettings.Write(typed));
+        _savedCap = ConfigurationAutopilotConcurrencySettings.Write(typed);
+        _cap = _savedCap;
+
+        Reloader.Reload();
+        Notifications.Add("Concurrency cap saved.", NotificationSeverity.Success);
+    }
+}

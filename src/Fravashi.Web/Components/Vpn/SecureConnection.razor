@@ -1,0 +1,60 @@
+@page "/secure-connection"
+@layout Fravashi.Web.Components.Layout.MinimalWindowLayout
+@namespace Fravashi.Web.Components.Vpn
+@using Fravashi.Application.Variants
+@using Fravashi.Application.Vpn
+@inject IFeatureFlags Features
+@inject IVpnConnectivity Vpn
+@inject NavigationManager Nav
+
+<PageTitle>@(ProductName.Short) · Secure connection required</PageTitle>
+
+@* VPN-required startup gate (F5 / I1 / ADR 0008). In a variant with VPN_REQUIRED on (e.g. corp-vpn) the app is
+   held here until a secure tunnel is confirmed. T9 provides the real sidecar tunnel: once IVpnConnectivity reports
+   connected this page redirects to the studio; while waiting it re-polls so the transition is automatic.
+   Backlog 282: MinimalWindowLayout, not MainLayout, so no activity rail or sidebar offers an in-app way past the gate. *@
+
+<div class="update-lock" role="alert" aria-live="assertive" data-testid="vpn-gate">
+    <div class="update-lock-card">
+        <div class="update-lock-icon" aria-hidden="true">🔒</div>
+        <h1 class="update-lock-title">Waiting for a secure connection</h1>
+        <p class="update-lock-lead">
+            This build of @(ProductName.Short) (<strong data-testid="vpn-gate-variant">@Features.Variant</strong>) requires all
+            traffic to run through a secure VPN tunnel before the studio will start. Nothing is served until the
+            connection is confirmed.
+        </p>
+
+        <dl class="update-lock-versions">
+            <div>
+                <dt>VPN required</dt>
+                <dd data-testid="vpn-gate-required">@(Features.Flags.VpnRequired ? "Yes" : "No")</dd>
+            </div>
+            <div>
+                <dt>Status</dt>
+                <dd data-testid="vpn-gate-status">@(Vpn.Current.IsConnected ? "Connected" : "Not connected")</dd>
+            </div>
+        </dl>
+
+        <p class="update-lock-notes" data-testid="vpn-gate-detail">@Vpn.Current.Detail</p>
+    </div>
+</div>
+
+@* While the tunnel is down, re-poll so the gate clears automatically the moment IVpnConnectivity reports
+   connected (the redirect below then lets the studio through the gate middleware). A meta refresh rather than an
+   inline script since backlog 287: the Content-Security-Policy runs no inline script, and a refresh is not one. *@
+@if (!Vpn.Current.IsConnected)
+{
+    <meta http-equiv="refresh" content="5" data-testid="vpn-gate-refresh" />
+}
+
+@code {
+    // VPN6: once the sidecar tunnel is confirmed, leave the gate for the studio. The gate middleware only redirects
+    // OTHER routes TO here, so this page must send itself onward when connected.
+    protected override void OnInitialized()
+    {
+        if (Vpn.Current.IsConnected)
+        {
+            Nav.NavigateTo("/", forceLoad: true);
+        }
+    }
+}

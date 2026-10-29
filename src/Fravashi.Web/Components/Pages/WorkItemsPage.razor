@@ -1,0 +1,1057 @@
+@page "/board"
+@page "/workitems"
+@page "/workitems/{Number:int}"
+@using Fravashi.Application.Mirroring
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.Mirroring
+@using Fravashi.Domain.Projects
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Domain.WorkItems.AgentLayer
+@using Fravashi.Infrastructure.Rendering
+@using Fravashi.Infrastructure.Wiki
+@inject ITrackerResolver Trackers
+@inject IWorkItemChanges Changes
+@inject WikiReferenceResolver References
+@inject WikiMarkdownRenderer Renderer
+@inject IMirrorStore Mirror
+@inject TimeProvider Clock
+@inject NavigationManager Nav
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+@inject Fravashi.Application.Projects.IProjectStore ProjectStore
+@inject Fravashi.Application.Mirroring.ProviderSync Sync
+@inject Fravashi.Application.Wiki.DesignApproval DesignApproval
+@inject Fravashi.Application.Wiki.IWikiLibraries Wikis
+@inject IServiceProvider Services
+@using Microsoft.Extensions.DependencyInjection
+@implements IDisposable
+
+<PageTitle>@(ProductName.Short) · Work items</PageTitle>
+
+@* Backlog 38: the board, the list and one item's detail are three views of the same tracker, so they are one
+   page over one port rather than three that each re-derive what an item is. The board's columns are the
+   CANONICAL statuses (vision 5.2), never a provider's own, and a drop performs a real domain transition: a
+   refusal is shown rather than swallowed, because a card that springs back with no reason is worse than one
+   that would not move at all. *@
+<div class="studio-workitems board-page">
+    <PageBar Title="@BarTitle" />
+
+    @if (!CurrentProject.IsSetUp())
+    {
+        <FolderNotSetUp Surface="board" />
+    }
+    else
+    {
+    <PageSplit SidebarLabel="Work items" SidebarTestId="board-sidebar" BodyTestId="board-body">
+        <Sidebar>
+            <button type="button" class="session-new" data-testid="new-work-item" @onclick="BeginCreate">
+                <span class="session-new-mark" aria-hidden="true">+</span>
+                <span>New work item</span>
+            </button>
+
+            <PageSidebarSection Title="View" TestId="board-view-section">
+                <div class="board-views">
+                    <button type="button" class="studio-btn @(IsBoard ? string.Empty : "studio-btn-alt")"
+                            data-testid="view-board" @onclick="@(() => Go("/board"))">
+                        Board
+                    </button>
+                    <button type="button" class="studio-btn @(IsBoard ? "studio-btn-alt" : string.Empty)"
+                            data-testid="view-list" @onclick="@(() => Go("/workitems"))">
+                        List
+                    </button>
+                </div>
+            </PageSidebarSection>
+
+            <PageSidebarSection Title="Provider" TestId="board-provider-section">
+                @* Backlog 82: one line, always, rather than a chip that only appears when something is
+                   wrong. A person who cannot tell whether this board is a copy of anything cannot judge
+                   what they are looking at, and "there is no provider" is as much an answer as any other. *@
+                <p class="board-provider-line" data-testid="board-provider-line">@_providerLine</p>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="board-open-sync"
+                        @onclick="@(() => Go("/board/sync"))">
+                    Provider sync
+                </button>
+            </PageSidebarSection>
+
+            <PageSidebarSection Title="Autopilot" TestId="board-autopilot-section">
+                @* Backlog 298 (ADR 0031 decisions 1 to 3): how many Ready items are currently marked. Backlog
+                   303 took the dispatch form, the queue, the running item's session, the limits and the stop
+                   controls over onto the autopilot's own page, and work item #358 moved them again, onto Home's
+                   Autopilot card; this section keeps only the count and a link. *@
+                <p class="studio-muted" data-testid="board-autopilot-marked-count">
+                    @MarkedReadyCount marked Ready item@(MarkedReadyCount == 1 ? string.Empty : "s").
+                </p>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="board-autopilot-dispatch-open"
+                        @onclick="@(() => Go(AutopilotCard.Route))">
+                    Open the Autopilot card
+                </button>
+            </PageSidebarSection>
+
+            <PageSidebarSection Title="Releases" TestId="board-releases-section">
+                @* Work item #368: a release takes the Done items no release has taken yet, stamps "Released in" on them and
+                   archives them off the Done column. The Releases page lists every release and what it carried. *@
+                <p class="studio-muted" data-testid="board-releasable-count">
+                    @ReleasableCount Done item@(ReleasableCount == 1 ? string.Empty : "s") not yet released.
+                </p>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="board-new-release"
+                        disabled="@(_releases is null)" @onclick="@(() => _releaseDialogOpen = true)">
+                    New release
+                </button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="board-open-releases"
+                        @onclick="@(() => Go("/releases"))">
+                    Releases
+                </button>
+            </PageSidebarSection>
+
+            <PageSidebarSection Title="Filter" TestId="board-filter-section">
+                <input class="studio-input" data-testid="board-search" placeholder="Title contains"
+                       value="@_search" @oninput="OnSearch" />
+
+                @if (!IsBoard)
+                {
+                    @* Work item #368: the list's "Released in" filter. By default the list shows what the board shows;
+                       a search also finds archived items, and a release shows exactly what it carried. *@
+                    <label class="board-filter-select">
+                        <span>Released in</span>
+                        <select class="studio-input" data-testid="board-released-in" value="@_releasedIn" @onchange="OnReleasedInAsync">
+                            <option value="">On the board (archived hidden)</option>
+                            <option value="@ReleasedAny">Released or not</option>
+                            <option value="@ReleasedNone">Not released yet</option>
+                            @foreach (var release in _releaseList)
+                            {
+                                <option value="@release.Version">@release.Version</option>
+                            }
+                        </select>
+                    </label>
+                }
+
+                <label class="board-filter-line">
+                    <input type="checkbox" data-testid="board-startable-only"
+                           checked="@_startableOnly" @onchange="OnStartableOnly" />
+                    <span>Only what can start now</span>
+                </label>
+
+                @foreach (var status in Statuses)
+                {
+                    <label class="board-filter-line">
+                        <input type="checkbox" data-testid="@($"board-status-{StableNames.ToName(status)}")"
+                               checked="@_statuses.Contains(status)"
+                               @onchange="@(e => ToggleStatus(status, e))" />
+                        <span>@Label(status)</span>
+                    </label>
+                }
+            </PageSidebarSection>
+
+            <PageSidebarSection Title="What can start now" TestId="board-startable-section">
+                @if (_startable.Count == 0)
+                {
+                    <div class="page-sidebar-empty" data-testid="board-startable-empty">
+                        Nothing can start right now.
+                    </div>
+                }
+                else
+                {
+                    @foreach (var entry in _startable)
+                    {
+                        <button type="button" class="board-startable" data-testid="board-startable-item"
+                                @onclick="@(() => Open(entry.Item))">
+                            <span class="board-startable-number">#@entry.Item.Number</span>
+                            <span class="board-startable-title">@entry.Item.Title</span>
+                        </button>
+                    }
+                }
+            </PageSidebarSection>
+        </Sidebar>
+
+        <Body>
+            @if (_error is { Length: > 0 } error)
+            {
+                <div class="session-error" data-testid="board-error">
+                    <span class="session-error-mark" aria-hidden="true">!</span>
+                    <span class="session-error-text">@error</span>
+                </div>
+            }
+
+            @if (_needsReason is not null)
+            {
+                @* Requested 2026-10-22 (evidence on Done): the refusal above names the criteria with no
+                   evidence; this is the one way past it, a written reason that is stored on the item. *@
+                <div class="board-ask" data-testid="board-done-reason">
+                    <p class="board-ask-text">
+                        If the missing evidence does not apply, say why. The move to Done is then made, and the
+                        reason is kept on the item with its evidence.
+                    </p>
+                    <textarea class="studio-input" rows="3" data-testid="board-done-reason-text"
+                              @bind="_reasonText" @bind:event="oninput"></textarea>
+                    <div class="board-ask-choices">
+                        <button type="button" class="board-ask-choice" data-testid="board-done-reason-move"
+                                disabled="@(!DoneEvidence.HasReason(_reasonText))"
+                                @onclick="MoveWithReasonAsync">Move to Done with this reason</button>
+                        <button type="button" class="board-ask-cancel" data-testid="board-done-reason-cancel"
+                                @onclick="DismissReason">Cancel</button>
+                    </div>
+                </div>
+            }
+
+            @if (_asking is { } asking)
+            {
+                <div class="board-ask" data-testid="board-move-ask">
+                    <p class="board-ask-text">@asking.Move.Sentence</p>
+                    <div class="board-ask-choices">
+                        @foreach (var choice in asking.Move.Choices)
+                        {
+                            <button type="button" class="board-ask-choice" data-testid="board-move-choice"
+                                    @onclick="@(() => ChooseAsync(choice))">@choice</button>
+                        }
+                        <button type="button" class="board-ask-cancel" data-testid="board-move-later"
+                                @onclick="DismissAsk">Decide later</button>
+                    </div>
+                </div>
+            }
+
+            @if (_queuedMove is { Length: > 0 } queuedMove)
+            {
+                <p class="board-queued" data-testid="board-move-queued">@queuedMove</p>
+            }
+
+            @if (_editing is { } editing)
+            {
+                <WorkItemForm Draft="editing" Errors="_formErrors" Levels="Levels" Statuses="Statuses"
+                              Save="SaveAsync" Cancel="CancelEdit" />
+            }
+            else if (_detail is { } detail)
+            {
+                @if (_standing is { } standing)
+                {
+                    @* Backlog 47: where this item stands against the project's provider, and the one act that
+                       puts it there. Nothing at all when the project follows no provider. *@
+                    <div class="work-item-form-actions" data-testid="work-item-provider">
+                        <span class="studio-muted" data-testid="work-item-provider-line">@(_sendSaid ?? standing.Sentence)</span>
+                        @if (standing.CanSend)
+                        {
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-send"
+                                    @onclick="@(() => SendAsync(detail))">Send to @_connection</button>
+                        }
+                    </div>
+                }
+                <WorkItemDetail Item="detail" Verdict="VerdictFor(detail)" Links="_detailLinks"
+                                KnownItems="_knownItems" Children="_detailChildren" Wiki="_detailWiki"
+                                Evidence="_detailEvidence"
+                                Attention="_detailAttention" SessionTitles="_sessionTitles"
+                                Description="@_detailDescription"
+                                Edit="@(() => BeginEdit(detail))"
+                                OpenDesign="@(number => Nav.NavigateTo($"/wiki/{number}"))"
+                                DesignStanding="_designStanding" ReapproveDesign="ReapproveDesignAsync"
+                                Transition="@(status => TransitionAsync(detail, status))"
+                                RecordEvidence="@(draft => RecordEvidenceAsync(detail, draft))"
+                                MarkForAutopilot="@(marked => MarkForAutopilotAsync(detail, marked))" />
+            }
+            else if (Number is not null)
+            {
+                <div class="page-body-empty" data-testid="board-item-missing">
+                    There is no work item with that number in this project.
+                </div>
+            }
+            else if (IsBoard)
+            {
+                <div class="board-columns" data-testid="board-columns">
+                    @foreach (var status in Statuses)
+                    {
+                        var column = Column(status);
+                        <div class="board-column" data-testid="@($"board-column-{StableNames.ToName(status)}")"
+                             @ondragover:preventDefault="true" @ondrop="@(() => DropAsync(status))">
+                            <div class="board-column-head">
+                                <span class="board-column-title">@Label(status)</span>
+                                <span class="board-column-count">@column.Count</span>
+                            </div>
+                            @foreach (var item in column)
+                            {
+                                var verdict = VerdictFor(item);
+                                <div class="@CardClass(item, verdict)"
+                                     data-testid="board-card" draggable="true"
+                                     @ondragstart="@(() => _dragging = item)"
+                                     @onclick="@(() => Open(item))">
+                                    <div class="board-card-head">
+                                        <span class="board-card-number">#@item.Number</span>
+                                        <span class="board-card-level">@item.Level</span>
+                                    </div>
+                                    <div class="board-card-title">@item.Title</div>
+                                    @if (item.MarkedForAutopilot)
+                                    {
+                                        <div class="board-card-note" data-testid="board-card-autopilot">
+                                            Marked for autopilot
+                                        </div>
+                                    }
+                                    @* Work item #363: whether an item can start is only news before it has started.
+                                       A card in In Progress, In Review, Done or Cancelled saying "It is not Ready
+                                       yet." was every finished card's line on the board. *@
+                                    @if (item.Status.Category() == StatusCategory.Proposed && verdict.CanStart)
+                                    {
+                                        <div class="board-card-note" data-testid="board-card-startable">
+                                            Can start now
+                                        </div>
+                                    }
+                                    else if (item.Status.Category() == StatusCategory.Proposed && verdict.Reasons.Count > 0)
+                                    {
+                                        <div class="board-card-note" data-testid="board-card-held">
+                                            @Startability.Describe(verdict.Reasons[0])
+                                        </div>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+            else
+            {
+                <table class="board-list" data-testid="board-list">
+                    <thead>
+                        <tr>
+                            <th>Number</th>
+                            <th>Title</th>
+                            <th>Level</th>
+                            <th>Status</th>
+                            <th>Can start</th>
+                            <th>Released in</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var item in Filtered)
+                        {
+                            <tr class="board-list-row" data-testid="board-list-row" @onclick="@(() => Open(item))">
+                                <td>#@item.Number</td>
+                                <td>@item.Title</td>
+                                <td>@item.Level</td>
+                                <td>@Label(item.Status)</td>
+                                <td>@(VerdictFor(item).CanStart ? "yes" : "no")</td>
+                                <td data-testid="board-list-released-in">@item.ReleasedIn</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+
+                @if (Filtered.Count == 0)
+                {
+                    <div class="page-body-empty" data-testid="board-empty">
+                        No work items match. The New work item button is in the sidebar.
+                    </div>
+                }
+            }
+        </Body>
+    </PageSplit>
+    }
+</div>
+
+@if (_releaseDialogOpen)
+{
+    <NewReleaseDialog Close="@(() => _releaseDialogOpen = false)" Saved="OnReleaseSavedAsync" />
+}
+
+@code {
+    /// <summary>The item number from the route, when one item is being read.</summary>
+    [Parameter]
+    public int? Number { get; set; }
+
+    private static readonly IReadOnlyList<WorkItemStatus> Statuses = WorkItemStatuses.All;
+
+    private static readonly IReadOnlyList<WorkItemLevel> Levels = [.. Enum.GetValues<WorkItemLevel>()];
+
+    private readonly HashSet<WorkItemStatus> _statuses = [.. WorkItemStatuses.All];
+    private readonly Dictionary<WorkItemId, StartabilityVerdict> _verdicts = [];
+
+    private IReadOnlyList<WorkItem> _items = [];
+    private IReadOnlyList<StartableItem> _startable = [];
+    private IReadOnlyList<WorkItemLink> _detailLinks = [];
+    private IReadOnlyList<EvidenceRecord> _detailEvidence = [];
+    private Fravashi.Application.Sessions.WorkItemAttention? _detailAttention;
+    private IReadOnlyDictionary<Fravashi.Domain.AgentSessions.AgentSessionId, string> _sessionTitles =
+        new Dictionary<Fravashi.Domain.AgentSessions.AgentSessionId, string>();
+    private IReadOnlyDictionary<WorkItemId, WorkItem> _knownItems = new Dictionary<WorkItemId, WorkItem>();
+    private IReadOnlyList<WorkItem> _detailChildren = [];
+    private IReadOnlyList<WorkItemWikiLink> _detailWiki = [];
+    private string _detailDescription = string.Empty;
+    private Fravashi.Application.Wiki.DesignApprovalStanding? _designStanding;
+    private WorkItem? _detail;
+    private WorkItemDraft? _editing;
+    private IReadOnlyList<ValidationError> _formErrors = [];
+    private WorkItem? _dragging;
+    private string _search = string.Empty;
+    private bool _startableOnly;
+    private string? _error;
+
+    // Work item #368: the release store when the studio has one (a test fixture may not), the releases for the list's
+    // filter, the filter's value, and whether the New release dialog is open.
+    private const string ReleasedAny = "*any";
+    private const string ReleasedNone = "*none";
+    private Fravashi.Application.Releases.IReleaseStore? _releases;
+    private IReadOnlyList<Fravashi.Domain.Releases.Release> _releaseList = [];
+    private string _releasedIn = string.Empty;
+    private bool _releaseDialogOpen;
+
+    private int ReleasableCount =>
+        _items.Count(i => i.Status == WorkItemStatus.Done && i.ReleasedIn is null);
+
+    /// <summary>
+    /// What the query asks of releases (work item #368): the board never shows an archived item, and that is a condition
+    /// in the store's query rather than a scan here. One item's page reads every item, so its links and children name an
+    /// archived item as readily as any other. The list follows its "Released in" filter, and a search on the
+    /// default filter reaches archived items too, so an item is still found by what it says after its release.
+    /// </summary>
+    private WorkItemQuery ReleaseScope(WorkItemQuery query) =>
+        Number is not null
+            ? query with { Release = ReleaseFilter.Any }
+            : IsBoard
+            ? query with { Release = ReleaseFilter.NotArchived }
+            : _releasedIn switch
+            {
+                ReleasedAny => query with { Release = ReleaseFilter.Any },
+                ReleasedNone => query with { Release = ReleaseFilter.Unreleased },
+                "" => query with { Release = _search.Length > 0 ? ReleaseFilter.Any : ReleaseFilter.NotArchived },
+                var version => query with { ReleasedIn = version },
+            };
+
+    private async Task OnReleasedInAsync(ChangeEventArgs e)
+    {
+        _releasedIn = e.Value?.ToString() ?? string.Empty;
+        await LoadAsync();
+    }
+
+    private async Task OnReleaseSavedAsync(Fravashi.Application.Releases.ReleaseSaved saved)
+    {
+        _releaseDialogOpen = false;
+        var release = saved.Result.Value!;
+        _queuedMove = $"Saved {release.Title}: {release.ItemNumbers.Count} item(s) archived off the Done column."
+            + (saved.WikiProblem is { } problem ? " " + problem : string.Empty);
+        await LoadAsync();
+    }
+
+    private int MarkedReadyCount =>
+        Fravashi.Domain.Autopilot.AutopilotSelection.MarkedReadyInBoardOrder(_items).Count;
+
+    /// <summary>A move whose meaning on the provider is a question, held until the person answers it.</summary>
+    private sealed record PendingMove(WorkItem Item, WorkItemStatus Status, ProviderMove Move);
+
+    // Requested 2026-10-22 (evidence on Done): the item whose move to Done was refused for missing
+    // evidence, while the person may still give a reason, and the reason as typed so far.
+    private WorkItemId? _needsReason;
+    private string _reasonText = string.Empty;
+
+    private PendingMove? _asking;
+    private string? _queuedMove;
+    private string _providerLine = MirrorFreshness.Local.Sentence;
+
+    private ITracker Tracker => Trackers.For(CurrentProject.Require());
+
+    private string? _connection;
+    private (string Sentence, bool CanSend)? _standing;
+    private string? _sendSaid;
+
+    private async Task SendAsync(WorkItem item)
+    {
+        var sent = await Sync.SendAsync(CurrentProject.Require(), item.Id);
+        _standing = await Sync.StandingAsync(CurrentProject.Require(), item.Id);
+        _sendSaid = sent.Happened ? null : sent.Sentence;
+    }
+
+    /// <summary>
+    /// Approves the approved design's current version again, through the SAME gate an agent calls
+    /// (backlog 209): there is no second path and no bypass, so re-approving IS approving, run again now
+    /// that the document has moved on. Still a person's act: this only fires from a button on this page.
+    /// </summary>
+    private async Task ReapproveDesignAsync()
+    {
+        if (_detail is not { } item
+            || item.RefFor(ArtifactRefRole.ApprovedDesign) is not { Kind: ArtifactRefKind.Design } reference
+            || !int.TryParse(reference.Target, out var designNumber))
+        {
+            return;
+        }
+
+        _error = null;
+        var result = await DesignApproval.ApproveAsync(CurrentProject.Require(), designNumber, item.Number);
+        if (!result.Approved)
+        {
+            _error = result.Message ?? "That design could not be approved.";
+            return;
+        }
+
+        await LoadAsync();
+    }
+
+    /// <summary>True on the column view. The list and the detail share the other route.</summary>
+    private bool IsBoard =>
+        new Uri(Nav.Uri).AbsolutePath.TrimEnd('/').Equals("/board", StringComparison.OrdinalIgnoreCase);
+
+    private string BarTitle => Fravashi.Application.Projects.ProjectTitle.With(
+        _detail is { } item ? $"#{item.Number} {item.Title}" : "Work items", ProjectStore, CurrentProject.Id);
+
+    private IReadOnlyList<WorkItem> Filtered =>
+    [
+        .. _items
+            .Where(i => _statuses.Contains(i.Status))
+            .Where(i => _search.Length == 0 || i.Title.Contains(_search, StringComparison.OrdinalIgnoreCase))
+            .Where(i => !_startableOnly || VerdictFor(i).CanStart)
+            .OrderBy(i => i.Rank)
+            .ThenBy(i => i.Number),
+    ];
+
+    protected override void OnInitialized() => Changes.Changed += OnChanged;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // A reason prompt belongs to the move that was refused, so going somewhere else drops it.
+        _needsReason = null;
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Backlog 41: an agent working through the studio's tool server changes items while this page is open, and
+    /// the acceptance is that the user SEES each change. The signal carries no payload, so the page re-reads
+    /// through the port and there is still exactly one answer about what an item says.
+    /// </summary>
+    private void OnChanged(ProjectId project)
+    {
+        if (project != CurrentProject.Id)
+        {
+            return;
+        }
+
+        // A form the user is part-way through is not thrown away by somebody else's change: the list behind it
+        // is refreshed, and what they typed stays on screen until they save or cancel.
+        _ = InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+    }
+
+    /// <inheritdoc />
+    public void Dispose() => Changes.Changed -= OnChanged;
+
+    private IReadOnlyList<WorkItem> Column(WorkItemStatus status) =>
+        [.. Filtered.Where(i => i.Status == status)];
+
+    private static string Label(WorkItemStatus status) => status switch
+    {
+        WorkItemStatus.InProgress => "In progress",
+        WorkItemStatus.InReview => "In review",
+        _ => status.ToString(),
+    };
+
+    /// <summary>The verdict for an item, from the one query the page already ran.</summary>
+    /// <summary>
+    /// A board card's classes (work item #363): its status as a stable name drives the accent and the quieter
+    /// finished cards, and a blocked item adds its own.
+    /// </summary>
+    private static string CardClass(WorkItem item, StartabilityVerdict verdict) =>
+        $"board-card board-card-{StableNames.ToName(item.Status)}" + (verdict.EffectivelyBlocked ? " blocked" : string.Empty);
+
+    private StartabilityVerdict VerdictFor(WorkItem item) =>
+        _verdicts.TryGetValue(item.Id, out var verdict)
+            ? verdict
+            : new StartabilityVerdict(item.Id, false, [], [], [], []);
+
+    private async Task LoadAsync()
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        // A board shows a project, not a page of one, so it asks for the largest page the port allows and
+        // follows the cursor. The alternative is a column that silently stops at fifty.
+        var items = new List<WorkItem>();
+        string? cursor = null;
+        do
+        {
+            var page = await Tracker.QueryAsync(ReleaseScope(new WorkItemQuery
+            {
+                Limit = WorkItemQuery.MaxLimit,
+                Cursor = cursor,
+            }));
+            items.AddRange(page.Items);
+            cursor = page.NextCursor;
+        }
+        while (cursor is not null);
+
+        _items = items;
+
+        _releases ??= Services.GetService<Fravashi.Application.Releases.IReleaseStores>()?.For(CurrentProject.Require());
+        if (_releases is not null && _releases.Project != CurrentProject.Id)
+        {
+            _releases = Services.GetService<Fravashi.Application.Releases.IReleaseStores>()?.For(CurrentProject.Require());
+        }
+
+        _releaseList = _releases is null ? [] : await _releases.ListAsync();
+
+        // One startability answer for the whole project rather than one per card: the report already carries
+        // every item with its verdict, held ones included, which is exactly what a board needs to say why.
+        // Backlog 82: one sentence about whether this board is a copy of anything. The worst of the mirrored
+        // items is what it reports, because a board that is mostly current and has one item nobody can send
+        // is not a current board.
+        // No mirrored item is not the same as no provider: a project that follows one and has sent nothing yet
+        // (an imported project, a new one) said "there is no provider behind it" beside a Send button.
+        // And a project that follows NO provider (backlog 142) is the source of truth whatever it sent before: its
+        // mirror records are history, and the worst of them ("Azure DevOps no longer has 154") is not this board's state.
+        var states = await Mirror.ForProjectAsync(CurrentProject.Require());
+        var now = Clock.GetUtcNow();
+        var following = Sync.ConnectionFor(CurrentProject.Require());
+        _providerLine = following is null
+            ? MirrorFreshness.Local.Sentence
+                + (states.Count > 0 ? " Where its items were sent before is kept on each of them as a record." : string.Empty)
+            : states.Count == 0
+                ? $"This board follows {following}, and nothing on it has been sent there or imported from there yet."
+            : states.Values
+                .Select(state => MirrorFreshness.Describe(state, now))
+                .OrderByDescending(f => f.Level)
+                .First()
+                .Sentence;
+
+        var report = await Tracker.WhatCanStartNowAsync(new StartableQuery(Limit: int.MaxValue));
+        _startable = report.Startable;
+        _verdicts.Clear();
+        foreach (var entry in report.Startable.Concat(report.Held))
+        {
+            _verdicts[entry.Item.Id] = entry.Verdict;
+        }
+
+        // The detail view reads the item through the port rather than picking it out of the list: a list read
+        // carries the board fields, and this page shows the agent layer, which only a single-item read loads.
+        _detail = Number is { } number ? await Tracker.GetByNumberAsync(number) : null;
+        if (_detail is null)
+        {
+            _detailLinks = [];
+            _detailEvidence = [];
+            _knownItems = new Dictionary<WorkItemId, WorkItem>();
+            _detailChildren = [];
+            _detailWiki = [];
+            _detailDescription = string.Empty;
+            _designStanding = null;
+            _detailAttention = null;
+            return;
+        }
+
+        // Backlog 209: what the approved design says about its own version, so the page can say "approved
+        // at version N" and "the design has changed since" without the detail component reaching for a
+        // port of its own.
+        _designStanding = await DesignApproval.StandingFor(_detail);
+
+        // Backlog 39: the description's references are resolved once, then rendered synchronously, exactly
+        // as a wiki body's are, so the same syntax behaves the same way on both surfaces.
+        _detailDescription = Renderer.ToHtml(
+            _detail.Description, await References.ResolveAsync(CurrentProject.Require(), _detail.Description));
+
+        _connection = Sync.ConnectionFor(CurrentProject.Require());
+        _standing = await Sync.StandingAsync(CurrentProject.Require(), _detail.Id);
+        _sendSaid = null;
+
+        _detailLinks = await Tracker.LinksAsync(_detail.Id);
+        _detailEvidence = await Tracker.EvidenceAsync(_detail.Id);
+
+        // Both ends of every link are named, because a link the reader cannot follow back is half a link. The whole
+        // item is handed over, so the related-items sidebar (requested 2026-10-22) can show each one's status
+        // from the read this page already made, and find the children without a query of its own.
+        _knownItems = _items.ToDictionary(i => i.Id);
+        var detailId = _detail.Id;
+        _detailChildren = [.. _items.Where(i => i.Parent == detailId).OrderBy(i => i.Rank).ThenBy(i => i.Number)];
+        _detailWiki = await RelatedWikiAsync(_detail);
+
+        // Backlog 244: the conversations linked to the item and the operator's attention in each. Resolved optionally,
+        // so a wiring without the store (most component tests) shows no section rather than failing to render.
+        _detailAttention = Services.GetService<Fravashi.Application.Sessions.ISessionAttention>()?.ForItem(_detail.Id);
+        var sessions = Services.GetService<Fravashi.Application.Sessions.ISessionStore>();
+        _sessionTitles = _detailAttention is null || sessions is null
+            ? new Dictionary<Fravashi.Domain.AgentSessions.AgentSessionId, string>()
+            : _detailAttention.Sessions
+                .Select(s => sessions.Find(s.Session))
+                .OfType<Fravashi.Application.Sessions.SessionRecord>()
+                // Work item #351: the conversation's own summary, not its linked item, which is this page's item.
+                .ToDictionary(r => r.Id, r => Fravashi.Application.Sessions.ConversationTitles.Display(r.CustomTitle, r.Title));
+    }
+
+    private void Go(string route)
+    {
+        _detail = null;
+        _editing = null;
+        Nav.NavigateTo(route);
+    }
+
+    private void Open(WorkItem item) => Nav.NavigateTo($"/workitems/{item.Number}");
+
+    /// <summary>
+    /// The wiki documents related to an item, for the related-items sidebar (requested 2026-10-22): the ones the
+    /// item names in its agent layer (its plan, its approved design, a mockup, context) and the ones that name the
+    /// item, by a typed link or a reference in their body, through the wiki's own backlinks (one indexed query). A
+    /// plan document is the item's plan whichever way round the link was written, which is how the work gate reads
+    /// "covers" too. One entry per document, the plan first.
+    /// </summary>
+    private async Task<IReadOnlyList<WorkItemWikiLink>> RelatedWikiAsync(WorkItem item)
+    {
+        var wiki = Wikis.For(CurrentProject.Require());
+        var found = new Dictionary<int, WorkItemWikiLink>();
+
+        foreach (var reference in item.Refs)
+        {
+            if (reference.Kind is not (ArtifactRefKind.Wiki or ArtifactRefKind.Design)
+                || !int.TryParse(
+                    reference.Target.TrimStart('@'),
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out var number)
+                || found.ContainsKey(number))
+            {
+                continue;
+            }
+
+            var document = await wiki.GetByNumberAsync(number);
+            found[number] = new WorkItemWikiLink(
+                number,
+                document?.Title ?? reference.Label ?? $"Wiki document {number}",
+                RoleWords(reference.Role),
+                reference.Role == ArtifactRefRole.Plan || document?.Type == Fravashi.Domain.Wiki.WikiItemType.Plan,
+                document is not null);
+        }
+
+        var backlinks = await wiki.BacklinksAsync(
+            new Fravashi.Domain.Wiki.WikiReference(Fravashi.Domain.Wiki.WikiReferenceKind.WorkItem, item.Number));
+        foreach (var document in backlinks)
+        {
+            var isPlan = document.Type == Fravashi.Domain.Wiki.WikiItemType.Plan;
+            if (found.TryGetValue(document.Number, out var already))
+            {
+                found[document.Number] = already with { IsPlan = already.IsPlan || isPlan };
+                continue;
+            }
+
+            var typed = document.Links.Any(l =>
+                l.Kind == Fravashi.Domain.Wiki.WikiLinkKind.WorkItem && l.Number == item.Number);
+            var type = Fravashi.Domain.Wiki.WikiNames.ToName(document.Type);
+            found[document.Number] = new WorkItemWikiLink(
+                document.Number,
+                document.Title,
+                isPlan ? (typed ? "plan" : "plan, mentions this item") : (typed ? $"{type}, linked" : $"{type}, mentions this item"),
+                isPlan);
+        }
+
+        return [.. found.Values.OrderByDescending(w => w.IsPlan).ThenBy(w => w.Number)];
+    }
+
+    private static string RoleWords(ArtifactRefRole role) => role switch
+    {
+        ArtifactRefRole.ApprovedDesign => "approved design",
+        _ => StableNames.ToName(role),
+    };
+
+    private async Task OnSearch(ChangeEventArgs e)
+    {
+        var before = _search.Length > 0;
+        _search = e.Value?.ToString() ?? string.Empty;
+
+        // Work item #368: on the list, a search reaches archived items, so starting or clearing one asks the store again.
+        if (!IsBoard && _releasedIn.Length == 0 && before != _search.Length > 0)
+        {
+            await LoadAsync();
+        }
+    }
+
+    private void OnStartableOnly(ChangeEventArgs e) => _startableOnly = e.Value is true;
+
+    private void ToggleStatus(WorkItemStatus status, ChangeEventArgs e)
+    {
+        if (e.Value is true)
+        {
+            _statuses.Add(status);
+        }
+        else
+        {
+            _statuses.Remove(status);
+        }
+    }
+
+    private void BeginCreate()
+    {
+        _error = null;
+        _formErrors = [];
+        _editing = WorkItemDraft.New();
+    }
+
+    private void BeginEdit(WorkItem item)
+    {
+        _error = null;
+        _formErrors = [];
+        _editing = WorkItemDraft.Of(item);
+    }
+
+    private void CancelEdit()
+    {
+        _editing = null;
+        _formErrors = [];
+    }
+
+    /// <summary>
+    /// Saves the form through the port and shows the DOMAIN's own refusal rather than one this page invented:
+    /// a missing description is refused by the model, and the form says exactly what the model said.
+    /// </summary>
+    private async Task SaveAsync(WorkItemDraft draft)
+    {
+        _error = null;
+        _formErrors = [];
+
+        if (draft.Existing is { } existing)
+        {
+            var updated = await Tracker.UpdateAsync(
+                existing.Id,
+                new WorkItemPatch
+                {
+                    Title = Optional<string>.Of(draft.Title),
+                    Description = Optional<string>.Of(draft.Description),
+                    Level = Optional<WorkItemLevel>.Of(draft.Level),
+                    NextAction = Optional<string?>.Of(
+                        string.IsNullOrWhiteSpace(draft.NextAction) ? null : draft.NextAction),
+                    // Backlog 178: the whole list, each row with the id it was read with, so evidence recorded
+                    // against a criterion survives an edit and a removed one is the store's to refuse.
+                    AcceptanceCriteria = Optional<IReadOnlyList<AcceptanceCriterion>>.Of(draft.AcceptanceCriteria()),
+                    // Requested 2026-10-22: what a conversation started from the item runs on; null is Default.
+                    SuggestedModel = Optional<Fravashi.Domain.AgentSessions.AgentModelAlias?>.Of(draft.SuggestedModel),
+                    SuggestedEffort = Optional<Fravashi.Domain.AgentSessions.AgentEffort?>.Of(draft.SuggestedEffort),
+                },
+                existing.Version,
+                MutationContext.User);
+
+            if (!Accepted(updated.Outcome, updated.Errors))
+            {
+                return;
+            }
+
+            _editing = null;
+            await LoadAsync();
+            return;
+        }
+
+        var created = await Tracker.CreateAsync(
+            new NewWorkItem
+            {
+                Level = draft.Level,
+                Title = draft.Title,
+                Description = draft.Description,
+                Status = draft.Status,
+                Resolution = Closing(draft.Status),
+                NextAction = string.IsNullOrWhiteSpace(draft.NextAction) ? null : draft.NextAction,
+                AcceptanceCriteria = draft.AcceptanceCriteria(),
+                SuggestedModel = draft.SuggestedModel,
+                SuggestedEffort = draft.SuggestedEffort,
+            },
+            MutationContext.User);
+
+        if (!Accepted(created.Outcome, created.Errors))
+        {
+            return;
+        }
+
+        _editing = null;
+        await LoadAsync();
+        Open(created.Value);
+    }
+
+    /// <summary>A drop moves the dragged card's item into that column, which is a real transition.</summary>
+    private async Task DropAsync(WorkItemStatus status)
+    {
+        if (_dragging is not { } item)
+        {
+            return;
+        }
+
+        _dragging = null;
+        await TransitionAsync(item, status);
+    }
+
+    private async Task TransitionAsync(WorkItem item, WorkItemStatus status, string? reason = null)
+    {
+        _error = null;
+        _needsReason = null;
+        if (item.Status == status)
+        {
+            return;
+        }
+
+        var moved = await Tracker.TransitionAsync(
+            item.Id,
+            status,
+            Closing(status),
+            null,
+            null,
+            item.Version,
+            MutationContext.User with { Reason = reason });
+
+        // A refused move still reloads: the card has to go back where the tracker says it is, and on a
+        // conflict the version this page was holding is stale, so a retry would fail the same way.
+        var here = Accepted(moved.Outcome, moved.Errors);
+        await LoadAsync();
+
+        // Set after the reload, which would otherwise be the first thing to see it. The refusal itself is
+        // already on screen through Accepted, in the tracker's own words naming the criteria.
+        if (!here && moved.Errors.Any(e => e.Code == TrackerCodes.DoneNeedsEvidence))
+        {
+            _needsReason = item.Id;
+            _reasonText = string.Empty;
+        }
+
+        if (here)
+        {
+            _reasonText = string.Empty;
+        }
+
+        if (here)
+        {
+            // The local move stands whatever the provider makes of it (ADR 0018 decision 8: local first).
+            // Telling the provider is a separate question, and sometimes literally one: our statuses are a
+            // projection, so the map back out can name several of their states or none (backlog 48).
+            await OfferAsync(item, status, null);
+        }
+    }
+
+    /// <summary>
+    /// Records a person's evidence against one acceptance criterion (follow-up filed 2026-10-22, record evidence
+    /// against a criterion), through the same tracker call as the <c>work_item_evidence</c> tool, and answers the
+    /// refusal in the tracker's words, or null when it was stored. Kind is Other: the form does not ask what the
+    /// evidence is, only what was seen, and the reference says where to look.
+    /// </summary>
+    private async Task<string?> RecordEvidenceAsync(WorkItem item, CriterionEvidenceDraft draft)
+    {
+        var recorded = await Tracker.RecordEvidenceAsync(
+            item.Id,
+            new NewEvidence
+            {
+                Kind = EvidenceKind.Other,
+                Result = draft.Result,
+                Summary = draft.Summary,
+                ArtefactRef = draft.Reference,
+                Criterion = draft.CriterionId,
+            },
+            MutationContext.User);
+
+        if (recorded.Outcome != TrackerOutcome.Ok)
+        {
+            return recorded.Errors.Count > 0
+                ? string.Join(" ", recorded.Errors.Select(e => e.Message))
+                : recorded.Outcome == TrackerOutcome.NotFound ? "That item no longer exists." : "That evidence was refused.";
+        }
+
+        // The item's version moved with the evidence, so the page re-reads it before anything else is done to it.
+        await LoadAsync();
+        StateHasChanged();
+        return null;
+    }
+
+    /// <summary>
+    /// Marks or unmarks an item for autopilot (ADR 0031 decision 1, backlog 298) through the same patch path
+    /// as every other field, so the domain's own refusal (only a Ready item may be marked) shows exactly the
+    /// way any other authoring refusal does.
+    /// </summary>
+    private async Task MarkForAutopilotAsync(WorkItem item, bool marked)
+    {
+        _error = null;
+        var updated = await Tracker.UpdateAsync(
+            item.Id,
+            new WorkItemPatch { MarkedForAutopilot = Optional<bool>.Of(marked) },
+            item.Version,
+            MutationContext.User);
+
+        Accepted(updated.Outcome, updated.Errors);
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Sends a move this board made to the provider, or puts the question on screen when which of their
+    /// states is meant cannot be answered here. Nothing on a board that follows no provider, and nothing for
+    /// an item that is not on the provider: putting it there is its own act.
+    /// </summary>
+    private async Task OfferAsync(WorkItem item, WorkItemStatus status, string? chosen)
+    {
+        var move = await Sync.MovedAsync(CurrentProject.Require(), item.Id, status, chosen);
+        _asking = move.Outcome == ProviderMoveOutcome.NeedsAChoice ? new PendingMove(item, status, move) : null;
+        _queuedMove = move.Outcome == ProviderMoveOutcome.Queued ? move.Sentence : null;
+    }
+
+    private async Task ChooseAsync(string native)
+    {
+        if (_asking is { } asking)
+        {
+            await OfferAsync(asking.Item, asking.Status, native);
+        }
+    }
+
+    /// <summary>
+    /// Leaves the question unanswered. The move here stands, and the next sync finds this board ahead of the
+    /// provider and asks again on the sync page, so nothing is lost by walking away from it.
+    /// </summary>
+    private void DismissAsk() => _asking = null;
+
+    /// <summary>
+    /// Retries the refused move to Done with the person's reason, against the item as it is now: the refusal
+    /// reloaded the page, so the version the drag or the select held may be stale.
+    /// </summary>
+    private async Task MoveWithReasonAsync()
+    {
+        if (_needsReason is not { } id || !DoneEvidence.HasReason(_reasonText))
+        {
+            return;
+        }
+
+        var current = await Tracker.GetAsync(id);
+        if (current is null)
+        {
+            _needsReason = null;
+            _error = "That item no longer exists.";
+            return;
+        }
+
+        await TransitionAsync(current, WorkItemStatus.Done, _reasonText);
+    }
+
+    private void DismissReason()
+    {
+        _needsReason = null;
+        _reasonText = string.Empty;
+        _error = null;
+    }
+
+    /// <summary>
+    /// The resolution a terminal status needs. Done closes as Completed and Cancelled as WontDo, which are
+    /// the neutral readings of dropping a card into those two columns; anything more specific is a decision
+    /// the person is making, and it belongs on the detail page rather than in a drag.
+    /// </summary>
+    private static WorkItemResolution? Closing(WorkItemStatus status) => status switch
+    {
+        WorkItemStatus.Done => WorkItemResolution.Completed,
+        WorkItemStatus.Cancelled => WorkItemResolution.WontDo,
+        _ => null,
+    };
+
+    /// <summary>True when the call succeeded; otherwise it puts the reason on screen.</summary>
+    private bool Accepted(TrackerOutcome outcome, IReadOnlyList<ValidationError> errors)
+    {
+        if (outcome == TrackerOutcome.Ok)
+        {
+            return true;
+        }
+
+        if (errors.Count > 0)
+        {
+            _formErrors = errors;
+            _error = string.Join(" ", errors.Select(e => e.Message));
+            return false;
+        }
+
+        _error = outcome switch
+        {
+            TrackerOutcome.Conflict => "Someone else changed this item first, so it has been reloaded.",
+            TrackerOutcome.NotFound => "That item no longer exists.",
+            TrackerOutcome.Unsupported => "This tracker cannot do that.",
+            _ => "That change was refused.",
+        };
+
+        return false;
+    }
+}

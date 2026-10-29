@@ -1,0 +1,57 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Web.Services
+@inject BridgeWorkspaceContext Workspace
+@inject StartDialogState Dialog
+@implements IDisposable
+
+@* Work item #350: "no folder open means no studio". The layout wraps the whole studio in this, so the decision is
+   taken where EVERY page of the studio renders, by however the person got there: a typed address and a forced load
+   come through the HTTP middleware and then this layout, and an in-app navigation (a rail link, a NavigateTo, back
+   and forward) re-renders this layout inside the same circuit. With no folder open the child content, which is the
+   activity rail, the page body and the scratchpad, is never rendered at all, so no page of any area is even
+   instantiated, and nothing a previous workspace left in the store (its board, its wiki, its sessions) can reach the
+   screen. The circuit's folder is fixed for the window's life (WorkspaceSelection is captured once from ?ws=), so the
+   only way out is to open a folder, which is a new load with its ws.
+
+   With a folder open the studio renders as always, and the title bar's workspace button opens the same dialog OVER
+   it: closing it (the X, Escape) leaves the page exactly as it was, because the page was never taken away. *@
+
+@if (Enforce && StartDialogState.NoFolderOpen(Workspace))
+{
+    <div class="start-screen" data-testid="start-screen">
+        <div class="fv-visually-hidden" role="heading" aria-level="1">@(ProductName.Short): open a folder</div>
+        <StartDialog Dismissible="false" />
+    </div>
+}
+else
+{
+    @ChildContent
+    @if (Dialog.IsOpen)
+    {
+        <div class="start-dialog-backdrop" data-testid="start-dialog-backdrop">
+            <div class="start-dialog-scrim" @onclick="Dialog.Close"></div>
+            <StartDialog Dismissible="true" OnClose="Dialog.Close" />
+        </div>
+    }
+}
+
+@code {
+    /// <summary>The studio this host stands in front of.</summary>
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+
+    /// <summary>
+    /// True (the default) where the no-folder rule applies: MainLayout, which is every page of the studio. False on
+    /// MinimalWindowLayout, whose pages (the error page, the lock and sign-in pages) must stay reachable whatever the
+    /// window shows, so there the dialog is only ever the one the title bar opens, and it can always be closed.
+    /// </summary>
+    [Parameter]
+    public bool Enforce { get; set; } = true;
+
+    protected override void OnInitialized() => Dialog.Changed += OnDialogChanged;
+
+    private void OnDialogChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Dialog.Changed -= OnDialogChanged;
+}

@@ -1,0 +1,94 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using System.Globalization
+
+@* Backlog 36: the home surface's bar chart, drawn inline as SVG. There is no chart library and there
+   never will be one here: the container runs offline (ADR 0012), so a chart package would have to be
+   vendored and kept, and what these cards need is thirty rectangles and a baseline. One slot per day,
+   one or two bars per slot, scaled to the largest value in the set. *@
+
+<svg class="insight-bars" viewBox="@ViewBox" preserveAspectRatio="none" role="img"
+     aria-label="@Label" data-testid="@TestId">
+    <line class="insight-bars-base" x1="0" y1="@Length(Height)" x2="@Length(Slot * Math.Max(Bars.Count, 1))"
+          y2="@Length(Height)" />
+    @for (var i = 0; i < Bars.Count; i++)
+    {
+        var bar = Bars[i];
+        var left = i * Slot;
+        <g>
+            <title>@bar.Title</title>
+            @* A transparent full-height slot so the tooltip is reachable on a day with nothing in it. *@
+            <rect class="insight-bars-slot" x="@Length(left)" y="0" width="@Length(Slot)" height="@Length(Height)" />
+            @if (Secondary is null)
+            {
+                <rect class="insight-bar insight-bar-primary" x="@Length(left + 1.5)"
+                      y="@Length(Height - BarHeight(bar.Primary))" width="@Length(7)"
+                      height="@Length(BarHeight(bar.Primary))" />
+            }
+            else
+            {
+                <rect class="insight-bar insight-bar-primary" x="@Length(left + 1.5)"
+                      y="@Length(Height - BarHeight(bar.Primary))" width="@Length(3.5)"
+                      height="@Length(BarHeight(bar.Primary))" />
+                <rect class="insight-bar insight-bar-secondary" x="@Length(left + 5.5)"
+                      y="@Length(Height - BarHeight(bar.Secondary))" width="@Length(3.5)"
+                      height="@Length(BarHeight(bar.Secondary))" />
+            }
+        </g>
+    }
+</svg>
+
+@code {
+    /// <summary>One slot of the chart: a day, its value or values, and the sentence a hover shows.</summary>
+    /// <param name="Title">The whole truth about this slot, because the bar itself carries no label.</param>
+    public sealed record Bar(double Primary, double Secondary, string Title);
+
+    private const double Slot = 10;
+    private const double Height = 64;
+
+    /// <summary>The slots, oldest first.</summary>
+    [Parameter, EditorRequired]
+    public IReadOnlyList<Bar> Bars { get; set; } = [];
+
+    /// <summary>What the whole chart is, for a reader who cannot see it.</summary>
+    [Parameter, EditorRequired]
+    public string Label { get; set; } = string.Empty;
+
+    /// <summary>The name of the second series, or null when there is only one.</summary>
+    [Parameter]
+    public string? Secondary { get; set; }
+
+    [Parameter]
+    public string? TestId { get; set; }
+
+    private string ViewBox => $"0 0 {Length(Slot * Math.Max(Bars.Count, 1))} {Length(Height)}";
+
+    /// <summary>
+    /// The tallest value across every series, which is what every bar is scaled against. Zero when
+    /// nothing happened, and then nothing is drawn but the baseline: a flat row of full-height bars
+    /// would be the "zeros dressed up" the item forbids.
+    /// </summary>
+    private double Max => Bars.Count == 0
+        ? 0
+        : Math.Max(Bars.Max(b => b.Primary), Secondary is null ? 0 : Bars.Max(b => b.Secondary));
+
+    /// <summary>
+    /// A bar's height. A value that is real but tiny next to the month's peak still gets a visible sliver
+    /// rather than rounding away to nothing, because "there was activity" is the first thing the chart is
+    /// asked; an actual zero stays zero.
+    /// </summary>
+    private double BarHeight(double value)
+    {
+        if (value <= 0 || Max <= 0)
+        {
+            return 0;
+        }
+
+        return Math.Max(2, value / Max * (Height - 4));
+    }
+
+    /// <summary>
+    /// An SVG coordinate. Invariant, and not negotiable: on this host's Swedish culture the default
+    /// rendering of 1.5 is "1,5", which SVG reads as two numbers and silently draws the wrong rectangle.
+    /// </summary>
+    private static string Length(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+}

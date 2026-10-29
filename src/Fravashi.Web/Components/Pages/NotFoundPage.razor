@@ -1,0 +1,17 @@
+@page "/not-found"
+@layout Fravashi.Web.Components.Layout.MainLayout
+@using Fravashi.Web.Components.Shell
+
+@* Backlog 280: the ONE Not found page. The router shows it for an in-app navigation to nothing (Routes.razor's
+   NotFoundPage), and a full navigation the server cannot route is re-executed here (StudioNotFound), so either way
+   the window keeps its title bar, the activity rail and a way back. The layout is named here because for an in-app
+   navigation to nothing the Router renders NotFoundPage itself, without the Found template's DefaultLayout; the
+   re-executed full navigation would get MainLayout either way. *@
+
+<PageTitle>@(ProductName.Short) · Not found</PageTitle>
+<PageBar Title="Not found" />
+
+<div class="studio-page" data-testid="not-found">
+    <p role="alert">Sorry, there's nothing at this address.</p>
+    <p><a href="/" data-testid="not-found-home">Go to the start page</a></p>
+</div>

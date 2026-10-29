@@ -1,0 +1,900 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Sessions
+@inject LiveSessionRegistry Registry
+@inject Fravashi.Application.AgentSync.IWorkspaceAgentSync Sync
+@inject IServiceProvider Services
+@using Microsoft.Extensions.DependencyInjection
+@implements IDisposable
+
+@* The live half of a session: what has happened, what is waiting on the user, and the box to talk
+   back through. Shared by the Sessions area and the Code page panel, both bound to the SAME session
+   object, so approving in one shows in the other.
+
+   The panel owns its own header (backlog 18's redesign, approved mockup 2026-08-06). That is what puts
+   New conversation in the SAME PLACE on both surfaces, which it was not before: the Code page had no
+   such action at all and the sessions page had one styled as a sidebar heading. Surface-specific
+   controls ride in HeaderActions rather than in a second bar above this one, so there is one header and
+   the primary action does not move between the two views.
+
+   The vertical order is deliberate and each band is flex: none except the transcript, so the composer
+   can never be pushed off the pane (backlog 16 and 17). *@
+<CascadingValue Value="_previews" IsFixed="true">
+<div class="session-pane @(Compact ? "compact" : string.Empty)" data-testid="session-pane">
+    <div class="session-pane-head" data-testid="session-pane-head">
+        @if (_renaming && _session is not null)
+        {
+            <SessionRenameBox Value="@Title" CssClass="session-pane-rename-input" Done="OnRenameDone" />
+        }
+        else
+        {
+            <span class="session-pane-title" title="@Title">@Title</span>
+            @if (_session?.IsAssistant == true)
+            {
+                @* Work item #359: Home's studio assistant, opened here from Home or the list. *@
+                <span class="session-chip-graph-only" data-testid="assistant-chip"
+                      title="Home's @(ProductName.Short) assistant: reads the folder, writes work items and the wiki, and asks before starting work">@AgentAssistantTools.Label</span>
+            }
+            @if (ShowsGraphOnly)
+            {
+                @* Work item #352: this conversation (or the one the next message starts) reads the folder and writes
+                   only the tracker and the wiki. *@
+                <span class="session-chip-graph-only" data-testid="graph-only-chip"
+                      title="Reads the folder and writes work items and the wiki; never changes a file, runs a command or touches git">@AgentGraphOnlyTools.Label</span>
+            }
+            @* Renaming is offered once there is a conversation to name (backlog 109). The same registry
+               call the list card makes, so both views of this session show the new name at once. *@
+            @if (_session is not null)
+            {
+                <button type="button" class="session-head-action" data-testid="rename-conversation"
+                        title="Rename conversation" aria-label="Rename conversation"
+                        @onclick="() => _renaming = true">
+                    &#9998;
+                </button>
+            }
+        }
+        @* Work item #362: a live conversation can be ENDED from its pane, idle or not. Stop (in the composer) shows
+           only while a turn runs, so a conversation that finished its turn had no way out here and went on holding
+           its slot (a folder's one graph-only conversation refused the next one). Ending is Stop's own call. *@
+        @if (_session?.IsRunning == true)
+        {
+            <button type="button" class="session-head-action session-head-end" data-testid="end-conversation"
+                    title="End this conversation: the agent process stops; the conversation stays in the history"
+                    @onclick="() => { _confirmEnd = true; _confirmNew = false; }">
+                End
+            </button>
+        }
+        @* Work item #356: what runs without asking in this folder, always visible instead of behind Details. *@
+        <SessionTrustPicker WorkspaceId="@WorkspaceId" />
+        @* Never beside Stop, never styled like it: starting fresh and interrupting a turn were the two
+           things the owner reported as confusable, so they live at opposite ends of the panel. *@
+        <button type="button" class="session-head-action session-head-action-primary"
+                data-testid="new-conversation"
+                title="New conversation" aria-label="New conversation"
+                @onclick="StartNewConversation">
+            +
+        </button>
+        @HeaderActions
+    </div>
+
+    @if (_confirmEnd && _session?.IsRunning == true)
+    {
+        <div class="session-confirm" data-testid="end-conversation-confirm">
+            <span class="session-confirm-text">End this conversation? The agent stops; what was said stays in the history.</span>
+            <button type="button" class="studio-btn" data-testid="end-conversation-confirm-yes" @onclick="EndConversation">
+                End conversation
+            </button>
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="end-conversation-confirm-no"
+                    @onclick="() => _confirmEnd = false">
+                Keep it
+            </button>
+        </div>
+    }
+
+    @if (_confirmNew)
+    {
+        @* A running turn is not thrown away silently (backlog 21): one session runs per workspace, so
+           starting fresh means ending this one, and that is said out loud before it happens. *@
+        <div class="session-confirm" data-testid="new-conversation-confirm">
+            <span class="session-confirm-text">This conversation is still running. Stop it and start a new one?</span>
+            <button type="button" class="studio-btn" data-testid="new-conversation-confirm-yes"
+                    @onclick="StopAndStartFresh">
+                Stop and start fresh
+            </button>
+            @* Work item #352: or leave it running and start one beside it that can only read the folder and write
+               work items and the wiki, while that slot is free. *@
+            @if (CanStartGraphOnlyBeside)
+            {
+                <button type="button" class="studio-btn" data-testid="new-conversation-graph-only"
+                        title="Keeps this conversation running; the new one reads the folder and writes work items and the wiki, never a file"
+                        @onclick="StartGraphOnlyBesideAsync">
+                    @AgentGraphOnlyTools.Label
+                </button>
+            }
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="new-conversation-confirm-no"
+                    @onclick="() => _confirmNew = false">
+                Keep going
+            </button>
+        </div>
+    }
+
+    @if (string.IsNullOrWhiteSpace(WorkspaceId))
+    {
+        <div class="session-pane-unavailable" data-testid="session-no-workspace">
+            Open a workspace folder to run an agent session in it.
+        </div>
+    }
+    else if (string.IsNullOrWhiteSpace(WorkingDirectory) && Sync.StartFailureFor(WorkspaceId) is { } failure)
+    {
+        @* Backlog 173: a copy that failed to start says why, here where the agent would have run, instead of
+           the generic sentence below; the studio log keeps the full exception. *@
+        <div class="session-pane-unavailable session-copy-failed" data-testid="session-copy-failed">
+            <span data-testid="session-copy-failed-reason">The contained copy of this workspace could not start: @failure</span>
+            <button type="button" class="studio-btn" data-testid="session-copy-retry"
+                    @onclick="() => Sync.Retry(WorkspaceId)">
+                Try again
+            </button>
+        </div>
+    }
+    else if (string.IsNullOrWhiteSpace(WorkingDirectory))
+    {
+        <div class="session-pane-unavailable" data-testid="session-no-copy">
+            This workspace has no contained copy yet, so there is nowhere safe to run an agent.
+            Agent sessions need the studio running in its container.
+        </div>
+    }
+    else
+    {
+        <SessionGovernanceStrip WorkspaceId="@WorkspaceId" Session="@_session?.Id" />
+        @* Backlog 159: the agent's browser page, while it has one. *@
+        <SessionBrowserPane Session="@_session?.Id" />
+        @* Backlog 10: a requested Node version the copy does not have is said here, under the strip that
+           states what the conversation runs on, with the install one click away. Silent otherwise. *@
+        <NodeVersionBanner WorkingDirectory="@WorkingDirectory" />
+
+        @if (_session is not null)
+        {
+            @* Answering a question is sending a turn (backlog 92), so it goes through the same path a
+               typed message does, including the "no session running, start one" branch. *@
+            <SessionTranscript Session="_session" Answer="SendAsync" />
+        }
+        else
+        {
+            <div class="session-pane-body">
+                @if (_folderNotSetUp)
+                {
+                    @* Item #373: a folder in no project starts no conversation; the way forward is to set it up. *@
+                    <FolderNotSetUp Surface="sessions" WorkspaceId="@WorkspaceId" />
+                }
+                else
+                {
+                    <SessionEmptyState Start="FocusComposerAsync" WorkspaceId="@WorkspaceId" />
+                }
+            </div>
+        }
+
+        @* Approvals are siblings of the transcript on purpose: what the agent is blocked on must
+           never be something the reader has to scroll to. The group is bounded so a pile-up
+           shrinks the transcript instead of pushing the composer off the pane. Pending is read ONCE
+           per render: the property takes a lock and copies the list on every access. *@
+        @if (_session?.Pending is { Count: > 0 } pendingCalls)
+        {
+            <div class="session-pending" data-testid="session-pending">
+                @foreach (var pending in pendingCalls)
+                {
+                    @* Keyed by the request (backlog 220): the card holds a typed reason, and without a key
+                       answering the first card would hand its component, and its reason, to the next one. *@
+                    <ApprovalPrompt @key="pending.RequestId" Request="pending" Busy="_answering" Answer="AnswerAsync" />
+                }
+            </div>
+        }
+
+        @* Backlog 229: a turn (or the agent process) the network cut off is waited out, and this says so, since
+           when and what failed, with the two things a person can do meanwhile. Retry now continues only if the
+           host answers at once; Stop ends the wait and sends nothing. *@
+        @if (_session?.NetworkWait is { } waiting)
+        {
+            <div class="session-confirm session-network-wait" data-testid="session-network-wait">
+                @* Backlog 246: the parts, so every time in the banner is in the person's zone. *@
+                <span class="session-confirm-text" data-testid="session-network-wait-words"><StampedText Words="waiting.Sentence" /></span>
+                @if (waiting.Probe is { Reachable: false } probe)
+                {
+                    <span class="session-confirm-text session-network-probe" data-testid="session-network-wait-probe">
+                        Last checked: <StampedText Words="probe.Sentence" />.
+                    </span>
+                }
+                <button type="button" class="studio-btn" data-testid="network-retry-now"
+                        disabled="@_retryingNetwork" @onclick="RetryNetworkNowAsync">
+                    Retry now
+                </button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="network-stop-waiting"
+                        @onclick="StopSession">
+                    Stop
+                </button>
+            </div>
+        }
+        else if (_session is { TurnInFlight: true, Retrying: { } retrying })
+        {
+            @* The agent CLI's own retries of a failed model call, which used to be silence. *@
+            <div class="session-confirm session-api-retry" data-testid="session-api-retry">
+                <span class="session-confirm-text">
+                    The model call failed, so the agent CLI is retrying (@retrying.Attempt of @retrying.MaxRetries).
+                </span>
+            </div>
+        }
+
+        @* Backlog 25 increment 6: a turn that exhausted its validation attempts takes the CLI process with
+           it, but not the conversation. Continue resumes that same conversation and waits for the next
+           message; typing one without clicking does the same. *@
+        @if (_session is { IsResumable: true } resumable)
+        {
+            <div class="session-confirm" data-testid="session-continue">
+                <span class="session-confirm-text">This conversation can continue where the failed turn left it.</span>
+                <button type="button" class="studio-btn" data-testid="continue-conversation"
+                        disabled="@(_busy || !Registry.CanContinue(resumable.Id))"
+                        @onclick="ContinueAsync">
+                    Continue
+                </button>
+            </div>
+        }
+
+        @if (_error is { Length: > 0 })
+        {
+            <div class="session-error" data-testid="session-error">
+                <span class="session-error-mark" aria-hidden="true">!</span>
+                <span class="session-error-text">@_error</span>
+            </div>
+        }
+
+        @if (_session is null)
+        {
+            @* Work item #352: what the next message starts. With an editing conversation already running here it can
+               only be a graph-only one, and the pane says so instead of letting the start be refused. *@
+            <div class="session-kind" data-testid="session-kind">
+                @if (MustStartGraphOnly)
+                {
+                    <span data-testid="graph-only-forced">
+                        A conversation is already running in this folder, so this one is @AgentGraphOnlyTools.Label.ToLowerInvariant():
+                        it can read the folder and write work items and the wiki, but not change a file, run a command or use git.
+                    </span>
+                }
+                else
+                {
+                    <label class="session-kind-toggle">
+                        <input type="checkbox" data-testid="graph-only-toggle" checked="@_graphOnlyChosen"
+                               @onchange="e => _graphOnlyChosen = e.Value is true" />
+                        @AgentGraphOnlyTools.Label
+                    </label>
+                    <span>reads the folder and writes work items and the wiki, never a file</span>
+                }
+            </div>
+        }
+
+        @if (_session is not null)
+        {
+            <SessionUsageStrip Stats="_session.Stats" />
+            @if (Attention is { } attention)
+            {
+                <SessionAttentionLine Attention="attention.For(_session.Id)" />
+            }
+        }
+
+        @* Item #373: in a folder that is not set up the composer gives way to one line saying so, so an earlier
+           conversation can be read but not continued. A conversation that is somehow running keeps its composer,
+           because its Stop is there. *@
+        @if (_folderNotSetUp && _session?.IsRunning != true)
+        {
+            <FolderNotSetUp Inline="true" Surface="sessions" WorkspaceId="@WorkspaceId" />
+        }
+        else
+        {
+        <SessionComposer @ref="_composer"
+                         Text="@_text" TextChanged="t => _text = t"
+                         Model="@_model" ModelChanged="OnModelChanged"
+                         Effort="@_effort" EffortChanged="OnEffortChanged"
+                         RunningEffort="@_session?.Effort"
+                         Running="@(_session?.IsRunning == true)"
+                         TurnInFlight="@(_session?.IsRunning == true && _session.TurnInFlight)"
+                         ModelLocked="@(_session?.IsRunning == true && _session.TurnInFlight)"
+                         RunningModel="@_session?.Model"
+                         Disabled="@_busy"
+                         SessionLimitUsd="@Registry.SpendLimits.PerSessionUsd"
+                         Images="@_images" ImagesChanged="images => _images = images"
+                         ImageOffset="@(_session?.Transcript.OfType<UserImagesAttached>().Sum(e => e.Images.Count) ?? 0)"
+                         Send="SendComposedAsync" Stop="StopSession" />
+        }
+    }
+
+    @* Work item #351: a reference clicked in the conversation opens here, over the right of the pane. *@
+    <ReferencePreviewPanel State="_previews" Session="_session?.Id" />
+</div>
+</CascadingValue>
+
+@code {
+    [Parameter]
+    public string? WorkspaceId { get; set; }
+
+    /// <summary>The workspace's contained copy: where the agent actually runs.</summary>
+    [Parameter]
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>A specific session to show; absent means the workspace's latest.</summary>
+    [Parameter]
+    public AgentSessionId? SessionId { get; set; }
+
+    /// <summary>
+    /// True when this pane is on screen BECAUSE the reader asked for a fresh conversation while there was
+    /// no pane to ask (the Sessions page's sidebar, with a stored conversation open). Without it the new
+    /// pane resolves to the workspace's latest session and the reader lands right back inside the
+    /// conversation they asked to leave; with it the pane runs the SAME decision its own header action
+    /// runs, so a running turn is still asked about before it is ended.
+    /// </summary>
+    [Parameter]
+    public bool StartFresh { get; set; }
+
+    [Parameter]
+    public bool Compact { get; set; }
+
+    /// <summary>Surface-specific header controls, to the right of the shared ones.</summary>
+    [Parameter]
+    public RenderFragment? HeaderActions { get; set; }
+
+    /// <summary>Raised when a session starts here, so the page can select it.</summary>
+    [Parameter]
+    public EventCallback<AgentSessionId> SessionStarted { get; set; }
+
+    /// <summary>Raised when the reader asks for a fresh conversation, so a page can drop its selection.</summary>
+    [Parameter]
+    public EventCallback NewConversation { get; set; }
+
+    /// <summary>
+    /// Raised when this workspace's copy failed to start or is being tried again (backlog 173), so the page
+    /// renders again and hands this pane the copy's path once there is one.
+    /// </summary>
+    [Parameter]
+    public EventCallback CopyStateChanged { get; set; }
+
+    private LiveAgentSession? _session;
+
+    /// <summary>The reference this pane's preview sidebar shows (work item #351), cascaded to the transcript.</summary>
+    private readonly ReferencePreviewState _previews = new();
+    private SessionComposer? _composer;
+    private string _text = string.Empty;
+
+    // Backlog 26: images pasted into the turn being written. Owned here beside the text, and cleared with it.
+    private IReadOnlyList<AgentImageAttachment> _images = [];
+    private string? _model;
+
+    // Requested 2026-10-22 (model and effort per work item): the effort picked here, null for Default.
+    private AgentEffort? _effort;
+
+    /// <summary>
+    /// Work item #357: true once the reader picked a model or an effort in this pane. A person's pick wins over the
+    /// Settings default, so a fresh conversation keeps it rather than being reset to the default.
+    /// </summary>
+    private bool _pickedByPerson;
+
+    /// <summary>Work item #357: whether the first parameter pass has already decided about the defaults.</summary>
+    private bool _defaultsDecided;
+    private string? _error;
+    private bool _busy;
+    private bool _answering;
+
+    private bool _confirmNew;
+    private bool _confirmEnd;
+
+    /// <summary>Work item #352: the reader chose a graph-only conversation ("Notes and items only") for the next start.</summary>
+    private bool _graphOnlyChosen;
+
+    /// <summary>
+    /// Work item #352: an editing conversation is already running in this folder, so a conversation started from this
+    /// fresh pane can only be graph-only; the pane starts it as one rather than letting the start be refused.
+    /// </summary>
+    private bool MustStartGraphOnly =>
+        _session is null && !string.IsNullOrWhiteSpace(WorkspaceId) && Registry.RunningFor(WorkspaceId) is not null;
+
+    /// <summary>Whether the next start from this pane is graph-only.</summary>
+    private bool StartsGraphOnly => _graphOnlyChosen || MustStartGraphOnly;
+
+    /// <summary>The header's chip: the conversation on screen is graph-only, or the next one will be.</summary>
+    private bool ShowsGraphOnly => _session is { } shown ? shown.IsGraphOnly : StartsGraphOnly;
+
+    /// <summary>
+    /// Work item #352: the confirm band offers a graph-only conversation beside the running one while the folder's
+    /// graph-only slot is free and the running one is not itself that slot's occupant.
+    /// </summary>
+    private bool CanStartGraphOnlyBeside =>
+        _session is { IsRunning: true, IsGraphOnly: false }
+        && !string.IsNullOrWhiteSpace(WorkspaceId)
+        && Registry.RunningGraphOnlyFor(WorkspaceId) is null;
+
+    /// <summary>True while the header's title is the rename box (backlog 109).</summary>
+    private bool _renaming;
+
+    /// <summary>
+    /// Whether <see cref="StartFresh"/> has already been acted on. The parameter states why this pane
+    /// exists, so it is served once per pane and never again on a later parameter pass.
+    /// </summary>
+    private bool _startFreshServed;
+
+    /// <summary>The conversation's own title once there is one; the panel's name until then.</summary>
+    private string Title => _session is { } session
+        ? _titles?.Title(session.Id, session.CustomTitle, session.DerivedTitle)
+          ?? ConversationTitles.Display(session.CustomTitle, session.DerivedTitle)
+        : "Agent";
+
+    /// <summary>The conversation titles (work item #351), with the linked work item when there is one.</summary>
+    private ConversationTitleSource? _titles;
+
+    /// <summary>
+    /// Backlog 244: the operator's attention, resolved optionally so a wiring without the store (most component tests)
+    /// simply shows no line.
+    /// </summary>
+    private ISessionAttention? Attention { get; set; }
+
+    protected override void OnInitialized()
+    {
+        Registry.SessionsChanged += OnRegistryChanged;
+        Sync.StartChanged += OnCopyStartChanged;
+        Attention = Services.GetService<ISessionAttention>();
+        if (Attention is not null)
+        {
+            Attention.Changed += OnAttentionChanged;
+        }
+
+        _titles = new ConversationTitleSource(Services);
+        _titles.Changed += OnTitleLinksChanged;
+    }
+
+    // Work item #351: the header's title follows the work item the conversation is linked to, which the agent changes.
+    private void OnTitleLinksChanged(AgentSessionId session)
+    {
+        if (_session is not { } shown || !shown.Id.Equals(session) || _titles is not { } titles)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(async () =>
+        {
+            await titles.LoadAsync([session]);
+            StateHasChanged();
+        });
+    }
+
+    // A decision is counted after the card it ends has already re-rendered the pane, so the line follows its own store.
+    private void OnAttentionChanged(AgentSessionId session)
+    {
+        if (_session is { } shown && shown.Id.Equals(session))
+        {
+            _ = InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void OnCopyStartChanged(string workspaceId)
+    {
+        if (!string.Equals(workspaceId, WorkspaceId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _ = InvokeAsync(async () =>
+        {
+            await CopyStateChanged.InvokeAsync();
+            StateHasChanged();
+        });
+    }
+
+    /// <summary>
+    /// Item #373: whether this pane's folder is known and in no project. Read when the parameters change rather than
+    /// on every render (a streaming turn renders many times a second), and again before a turn is sent.
+    /// </summary>
+    private bool _folderNotSetUp;
+
+    private bool ReadFolderNotSetUp() =>
+        Fravashi.Application.Projects.WorkspaceProjects.IsNotSetUp(
+            Services.GetService<Fravashi.Application.Persistence.IWorkspaceStore>(), WorkspaceId);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _folderNotSetUp = ReadFolderNotSetUp();
+        Attach(Resolve());
+        if (!_defaultsDecided)
+        {
+            // Work item #357: a pane that opens on no conversation is a new one, so its pickers start on the
+            // Settings default. A pane showing a conversation leaves them alone: that conversation has its own.
+            _defaultsDecided = true;
+            if (_session is null)
+            {
+                ApplyNewConversationDefaults();
+            }
+        }
+
+        if (_session is { } shown && _titles is { } titles)
+        {
+            await titles.LoadAsync([shown.Id]);
+        }
+
+        if (!StartFresh || _startFreshServed)
+        {
+            return;
+        }
+
+        // After Attach, so the decision is made against the session this pane would otherwise show: that
+        // is what makes the sidebar's action ask about a running turn exactly as the header's own does.
+        _startFreshServed = true;
+        await StartNewConversation();
+    }
+
+    private LiveAgentSession? Resolve() =>
+        SessionId is { } id
+            ? Registry.Find(id)
+            : string.IsNullOrWhiteSpace(WorkspaceId) ? null : Registry.LatestFor(WorkspaceId);
+
+    /// <summary>Follows whichever session this pane is showing, so its updates re-render this circuit.</summary>
+    private void Attach(LiveAgentSession? session)
+    {
+        if (ReferenceEquals(session, _session))
+        {
+            return;
+        }
+
+        if (_session is not null)
+        {
+            _session.Changed -= OnSessionChanged;
+        }
+
+        // A rename box belongs to the conversation it was opened on: showing another one closes it, so a
+        // draft typed against the old conversation can never be committed against the new (backlog 109).
+        _renaming = false;
+        _session = session;
+
+        if (_session is not null)
+        {
+            _session.Changed += OnSessionChanged;
+        }
+    }
+
+    private void OnRegistryChanged() => InvokeAsync(() =>
+    {
+        Attach(Resolve());
+        StateHasChanged();
+    });
+
+    private void OnSessionChanged() => InvokeAsync(StateHasChanged);
+
+    // ---- renaming (backlog 109) ----------------------------------------------------------------
+
+    /// <summary>The box is done: a name to apply goes through the registry, which persists it and tells
+    /// every surface; null means nothing changes. The registry ignores blank and unchanged names too,
+    /// so the box is a convenience over that rule, not the rule itself.</summary>
+    private void OnRenameDone(string? name)
+    {
+        _renaming = false;
+        if (name is not null && _session is not null)
+        {
+            Registry.Rename(_session.Id, name);
+        }
+    }
+
+    // ---- starting fresh (backlog 21) --------------------------------------------------------
+
+    /// <summary>
+    /// Clears the pane to a new conversation, asking first when one is still running. Public because the
+    /// Sessions page's sidebar offers the same action and must mean exactly the same thing by it.
+    /// </summary>
+    public async Task StartNewConversation()
+    {
+        if (_session?.IsRunning == true)
+        {
+            _confirmNew = true;
+            _confirmEnd = false;
+            StateHasChanged();
+            return;
+        }
+
+        await GoFreshAsync();
+    }
+
+    private async Task StopAndStartFresh()
+    {
+        _confirmNew = false;
+        if (_session is not null)
+        {
+            Registry.Stop(_session.Id);
+        }
+
+        await GoFreshAsync();
+    }
+
+    /// <summary>
+    /// Work item #352: the running conversation keeps running, and the pane clears to a fresh graph-only one beside
+    /// it. Nothing starts until the reader sends the first message, exactly as with any fresh conversation.
+    /// </summary>
+    private async Task StartGraphOnlyBesideAsync()
+    {
+        await GoFreshAsync();
+        _graphOnlyChosen = true;
+        StateHasChanged();
+    }
+
+    private async Task GoFreshAsync()
+    {
+        _confirmNew = false;
+        _graphOnlyChosen = false;
+        _error = null;
+        _text = string.Empty;
+        _images = [];
+        if (!_pickedByPerson)
+        {
+            ApplyNewConversationDefaults();
+        }
+
+        // Through the registry, not a pane field: the fresh state has to hold on EVERY surface. Kept
+        // pane-side it did not, and the Code panel went on rendering the replaced conversation, where
+        // a submitted message started a new session while that history silently vanished.
+        if (!string.IsNullOrWhiteSpace(WorkspaceId))
+        {
+            Registry.StartFresh(WorkspaceId);
+        }
+
+        Attach(null);
+        await NewConversation.InvokeAsync();
+        StateHasChanged();
+        await FocusComposerAsync();
+    }
+
+    private async Task FocusComposerAsync()
+    {
+        if (_composer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _composer.FocusAsync();
+        }
+        catch (InvalidOperationException)
+        {
+            // Prerendering, or a circuit that has gone: there is nobody to give focus to.
+        }
+    }
+
+    // ---- talking to the agent ----------------------------------------------------------------
+
+    /// <summary>
+    /// An answer to a question the agent asked goes back as words alone: an image pasted into the composer
+    /// belongs to the turn being written there, not to a button the reader clicked in the transcript.
+    /// </summary>
+    private Task SendAsync(string text) => SendTurnAsync(text, []);
+
+    /// <summary>The composer's turn: its words and whatever was pasted with them.</summary>
+    private Task SendComposedAsync(string text) => SendTurnAsync(text, _images);
+
+    private async Task SendTurnAsync(string text, IReadOnlyList<AgentImageAttachment> images)
+    {
+        _error = null;
+
+        // Item #373: never start or continue a conversation in a folder that is in no project.
+        if (_session?.IsRunning != true && (_folderNotSetUp = ReadFolderNotSetUp()))
+        {
+            _error = "This folder is not set up yet, so a conversation cannot start in it. Set it up first; nothing was sent.";
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            if (_session?.IsRunning == true)
+            {
+                await Registry.SendAsync(_session.Id, text, images);
+            }
+            else
+            {
+                // Whatever the reader asked for, this IS the new conversation: Start lifts the
+                // workspace's dismissal, so the next resolve lands on it rather than on nothing.
+                // A conversation that ended resumably (backlog 25) is continued by the next message, not
+                // replaced by it: the reader is looking at it, and nothing about a failed turn suggests they
+                // wanted a fresh one. It continues IN PLACE, under the same id (owner report 2026-09-15).
+                var resumeOf = _session is { IsResumable: true } paused ? paused.Id : (AgentSessionId?)null;
+
+                // Work item #352: a fresh start is graph-only when the reader chose it or an editing conversation is
+                // already running here; a continued conversation keeps its own kind (the registry decides that).
+                // An ended graph-only conversation on screen starts another graph-only one.
+                // Work item #359: an ended studio assistant on screen starts another assistant, never an editing one.
+                var assistant = resumeOf is null && _session?.IsAssistant == true;
+                var graphOnly = resumeOf is null
+                    && !assistant
+                    && (_graphOnlyChosen
+                        || _session?.IsGraphOnly == true
+                        || Registry.RunningFor(WorkspaceId!) is not null);
+                var started = Registry.Start(new SessionStartRequest(
+                    WorkspaceId!, WorkingDirectory!, text, _model, resumeOf, Images: images, Effort: _effort,
+                    GraphOnly: graphOnly, Assistant: assistant));
+                _graphOnlyChosen = false;
+                Attach(started);
+                await SessionStarted.InvokeAsync(started.Id);
+            }
+
+            _text = string.Empty;
+            if (images.Count > 0)
+            {
+                _images = [];
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    /// <summary>
+    /// Continues the conversation on screen after its process ended resumably: the SAME session comes back
+    /// running under --resume and sends nothing, so the composer is where the reader goes next.
+    /// </summary>
+    private async Task ContinueAsync()
+    {
+        if (_session is not { IsResumable: true } paused || string.IsNullOrWhiteSpace(WorkingDirectory))
+        {
+            return;
+        }
+
+        _error = null;
+        _busy = true;
+        try
+        {
+            var continued = Registry.Continue(paused.Id, WorkingDirectory, _model, _effort);
+            Attach(continued);
+            await SessionStarted.InvokeAsync(continued.Id);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await FocusComposerAsync();
+    }
+
+    private bool _retryingNetwork;
+
+    /// <summary>Backlog 229: one probe now; the registry continues the conversation only if it answers.</summary>
+    private async Task RetryNetworkNowAsync()
+    {
+        if (_session is null)
+        {
+            return;
+        }
+
+        _retryingNetwork = true;
+        try
+        {
+            await Registry.RetryNetworkNowAsync(_session.Id);
+        }
+        finally
+        {
+            _retryingNetwork = false;
+        }
+    }
+
+    private void StopSession()
+    {
+        if (_session is not null)
+        {
+            Registry.Stop(_session.Id);
+        }
+    }
+
+    /// <summary>Work item #362: End, confirmed. Exactly what Stop does, so an idle conversation frees its slot.</summary>
+    private void EndConversation()
+    {
+        _confirmEnd = false;
+        StopSession();
+    }
+
+    /// <summary>
+    /// A model pick applies to the next start, and to the RUNNING conversation too: between turns the
+    /// registry restarts the CLI child on the new model with the same conversation resumed, and the
+    /// transcript gets a studio notice where the switch happened. The registry refuses mid-turn as the
+    /// backstop; this pane never offers the picker then (ModelLocked).
+    /// </summary>
+    private void OnModelChanged(string? model)
+    {
+        var previous = _model;
+        _model = model;
+        _pickedByPerson = true;
+
+        if (_session?.IsRunning == true && !string.Equals(previous, model, StringComparison.Ordinal))
+        {
+            Registry.ChangeModel(_session.Id, model);
+        }
+    }
+
+    /// <summary>
+    /// An effort pick (requested 2026-10-22), exactly like a model pick: it applies to the next start and, between
+    /// turns, to the running conversation through the same restart, which keeps the model where it is. Compared with
+    /// what the conversation is really at rather than with the previous pick, because unlike the model (whose running
+    /// id is the CLI's dated one) the studio knows the running effort exactly, so picking Default after a reload moves
+    /// a conversation that is at a level back to the CLI's default.
+    /// </summary>
+    private void OnEffortChanged(AgentEffort? effort)
+    {
+        _effort = effort;
+        _pickedByPerson = true;
+
+        if (_session?.IsRunning == true && _session.Effort != effort)
+        {
+            Registry.ChangeEffort(_session.Id, effort);
+        }
+    }
+
+    /// <summary>
+    /// Work item #357: pre-selects Settings &gt; Agents &gt; Default models and effort for a new conversation. Resolved
+    /// optionally, so a wiring without the settings store (most component tests) keeps Default exactly as before.
+    /// </summary>
+    private void ApplyNewConversationDefaults()
+    {
+        if (Services.GetService<Fravashi.Application.Persistence.IConfigurationStore>() is not { } config)
+        {
+            return;
+        }
+
+        // Item #373: the folder's project may carry its own default (the setup's Agents step), laid over the install's.
+        var project = Services.GetService<Fravashi.Application.Persistence.IWorkspaceStore>() is { } folders
+            ? Fravashi.Application.Projects.WorkspaceProjects.For(folders, WorkspaceId)
+            : null;
+        var defaults = ProjectAgentDefaults.NewConversation(config, project);
+        _model = defaults.Model;
+        _effort = defaults.Effort;
+    }
+
+    private async Task AnswerAsync((string RequestId, bool Approved, string? Reason) answer)
+    {
+        _answering = true;
+        try
+        {
+            // Backlog 220: a denial can carry the person's own words, which become the decision document's
+            // permissionDecisionReason and the transcript's denied note. Without words it is today's sentence.
+            // Work item #366: through the one resolution the Code page's diff header uses too, bound to this
+            // request id on this session, so a decision made in either place is the same single decision.
+            if (_session is { } session)
+            {
+                SessionApprovalResolution.Answer(Registry, session, answer.RequestId, answer.Approved, answer.Reason);
+            }
+        }
+        finally
+        {
+            _answering = false;
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        if (_titles is not null)
+        {
+            _titles.Changed -= OnTitleLinksChanged;
+            _titles.Dispose();
+        }
+
+        Registry.SessionsChanged -= OnRegistryChanged;
+        Sync.StartChanged -= OnCopyStartChanged;
+        if (Attention is not null)
+        {
+            Attention.Changed -= OnAttentionChanged;
+        }
+        if (_session is not null)
+        {
+            _session.Changed -= OnSessionChanged;
+        }
+    }
+}

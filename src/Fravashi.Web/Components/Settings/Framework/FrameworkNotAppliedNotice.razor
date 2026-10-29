@@ -1,0 +1,19 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+
+@* Honesty banner for the Framework tab (backlog 80). Archived ADR 0005 deferred the projection engine when framework
+   artifacts moved into the database, so every kind authored here is stored and NOTHING reads those rows back
+   into an agent session. Until backlog 69 builds the projection, the tab must say so where the authoring
+   happens, rather than let a user configure a framework and believe it took effect.
+
+   Reuses the studio's existing `.ob-warning` message convention (studio.css, the same look the onboarding
+   steps use for a plainly stated caveat); it is a global class, not an onboarding-scoped one. Deliberately
+   NOT dismissible: a dismissed banner would put the honesty gap one click away. Delete this component and its
+   call site in FrameworkSection when 69 lands. *@
+
+<div class="ob-warning framework-not-applied" role="note" data-testid="framework-not-applied">
+    <strong>Stored, not applied yet.</strong>
+    Skills, agents, commands, hooks, MCP servers and plugins authored here are saved in @(ProductName.Short)'s database,
+    and nothing writes them into an agent session yet: a skill is not invocable, a subagent is not available,
+    and a hook does not fire. Authoring now is safe, everything saved is kept, and it starts taking effect
+    when the projection that applies these artifacts to sessions ships. That work is on the backlog.
+</div>

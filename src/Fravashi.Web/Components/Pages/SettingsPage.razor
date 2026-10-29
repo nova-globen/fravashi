@@ -1,0 +1,140 @@
+@page "/settings"
+@page "/settings/{Section}"
+@page "/settings/{Section}/{Sub}"
+@page "/settings/{Section}/{Sub}/{Action}"
+@page "/settings/{Section}/{Sub}/{Action}/{Id}"
+@using Fravashi.Web.Components.Onboarding
+@using Fravashi.Web.Components.Settings
+@namespace Fravashi.Web.Components.Pages
+@inject NavigationManager Nav
+
+@* Settings is ONE page with one sidebar grouped by purpose (work item #357, the layout approved 2026-10-23):
+   General, Agents, Project, Connections, Data, Advanced. It replaced two tabs (Environment and Framework). Each
+   section's address is /settings/{slug} (SettingsSections); Framework keeps /settings/framework/{kind}/{action}/{id};
+   every old /settings/environment/... address redirects to its new place, query included, so a sign-in round trip
+   or a bookmark still lands. The onboarding steps (RuntimesStep, DataLocationStep, WikiStep, BoardStep,
+   BoardMappingStep) are the SAME components the first-run wizard routes to, rendered here as children, so nothing
+   is forked; the scoped OnboardingDraft carries their persisted values in either host. The wizard's terminal Review
+   step is deliberately not here: it is the first-run finish action and is redundant with the Overview. The entry
+   point is the activity rail's Settings button. *@
+
+<PageTitle>@(ProductName.Short) · Settings</PageTitle>
+
+<div class="studio-workitems settings-page">
+    <PageBar Title="Settings" />
+
+    <PageSplit SidebarLabel="Settings sections" SidebarTestId="settings-sidebar" BodyTestId="settings-detail">
+        <Sidebar>
+            @foreach (var group in SettingsSections.Groups)
+            {
+                <div class="page-sidebar-heading" data-testid="@($"settings-group-{group.Label.ToLowerInvariant()}")">@group.Label</div>
+                @foreach (var section in group.Sections)
+                {
+                    <a class="page-sidebar-item @(Current == section.Slug ? "active" : string.Empty)"
+                       href="@SettingsSections.Path(section.Slug)" data-testid="@($"settings-nav-{section.Slug}")"
+                       aria-current="@(Current == section.Slug ? "page" : null)">
+                        <span class="page-sidebar-label">@section.Label</span>
+                    </a>
+                }
+            }
+        </Sidebar>
+        <Body>
+            @switch (Current)
+            {
+                case SettingsSections.Runtimes:
+                    <RuntimesStep EmbeddedInSettings="true" />
+                    break;
+                case SettingsSections.Models:
+                    <DefaultModelsSection />
+                    break;
+                case SettingsSections.Reviewer:
+                    <CommitReviewerSettingsSection />
+                    break;
+                case SettingsSections.Spending:
+                    <SpendSettingsSection />
+                    break;
+                case SettingsSections.Concurrency:
+                    <AutopilotConcurrencySection />
+                    break;
+                case SettingsSections.Framework:
+                    <FrameworkSection Kind="@Sub" Action="@Action" Id="@Id" />
+                    break;
+                case SettingsSections.Project:
+                    <ProjectSettingsSection />
+                    break;
+                case SettingsSections.Board:
+                    @* The connection first, then the mapping that reads it (owner's layout). *@
+                    <div data-testid="board-settings">
+                        <BoardStep />
+                        <div class="settings-board-mapping" id="mapping" data-testid="board-settings-mapping">
+                            <BoardMappingStep />
+                        </div>
+                    </div>
+                    break;
+                case SettingsSections.Wiki:
+                    @* Publishing is configured on the wiki connection itself (its space) and per project under Project and
+                       variables; there is no separate publishing setting to host here. *@
+                    <WikiStep />
+                    break;
+                case SettingsSections.GitHosts:
+                    <GitHostsSection />
+                    break;
+                case SettingsSections.Broker:
+                    <BrokerSettingsSection />
+                    break;
+                case SettingsSections.Data:
+                    <DataLocationStep />
+                    break;
+                case SettingsSections.Backup:
+                    <BackupSettingsSection />
+                    break;
+                case SettingsSections.Evidence:
+                    <EvidenceSettingsSection />
+                    break;
+                case SettingsSections.Search:
+                    <SearchSettingsSection />
+                    break;
+                case SettingsSections.Diagnostics:
+                    <DiagnosticsSettingsSection />
+                    break;
+                default:
+                    <EnvironmentOverview />
+                    break;
+            }
+        </Body>
+    </PageSplit>
+</div>
+
+@code {
+    /// <summary>The section slug; <c>environment</c> is the retired tab and redirects.</summary>
+    [Parameter]
+    public string? Section { get; set; }
+
+    /// <summary>
+    /// The second segment: a Framework artifact kind under <c>/settings/framework</c>, or the old section slug under
+    /// <c>/settings/environment</c>.
+    /// </summary>
+    [Parameter]
+    public string? Sub { get; set; }
+
+    /// <summary>A CRUD action within a Framework kind (new | edit | view). Other sections ignore it.</summary>
+    [Parameter]
+    public string? Action { get; set; }
+
+    /// <summary>The artifact id for Framework edit/view routes.</summary>
+    [Parameter]
+    public string? Id { get; set; }
+
+    private string Current => SettingsSections.Normalize(Section);
+
+    protected override void OnParametersSet()
+    {
+        if (string.Equals(Section, SettingsSections.LegacyEnvironment, StringComparison.OrdinalIgnoreCase))
+        {
+            // Work item #357: an old Environment address. The query is kept, because a settings-hosted sign-in from
+            // an older build returns to /settings/environment/{area}?signin=... and the step reads that result.
+            var query = new Uri(Nav.Uri).Query;
+            Nav.NavigateTo(SettingsSections.LegacyEnvironmentTarget(Sub) + query, replace: true);
+        }
+    }
+}

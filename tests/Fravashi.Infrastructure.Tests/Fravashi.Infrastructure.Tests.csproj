@@ -1,0 +1,73 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Fravashi.Infrastructure.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="AwesomeAssertions" />
+    <PackageReference Include="NSubstitute" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Fravashi.Infrastructure\Fravashi.Infrastructure.csproj" />
+    <!-- Tests self-host the real bridge to exercise the studio's remote seams end to end
+         (production Infrastructure code must NOT reference the bridge; only tests may host it). -->
+    <ProjectReference Include="..\..\src\Fravashi.Bridge\Fravashi.Bridge.csproj" />
+    <!-- The same for the app runner (backlog 87): the studio's client is tested against the real server. -->
+    <ProjectReference Include="..\..\src\Fravashi.AppRunner\Fravashi.AppRunner.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Backlog 228: the faked network (a scripted HttpMessageHandler on a fake clock, plan @49), shared as source. -->
+    <Compile Include="..\Shared\Network\*.cs" LinkBase="Shared\Network" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Verbatim stream-json captured from the real CLI in the real container: claude-allow-run,
+         claude-deny-run and claude-multi-turn from 2.1.221 on 2026-08-04, the claude-typed-* set from
+         2.1.222 on 2026-08-06 (one file per terminal outcome under the json-schema flag, ADR 0022), and
+         claude-pretooluse-structured-output from 2.1.223 on 2026-08-07 (the PreToolUse payload the CLI sends
+         for its OWN turn-terminating document, which the "*" matcher gates like any other tool call). The parser
+         tests replay these rather than hand-written JSON, but a recording cannot notice a protocol
+         change on its own: that is ClaudeCliContractTests' job, against the pinned binary (ADR 0023). -->
+    <None Include="Sessions\Fixtures\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The stand-in agent CLI the runner tests spawn as a real child process. -->
+    <None Include="Sessions\FakeCli\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Backlog 43: SYNTHETIC conversation-history files in the CLI's on-disk JSONL shape, hand-written for the
+         import parser. Kept out of Sessions\Fixtures on purpose: that folder is the pinned recordings set. -->
+    <None Include="Sessions\ImportFixtures\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Backlog 26: one image turn driven against the pinned 2.1.222 on the owner's Windows host on 2026-09-15
+         (claude-haiku-4-5-20251001, user settings and MCP servers excluded): probe.png, the stdin line that
+         carried it, and the CLI's stdout verbatim. Kept out of Sessions\Fixtures on purpose, because that folder
+         is the parser-surface record (AgentCliPinTests) and this recording adds no parser behaviour: the CLI
+         does not echo a user turn, so the answer parses exactly as any text turn does. -->
+    <None Include="Sessions\ImageTurnFixtures\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Backlog 229: the pinned 2.1.280 failing a turn on the network, recorded in the studio container on 2026-10-07
+         (stream-json in and out, stdin held open, a throwaway config home and a dummy key, the API host pointed at an
+         unresolvable name, at a closed port and at a black-holed address). A subfolder on purpose: AgentCliPinTests hashes the parser over the
+         top level of Sessions\Fixtures only, and these were not driven by the live tier. -->
+    <None Include="Sessions\Fixtures\Network\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Backlog 210: mockup_check's advice is driven through the tool server on the same mockup fixtures. -->
+    <None Include="..\Fravashi.Application.Tests\Mockups\Fixtures\*.json" LinkBase="Mockups\Fixtures" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Backlog 223: the design check's drive replays backlog 222's recorded observations through a scripted page, and
+         its live tier serves the hand-built team-directory pages. -->
+    <None Include="..\Fravashi.Application.Tests\Verification\Observations\*.txt" LinkBase="Verification\Observations" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Verification\Pages\*" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Backlog 233: Playwright's own texts for a navigation that failed on the network, measured in the studio
+         container on 2026-10-07 against an unresolvable name, a closed port, a black-holed address, a reset, an
+         offline context and a form posting to an unresolvable name. -->
+    <None Include="Browser\Fixtures\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

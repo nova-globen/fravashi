@@ -1,0 +1,78 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Microsoft.JSInterop
+
+@* The box a conversation is renamed in (backlog 109), shared by the list card and the pane header so
+   the rules live once: Enter commits, Escape cancels, and a blank or unchanged name leaves the
+   conversation alone. Leaving the box (blur) commits too, the way every rename field the reader has
+   met does, and it is guarded so the blur the browser fires while the box is being taken down after
+   Enter or Escape cannot report a second time. *@
+<input class="session-rename-input @CssClass" data-testid="@TestId" @ref="_input"
+       value="@_draft" aria-label="Conversation name" spellcheck="false" autocomplete="off"
+       @oninput="e => _draft = e.Value?.ToString() ?? string.Empty"
+       @onkeydown="OnKeyDown" @onblur="CommitAsync" />
+
+@code {
+    /// <summary>The name the conversation has now; what the box opens with and what "unchanged" means.</summary>
+    [Parameter, EditorRequired]
+    public string Value { get; set; } = string.Empty;
+
+    [Parameter]
+    public string? CssClass { get; set; }
+
+    [Parameter]
+    public string TestId { get; set; } = "session-rename-input";
+
+    /// <summary>
+    /// Raised exactly once when the box is done: with the new name when there is one to apply, or with
+    /// null when the reader cancelled, left it blank, or left it as it was.
+    /// </summary>
+    [Parameter]
+    public EventCallback<string?> Done { get; set; }
+
+    private ElementReference _input;
+    private string _draft = string.Empty;
+    private bool _done;
+
+    protected override void OnInitialized() => _draft = Value;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        try
+        {
+            await _input.FocusAsync();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or JSDisconnectedException)
+        {
+            // Prerendering, or a circuit that has gone: clicking the box still works.
+        }
+    }
+
+    private Task OnKeyDown(KeyboardEventArgs e) => e.Key switch
+    {
+        "Enter" => CommitAsync(),
+        "Escape" => FinishAsync(null),
+        _ => Task.CompletedTask,
+    };
+
+    private Task CommitAsync()
+    {
+        var name = _draft.Trim();
+        return FinishAsync(name.Length > 0 && !string.Equals(name, Value, StringComparison.Ordinal) ? name : null);
+    }
+
+    private Task FinishAsync(string? name)
+    {
+        if (_done)
+        {
+            return Task.CompletedTask;
+        }
+
+        _done = true;
+        return Done.InvokeAsync(name);
+    }
+}

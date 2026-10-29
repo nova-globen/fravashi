@@ -1,0 +1,439 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Projects
+@using Fravashi.Application.PullRequests
+@using Fravashi.Application.Repository
+@using Fravashi.Application.Sessions.Tools
+@using Fravashi.Application.Wiki
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.Projects
+@using Fravashi.Domain.Wiki
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Web.Components.Git
+@using Fravashi.Web.Components.WorkItems
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@inject NavigationManager Nav
+@implements IDisposable
+
+@* The preview of a reference clicked in the conversation (work item #351), in a sidebar on the right of the session
+   pane, so "Work item #343 created" can be read without leaving the conversation. A work item shows its number,
+   title, status, the start of its description and its links; a wiki document its title, type and the start of its
+   text; a pull request what the Git page's pull request panel reads. The button opens the full page.
+
+   Every source is resolved optionally: a wiring without one (most component tests, a studio without a forge) says
+   what it cannot show rather than failing the pane.
+
+   Work item #365: the wiki page docks the same panel as its right-hand column (Docked), and there a file path in a
+   document previews too: the start of the file, and a button that opens it in the editor. *@
+@if (State is { IsOpen: true } state)
+{
+    var shown = state.Current?.Text ?? state.CurrentFile ?? string.Empty;
+    <aside class="session-ref-preview @(Docked ? "docked" : string.Empty)" data-testid="ref-preview" aria-label="@("Preview of " + shown)">
+        <div class="session-ref-preview-head">
+            <span class="session-ref-preview-kind">@(state.Current is { } kindOf ? Capitalised(SessionReferences.KindWords(kindOf.Kind)) : "File")</span>
+            <span class="session-ref-preview-ref" data-testid="ref-preview-ref">@shown</span>
+            <button type="button" class="session-head-action" data-testid="ref-preview-close"
+                    title="Close the preview" aria-label="Close the preview" @onclick="Close">&#10005;</button>
+        </div>
+        <div class="session-ref-preview-body">
+            @if (_loading)
+            {
+                <div class="session-ref-preview-note" data-testid="ref-preview-loading">Reading...</div>
+            }
+            else if (_view is null)
+            {
+                <div class="session-ref-preview-note" data-testid="ref-preview-missing">@_missing</div>
+            }
+            else
+            {
+                <div class="session-ref-preview-title" data-testid="ref-preview-title">@_view.Title</div>
+                @if (_view.Facts.Count > 0)
+                {
+                    <div class="session-ref-preview-facts" data-testid="ref-preview-facts">
+                        @foreach (var fact in _view.Facts)
+                        {
+                            <span class="session-ref-preview-fact">@fact</span>
+                        }
+                    </div>
+                }
+                @if (_view.NextAction is { Length: > 0 } next)
+                {
+                    <div class="session-ref-preview-subhead">Next action</div>
+                    <div class="session-ref-preview-excerpt" data-testid="ref-preview-next-action"><ReferencedText Text="@next" /></div>
+                }
+                @if (_view.Excerpt is { Length: > 0 } excerpt)
+                {
+                    <div class="session-ref-preview-excerpt" data-testid="ref-preview-excerpt"><ReferencedText Text="@excerpt" /></div>
+                }
+                @if (_view.Criteria is { } criteria)
+                {
+                    <div class="session-ref-preview-subhead">Acceptance criteria</div>
+                    @if (criteria.Count == 0)
+                    {
+                        <div class="session-ref-preview-note" data-testid="ref-preview-no-criteria">None yet.</div>
+                    }
+                    else
+                    {
+                        <ul class="session-ref-preview-links" data-testid="ref-preview-criteria">
+                            @foreach (var criterion in criteria)
+                            {
+                                <li><ReferencedText Text="@criterion" /></li>
+                            }
+                        </ul>
+                    }
+                }
+                @if (_view.Item is { } attachmentsOf)
+                {
+                    @* Work item #359: the images the item carries, as on its page. *@
+                    <WorkItemAttachmentsView Item="attachmentsOf" Compact="true" />
+                }
+                @if (_view.FileText is { } fileText)
+                {
+                    <pre class="session-ref-preview-file" data-testid="ref-preview-file">@fileText</pre>
+                }
+                @if (_view.Links.Count > 0)
+                {
+                    <div class="session-ref-preview-subhead">Links</div>
+                    <ul class="session-ref-preview-links" data-testid="ref-preview-links">
+                        @foreach (var link in _view.Links)
+                        {
+                            <li><ReferencedText Text="@link" /></li>
+                        }
+                    </ul>
+                }
+            }
+        </div>
+        <div class="session-ref-preview-actions">
+            <button type="button" class="studio-btn" data-testid="ref-preview-open" @onclick="OpenPage">
+                @(state.CurrentFile is null ? "Open the full page" : "Open in the editor")
+            </button>
+        </div>
+    </aside>
+}
+
+@code {
+    /// <summary>The longest excerpt shown, in characters.</summary>
+    public const int ExcerptLength = 600;
+
+    /// <summary>The most links a work item's preview lists.</summary>
+    public const int MaxLinks = 10;
+
+    [Parameter, EditorRequired]
+    public ReferencePreviewState? State { get; set; }
+
+    /// <summary>The conversation the pane shows: its project is the graph a reference is read from.</summary>
+    [Parameter]
+    public AgentSessionId? Session { get; set; }
+
+    /// <summary>
+    /// True where the panel is a column of its own (the wiki page, work item #365) rather than laid over the right of a
+    /// session pane.
+    /// </summary>
+    [Parameter]
+    public bool Docked { get; set; }
+
+    /// <summary>The most lines of a file its preview shows.</summary>
+    public const int FileLines = 40;
+
+    private sealed record View(
+        string Title, IReadOnlyList<string> Facts, string? Excerpt, IReadOnlyList<string> Links,
+        string? NextAction = null, IReadOnlyList<string>? Criteria = null, WorkItemId? Item = null, string? FileText = null);
+
+    /// <summary>What is on show, as one value, so a change of either half is noticed.</summary>
+    private readonly record struct Shown(WikiReference? Reference, string? File);
+
+    private ReferencePreviewState? _subscribed;
+    private Shown _loadedFor;
+    private int _generation;
+    private bool _loading;
+    private View? _view;
+    private string? _missing;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!ReferenceEquals(_subscribed, State))
+        {
+            if (_subscribed is not null)
+            {
+                _subscribed.Changed -= OnChanged;
+            }
+
+            _subscribed = State;
+            if (State is not null)
+            {
+                State.Changed += OnChanged;
+            }
+        }
+
+        await LoadAsync();
+    }
+
+    private void OnChanged() => _ = InvokeAsync(async () =>
+    {
+        // Rendered first so "Reading..." shows at once, then again with the answer.
+        var load = LoadAsync();
+        StateHasChanged();
+        await load;
+        StateHasChanged();
+    });
+
+    private void Close() => State?.Close();
+
+    private void OpenPage()
+    {
+        if (State?.Current is { } reference)
+        {
+            Nav.NavigateTo(SessionReferences.Route(reference));
+        }
+        else if (State?.CurrentFile is { } file)
+        {
+            Nav.NavigateTo(FileRoute(file));
+        }
+    }
+
+    /// <summary>The Code page with a workspace file open, each path segment escaped.</summary>
+    public static string FileRoute(string path) =>
+        "/code/" + string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));
+
+    private async Task LoadAsync()
+    {
+        var current = new Shown(State?.Current, State?.CurrentFile);
+        if (current == _loadedFor)
+        {
+            return;
+        }
+
+        _loadedFor = current;
+        _view = null;
+        _missing = null;
+        if (current.File is { } file)
+        {
+            await LoadFileAsync(file);
+            return;
+        }
+
+        if (current.Reference is not { } wanted)
+        {
+            _loading = false;
+            return;
+        }
+
+        var generation = ++_generation;
+        _loading = true;
+        View? view = null;
+        string? missing;
+        try
+        {
+            (view, missing) = wanted.Kind switch
+            {
+                WikiReferenceKind.WorkItem => await WorkItemAsync(wanted.Number),
+                WikiReferenceKind.WikiItem => await WikiAsync(wanted.Number),
+                WikiReferenceKind.PullRequest => await PullRequestAsync(wanted.Number),
+                _ => (null, "The studio cannot preview this kind of reference."),
+            };
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+        {
+            missing = "The studio could not read " + wanted.Text + " just now: " + ex.Message;
+        }
+
+        if (generation != _generation)
+        {
+            return;
+        }
+
+        _view = view;
+        _missing = missing;
+        _loading = false;
+    }
+
+    private async Task LoadFileAsync(string path)
+    {
+        var generation = ++_generation;
+        _loading = true;
+        View? view = null;
+        string? missing = null;
+        try
+        {
+            if (Services.GetService<IRepositoryReader>() is not { IsConfigured: true } reader)
+            {
+                missing = "No workspace folder is open, so the file cannot be read here.";
+            }
+            else if (await reader.ReadFileAsync(path) is not { } file)
+            {
+                missing = "There is no file at " + path + " in this workspace.";
+            }
+            else
+            {
+                var lines = file.Content.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+                var head = string.Join('\n', lines.Take(FileLines));
+                var more = lines.Length > FileLines || file.IsTruncated;
+                var name = path[(path.LastIndexOf('/') + 1)..];
+                view = new View(
+                    name,
+                    [lines.Length == 1 ? "1 line" : lines.Length + " lines"],
+                    more ? "The first " + FileLines + " lines:" : null,
+                    [],
+                    FileText: head);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException or HttpRequestException)
+        {
+            missing = "The studio could not read " + path + " just now: " + ex.Message;
+        }
+
+        if (generation != _generation)
+        {
+            return;
+        }
+
+        _view = view;
+        _missing = missing;
+        _loading = false;
+    }
+
+    private ProjectId? Project()
+    {
+        if (Session is { } session && Services.GetService<ISessionProjects>()?.For(session) is { } project)
+        {
+            return project;
+        }
+
+        return Services.GetService<ICurrentProject>()?.Id;
+    }
+
+    private async Task<(View?, string?)> WorkItemAsync(int number)
+    {
+        if (Services.GetService<ITrackerResolver>() is not { } trackers || Project() is not { } project)
+        {
+            return (null, "The work items cannot be read here.");
+        }
+
+        var tracker = trackers.For(project);
+        if (await tracker.GetByNumberAsync(number) is not { } item)
+        {
+            return (null, "There is no work item #" + number + " in this project.");
+        }
+
+        var facts = new List<string>
+        {
+            StudioToolDescriptions.StatusWords(item.Status),
+            Capitalised(StableNames.ToName(item.Level)),
+        };
+        if (item.Kind != WorkItemKind.Standard)
+        {
+            facts.Add(Capitalised(StableNames.ToName(item.Kind)));
+        }
+
+        var links = new List<string>();
+        foreach (var link in (await tracker.LinksAsync(item.Id)).Take(MaxLinks))
+        {
+            var other = await tracker.GetAsync(link.OtherEnd(item.Id));
+            links.Add(LinkWords(link.ReadingFrom(item.Id)) + " "
+                      + (other is null ? "an item not on this board" : "#" + other.Number + " " + other.Title));
+        }
+
+        // Work item #356: the next action and the acceptance criteria too, like the full page.
+        return (new View(
+            item.Title, facts, Excerpt(item.Description), links,
+            string.IsNullOrWhiteSpace(item.NextAction) ? null : item.NextAction.Trim(),
+            [.. item.AcceptanceCriteria.Select(c => c.Text)], item.Id), null);
+    }
+
+    private async Task<(View?, string?)> WikiAsync(int number)
+    {
+        if (Services.GetService<IWikiLibraries>() is not { } wiki || Project() is not { } project)
+        {
+            return (null, "The wiki cannot be read here.");
+        }
+
+        if (await wiki.For(project).GetByNumberAsync(number) is not { } document)
+        {
+            return (null, "There is no wiki document @" + number + " in this project.");
+        }
+
+        return (new View(document.Title, [Capitalised(WikiNames.ToName(document.Type))], Excerpt(document.Body), []), null);
+    }
+
+    private async Task<(View?, string?)> PullRequestAsync(int number)
+    {
+        if (Services.GetService<IPullRequestService>() is not { } pullRequests)
+        {
+            return (null, "Pull requests cannot be read here.");
+        }
+
+        try
+        {
+            if (!await pullRequests.IsConfiguredAsync())
+            {
+                return (null, "This workspace has no pull request provider configured.");
+            }
+
+            if (await pullRequests.GetAsync(number) is not { } detail)
+            {
+                return (null, "There is no pull request !" + number + " on this repository's host.");
+            }
+
+            var summary = detail.Summary;
+            List<string> facts =
+            [
+                summary.State,
+                summary.SourceBranch + " into " + summary.TargetBranch,
+                "by " + summary.Author,
+            ];
+            if (detail.Comments.Count > 0)
+            {
+                facts.Add(detail.Comments.Count == 1 ? "1 comment" : detail.Comments.Count + " comments");
+            }
+
+            return (new View(summary.Title, facts, Excerpt(detail.Body), []), null);
+        }
+        catch (Exception ex) when (PullRequestFailureWords.Catches(ex))
+        {
+            return (null, PullRequestFailureWords.For(ex, write: false));
+        }
+    }
+
+    /// <summary>The start of a text: up to <see cref="ExcerptLength"/> characters, cut at a word.</summary>
+    public static string? Excerpt(string? text)
+    {
+        var value = (text ?? string.Empty).Trim();
+        if (value.Length == 0)
+        {
+            return null;
+        }
+
+        if (value.Length <= ExcerptLength)
+        {
+            return value;
+        }
+
+        var head = value[..ExcerptLength];
+        var space = head.LastIndexOfAny([' ', '\n']);
+        return (space > ExcerptLength / 2 ? head[..space] : head).TrimEnd() + "...";
+    }
+
+    private static string LinkWords(WorkItemLinkType reading) => reading switch
+    {
+        WorkItemLinkType.Blocks => "Blocks",
+        WorkItemLinkType.BlockedBy => "Blocked by",
+        WorkItemLinkType.Relates => "Relates to",
+        WorkItemLinkType.Duplicates => "Duplicates",
+        WorkItemLinkType.DuplicatedBy => "Duplicated by",
+        WorkItemLinkType.Supersedes => "Supersedes",
+        WorkItemLinkType.SupersededBy => "Superseded by",
+        _ => reading.ToString(),
+    };
+
+    private static string Capitalised(string words) =>
+        words.Length == 0 ? words : char.ToUpperInvariant(words[0]) + words[1..].Replace('_', ' ');
+
+    public void Dispose()
+    {
+        if (_subscribed is not null)
+        {
+            _subscribed.Changed -= OnChanged;
+        }
+    }
+}

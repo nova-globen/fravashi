@@ -1,0 +1,81 @@
+{
+  "mockup": 1,
+  "title": "Every feature of schema version 1",
+  "viewports": [
+    {"name": "wide", "width": 1280},
+    {"name": "narrow", "width": 390}
+  ],
+  "data": {
+    "people": [
+      {"name": "Ada", "age": 36, "admin": true, "manager": null, "reports": [{"name": "Lin"}]},
+      {"name": "Lin", "age": 29, "admin": false, "manager": "Ada", "reports": []}
+    ],
+    "folders": [
+      {"title": "Docs", "children": [{"title": "Plans"}, {"title": "Notes"}]}
+    ]
+  },
+  "screens": [
+    {
+      "type": "window", "id": "home", "text": "Home", "layout": "grid", "cols": 2,
+      "at": {"narrow": {"layout": "column"}},
+      "children": [
+        {"type": "toolbar", "id": "bar", "layout": "row", "children": [
+          {"type": "button", "id": "save", "text": "Save", "state": "disabled",
+           "states": {"disabled": {}, "loading": {"text": "Saving..."}, "focused": {}},
+           "on": {"click": {"set": {"save": "loading"}}}},
+          {"type": "button", "id": "help", "a11y": {"label": "Help"}, "on": {"click": {"open": "about"}}},
+          {"type": "button", "id": "next", "text": "Next", "on": {"click": {"go": "details"}}}
+        ]},
+        {"type": "form", "id": "edit", "text": "Edit a person", "layout": "column",
+         "on": {"submit": {"set": {"save": "loading", "status": "default"}, "go": "details"}},
+         "children": [
+          {"type": "field", "id": "name", "text": "Name", "placeholder": "Full name", "required": true, "value": "Ada",
+           "states": {"error": {"placeholder": "A name is needed"}}, "on": {"change": {"set": {"status": "error"}}}},
+          {"type": "field", "id": "pass", "text": "Password", "input": "password"},
+          {"type": "field", "id": "age", "text": "Age", "input": "number", "value": 36},
+          {"type": "field", "id": "mail", "text": "Email", "input": "email"},
+          {"type": "field", "id": "born", "text": "Born", "input": "date"},
+          {"type": "field", "id": "find", "a11y": {"label": "Find a person"}, "input": "search"},
+          {"type": "field", "id": "bio", "text": "About", "input": "textarea"},
+          {"type": "field", "id": "role", "text": "Role", "input": "select", "options": ["Admin", "Member"], "value": "Member"},
+          {"type": "field", "id": "team", "text": "Team", "input": "radio", "options": ["Core", "Edge"]},
+          {"type": "field", "id": "agree", "text": "I agree", "input": "checkbox", "value": false}
+        ]},
+        {"type": "text", "id": "status", "text": "All saved", "a11y": {"live": "polite"}, "state": "hidden",
+         "states": {"hidden": {}, "error": {"text": "Could not save"}}},
+        {"type": "text", "id": "headline", "text": "People", "a11y": {"heading": 2}},
+        {"type": "list", "id": "names", "items": ["Ada", {"text": "Lin"}],
+         "states": {"empty": {"text": "Nobody yet"}, "selected": {}}, "on": {"select": {"go": "details"}}},
+        {"type": "list", "id": "bound-names", "data": "people", "show": "name"},
+        {"type": "tree", "id": "files", "items": [{"text": "Docs", "items": ["Plans", {"text": "Notes"}]}, "Trash"],
+         "states": {"expanded": {}}},
+        {"type": "tree", "id": "bound-files", "data": "folders", "show": "title"},
+        {"type": "table", "id": "people-table", "data": "people", "columns": ["name", {"key": "age", "text": "Age"}],
+         "states": {"loading": {}, "empty": {"text": "No people"}}, "on": {"select": {"set": {"save": "default"}}}},
+        {"type": "table", "id": "inline-table", "columns": [{"key": "city", "text": "City"}],
+         "items": [{"city": "London"}, {"city": "Turin"}],
+         "at": {"narrow": {"columns": ["city"]}}},
+        {"type": "tabs", "id": "pages", "on": {"select": {"set": {"one": "selected"}}}, "children": [
+          {"type": "panel", "id": "one", "text": "One", "states": {"selected": {}}, "children": [
+            {"type": "container", "id": "box", "layout": "row", "children": [
+              {"type": "image", "id": "logo", "text": "Logo", "a11y": {"decorative": true}},
+              {"type": "image", "id": "photo", "text": "Portrait", "a11y": {"label": "A portrait of Ada"}}
+            ]}
+          ]},
+          {"type": "panel", "id": "two", "text": "Two", "children": []}
+        ]},
+        {"type": "panel", "id": "side", "text": "Side", "layout": "column",
+         "states": {"hidden": {}}, "at": {"narrow": {"text": "Side (narrow)"}}, "children": [
+          {"type": "button", "id": "close-about", "text": "Close", "on": {"click": {"close": "about"}}}
+        ]},
+        {"type": "dialog", "id": "about", "text": "About", "layout": "column", "children": [
+          {"type": "text", "id": "about-text", "text": "A design that uses everything."}
+        ]}
+      ]
+    },
+    {"type": "window", "id": "details", "text": "Details", "children": [
+      {"type": "button", "id": "back", "text": "Back", "on": {"click": {"go": "home"}}},
+      {"type": "link", "id": "docs", "text": "Read the docs", "href": "/docs"}
+    ]}
+  ]
+}

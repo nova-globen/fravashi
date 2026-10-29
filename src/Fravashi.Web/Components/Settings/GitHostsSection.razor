@@ -1,0 +1,191 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Onboarding
+@using Fravashi.Application.Onboarding.Auth
+@using Fravashi.Application.Persistence
+@inject IGitHostStore Hosts
+@inject ISecretStore Secrets
+@inject INotificationHistory Notifications
+
+@* Settings > Connections > Git hosts (plan 2c, decision 8): one entry per git server. The stored
+   token authenticates the PR panel's API calls for EVERY workspace whose origin points at that
+   host. Transport auth (push/pull) in workspace mode comes from the HOST machine's git credential
+   manager, never from here. Tokens live in the secret store; this section never renders one. *@
+<div class="ob-step" data-testid="git-hosts-settings">
+    <h2>Git hosts</h2>
+    <p class="studio-muted">
+        One entry per git server (host name only, no scheme or port). The provider decides which
+        pull-request API the studio speaks; the token signs those API calls for every workspace
+        whose origin remote points at the host. A host without a token still works for reading
+        public repositories.
+    </p>
+
+    @if (_hosts.Count == 0)
+    {
+        <p class="studio-muted" data-testid="git-hosts-empty">No git hosts stored yet.</p>
+    }
+    else
+    {
+        <table class="studio-table git-hosts-table" data-testid="git-hosts-list">
+            <thead>
+                <tr>
+                    <th>Host</th>
+                    <th>Provider</th>
+                    <th>Token</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var host in _hosts)
+                {
+                    <tr data-testid="@($"git-host-row-{host.Host}")">
+                        <td><code>@host.Host</code></td>
+                        <td>@ProviderLabel(host.Provider)</td>
+                        <td>@(Secrets.Get(host.CredentialRef) is null ? "none" : "stored")</td>
+                        <td class="git-hosts-actions">
+                            <button type="button" class="studio-btn studio-btn-alt studio-btn-sm"
+                                    data-testid="@($"git-host-edit-{host.Host}")"
+                                    @onclick="() => BeginEdit(host)">Edit</button>
+                            <button type="button" class="studio-btn studio-btn-alt studio-btn-sm"
+                                    data-testid="@($"git-host-remove-{host.Host}")"
+                                    @onclick="() => Remove(host)">Remove</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <h3>@(_editing is null ? "Add a git host" : $"Edit {_editing}")</h3>
+    <label class="studio-modal-field">
+        <span>Host</span>
+        <input class="studio-input" data-testid="git-host-host" placeholder="git.example.com"
+               disabled="@(_editing is not null)" @bind="_host" />
+    </label>
+    <label class="studio-modal-field">
+        <span>Provider</span>
+        <select class="studio-input" data-testid="git-host-provider" @bind="_provider">
+            <option value="@OnboardingProviders.GitHub">GitHub (cloud or self-hosted)</option>
+            <option value="@OnboardingProviders.AzureDevOps">Azure DevOps</option>
+            <option value="@OnboardingProviders.Forgejo">Forgejo</option>
+        </select>
+    </label>
+    <label class="studio-modal-field">
+        <span>@(_editing is null ? "Access token (optional for public reads)" : "Access token (leave empty to keep the stored one)")</span>
+        <input type="password" class="studio-input" data-testid="git-host-token" @bind="_token" />
+    </label>
+    @if (_error is not null)
+    {
+        <p class="studio-error" role="alert" data-testid="git-host-error">@_error</p>
+    }
+    <div class="studio-form-actions">
+        @if (_editing is not null)
+        {
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="git-host-cancel"
+                    @onclick="ResetForm">Cancel</button>
+        }
+        <button type="button" class="studio-btn" data-testid="git-host-save" @onclick="Save">Save</button>
+    </div>
+</div>
+
+@code {
+    private IReadOnlyList<GitHostRecord> _hosts = [];
+    private string _host = string.Empty;
+    private string _provider = OnboardingProviders.GitHub;
+    private string _token = string.Empty;
+    private string? _editing;
+    private string? _error;
+
+    protected override void OnInitialized() => _hosts = Hosts.GetAll();
+
+    private static string ProviderLabel(string provider) => provider switch
+    {
+        OnboardingProviders.GitHub => "GitHub",
+        OnboardingProviders.AzureDevOps => "Azure DevOps",
+        OnboardingProviders.Forgejo => "Forgejo",
+        _ => provider,
+    };
+
+    /// <summary>Trim, lowercase, and strip any scheme/path/port down to the bare host name.</summary>
+    internal static string NormalizeHost(string raw)
+    {
+        var value = raw.Trim();
+        if (value.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        if (value.Contains("://", StringComparison.Ordinal)
+            && Uri.TryCreate(value, UriKind.Absolute, out var uri))
+        {
+            return uri.Host.ToLowerInvariant();
+        }
+
+        // Bare input: cut a path if one was pasted, then a port, then lowercase.
+        var slash = value.IndexOf('/');
+        if (slash >= 0)
+        {
+            value = value[..slash];
+        }
+
+        var colon = value.IndexOf(':');
+        if (colon >= 0)
+        {
+            value = value[..colon];
+        }
+
+        return value.ToLowerInvariant();
+    }
+
+    private void BeginEdit(GitHostRecord host)
+    {
+        _editing = host.Host;
+        _host = host.Host;
+        _provider = host.Provider;
+        _token = string.Empty;
+        _error = null;
+    }
+
+    private void ResetForm()
+    {
+        _editing = null;
+        _host = string.Empty;
+        _provider = OnboardingProviders.GitHub;
+        _token = string.Empty;
+        _error = null;
+    }
+
+    private void Save()
+    {
+        var host = NormalizeHost(_editing ?? _host);
+        if (host.Length == 0)
+        {
+            _error = "A host name is required (for example git.example.com).";
+            return;
+        }
+
+        var reference = $"githost:{host}:token";
+        if (!string.IsNullOrWhiteSpace(_token))
+        {
+            Secrets.Set(reference, CredentialEnvelope.Serialize(StoredCredential.ForPat(_token.Trim())));
+        }
+
+        Hosts.Upsert(new GitHostRecord(host, _provider, reference, DateTimeOffset.UtcNow));
+        Notifications.Add($"Git host {host} saved.", NotificationSeverity.Success);
+        ResetForm();
+        _hosts = Hosts.GetAll();
+    }
+
+    private void Remove(GitHostRecord host)
+    {
+        Hosts.Remove(host.Host);
+        Secrets.Remove(host.CredentialRef);
+        Notifications.Add($"Git host {host.Host} removed.", NotificationSeverity.Success);
+        if (_editing == host.Host)
+        {
+            ResetForm();
+        }
+
+        _hosts = Hosts.GetAll();
+    }
+}

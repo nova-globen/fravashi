@@ -1,0 +1,181 @@
+@page "/sign-in"
+@layout Fravashi.Web.Components.Layout.MinimalWindowLayout
+@namespace Fravashi.Web.Components.Auth
+@using Fravashi.Infrastructure.Onboarding.Auth
+@using Microsoft.AspNetCore.WebUtilities
+@inject IdpSessionState Session
+@inject IdpAuthService Idp
+@inject NavigationManager Nav
+@inject Fravashi.Web.Services.CircuitConnection Connection
+@implements IDisposable
+
+<PageTitle>@(ProductName.Short) · Sign in</PageTitle>
+
+@* Auth-first gate page (plan Phase 3, decision 9; default-on, coordinates shipped at compile
+   time per the 2026-08-03 directive). The gate middleware redirects every route here
+   while sign-in is required and no valid session exists; the user only ever clicks Sign in.
+   The IdP comes from VendorAppDefaults (shipped), a settings override (advanced), or the
+   image-baked BYOD env, so no end user types an issuer.
+   Backlog 282: MinimalWindowLayout, not MainLayout, so a person waiting here has no activity rail or sidebar to
+   navigate past the gate in-app; the one way on it offers is a full page load the middleware answers. *@
+
+<div class="update-lock" role="alert" aria-live="assertive" data-testid="signin-gate">
+    <div class="update-lock-card">
+        <div class="update-lock-icon" aria-hidden="true">🔑</div>
+        <h1 class="update-lock-title">Sign in to @(ProductName.Short)</h1>
+        <p class="update-lock-lead">
+            This installation requires signing in before the studio starts. You will be taken to
+            your organization's sign-in page and brought straight back.
+        </p>
+
+        @if (_error is not null)
+        {
+            <p class="update-lock-notes" data-testid="signin-error">@_error</p>
+        }
+
+        @* Backlog 234: why the session is not renewing (the grace, or that it ran out), and what the identity provider
+           said when it refused. *@
+        @if (Session.Grace is { } grace)
+        {
+            <p class="update-lock-notes" data-testid="signin-grace">
+                <SignInGraceWords Grace="grace" />
+                @if (!grace.Lapsed)
+                {
+                    <text> </text><button type="button" class="studio-link-btn" data-testid="signin-continue"
+                                         @onclick="Continue">Continue to the studio</button>
+                }
+            </p>
+        }
+
+        @if (Session.RefusalWords is { } refused)
+        {
+            <p class="update-lock-notes" data-testid="signin-refused">@refused</p>
+        }
+
+        @if (_unreachable)
+        {
+            <p class="update-lock-notes" data-testid="signin-unreachable">
+                The identity provider could not be reached. Check the connection and try again. A session that
+                was already signed in keeps working for an hour past its expiry while the provider cannot be
+                reached; a new sign-in needs it.
+            </p>
+        }
+
+        @if (Session.Configured && Elsewhere)
+        {
+            @* #372: the sign-in is the studio's. While another window's attempt runs, this one says so instead of offering
+               a second Sign in button, and follows by itself when it completes. The quiet link is for an attempt that
+               was abandoned (its window closed at the identity provider's page). *@
+            <p class="update-lock-notes" role="status" data-testid="signin-elsewhere">
+                Signing in in another window. This window follows by itself when it completes.
+            </p>
+            <div class="ob-actions">
+                <button type="button" class="studio-link-btn" data-testid="signin-here"
+                        disabled="@_starting" @onclick="StartAsync">Sign in here instead</button>
+            </div>
+        }
+        else if (Session.Configured)
+        {
+            <div class="ob-actions">
+                <button type="button" class="studio-btn" data-testid="signin-start"
+                        disabled="@_starting" @onclick="StartAsync">
+                    @(_starting ? "Contacting the identity provider ..." : "Sign in")
+                </button>
+            </div>
+        }
+        else
+        {
+            @* Unreachable in shipped builds (VendorAppDefaults always carries the IdP); honest
+               text for a build that blanked the defaults while keeping the gate on. *@
+            <p class="update-lock-notes" data-testid="signin-unconfigured">
+                This build requires sign-in but ships no identity provider. Set
+                Auth:Idp:Issuer and Auth:Idp:ClientId (Settings > Sign-in configuration), or
+                publish with AUTH_REQUIRED=false.
+            </p>
+        }
+    </div>
+</div>
+
+@code {
+    private string? _error;
+    private bool _starting;
+    private bool _unreachable;
+    private bool _subscribed;
+
+    // #372: this page's own id, so the studio's sign-in in progress can be told apart as this window's or another's.
+    private readonly string _origin = Guid.NewGuid().ToString("N");
+
+    private bool Elsewhere =>
+        !_starting && Idp.SignIns.InProgress is { } attempt && !string.Equals(attempt.Origin, _origin, StringComparison.Ordinal);
+
+    // The same condition OnInitialized leaves on: nothing to sign in to, or a valid session with no grace to explain.
+    private bool StudioOpen => !Session.Required || (Session.SignedIn && Session.Grace is null);
+
+    protected override void OnInitialized()
+    {
+        // The middleware only redirects OTHER routes here; the page sends itself onward when
+        // the gate does not apply (auth not required and unconfigured, or a valid session). A session whose refresh
+        // cannot reach the identity provider stays here when visited, to say so (backlog 234).
+        if (StudioOpen)
+        {
+            Nav.NavigateTo("/", forceLoad: true);
+            return;
+        }
+
+        // #372: a sign-in that starts or completes in ANY window reaches every sign-in page. A completed one sends this
+        // window on to the studio. The navigation is a call to the browser, which is lost when the window is
+        // disconnected at that moment (CLAUDE.md, the reconnect rule), so a reconnection asks again.
+        Idp.SignIns.Changed += OnSignInChanged;
+        Connection.Reconnected += OnSignInChanged;
+        _subscribed = true;
+
+        var query = new Uri(Nav.Uri).Query;
+        if (query.Length > 0
+            && QueryHelpers.ParseQuery(query).TryGetValue("error", out var error)
+            && error.ToString() is { Length: > 0 } text)
+        {
+            _error = text;
+        }
+    }
+
+    // Backlog 282: a full page load, so the gates answer it in the middleware rather than an in-app route change.
+    private void Continue() => Nav.NavigateTo("/", forceLoad: true);
+
+    private async Task StartAsync()
+    {
+        _starting = true;
+        _unreachable = false;
+        var redirectUri = new Uri(new Uri(Nav.BaseUri), "auth/callback/idp").ToString();
+        var challenge = await Idp.BeginSignInAsync(redirectUri, _origin, CancellationToken.None);
+        if (challenge is null)
+        {
+            _unreachable = true;
+            _starting = false;
+            return;
+        }
+
+        Nav.NavigateTo(challenge.AuthorizeUrl, forceLoad: true);
+    }
+
+    private void OnSignInChanged() => _ = InvokeAsync(Follow);
+
+    private void Follow()
+    {
+        if (StudioOpen)
+        {
+            Nav.NavigateTo("/", forceLoad: true);
+            return;
+        }
+
+        StateHasChanged();
+    }
+
+    public void Dispose()
+    {
+        if (_subscribed)
+        {
+            Idp.SignIns.Changed -= OnSignInChanged;
+            Connection.Reconnected -= OnSignInChanged;
+        }
+    }
+}

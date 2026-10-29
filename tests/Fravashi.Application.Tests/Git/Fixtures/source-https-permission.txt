@@ -1,0 +1,2 @@
+remote: Permission to acme/widget.git denied to someone.
+fatal: unable to access 'https://example.com/acme/widget.git/': The requested URL returned error: 403

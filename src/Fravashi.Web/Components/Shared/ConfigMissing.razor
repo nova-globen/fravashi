@@ -1,0 +1,27 @@
+@namespace Fravashi.Web.Components.Shared
+
+<div class="studio-placeholder studio-config-missing">
+    <h1>@Title</h1>
+    <p>@Message</p>
+    @if (Settings is { Length: > 0 })
+    {
+        <p>Provide these settings (for example in <code>appsettings.json</code> or user-secrets):</p>
+        <ul>
+            @foreach (var setting in Settings)
+            {
+                <li><code>@setting</code></li>
+            }
+        </ul>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public string Title { get; set; } = "Not configured";
+
+    [Parameter]
+    public string Message { get; set; } = string.Empty;
+
+    [Parameter]
+    public string[]? Settings { get; set; }
+}

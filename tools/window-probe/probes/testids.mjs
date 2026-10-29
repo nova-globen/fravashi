@@ -1,0 +1,1 @@
+export default async (api) => { await api.sleep(1500); return api.evaluate(`[...new Set([...document.querySelectorAll('[data-testid]')].map(e => e.getAttribute('data-testid')))].filter(t => /sync|conflict|queue|abandon|settle/.test(t))`); };

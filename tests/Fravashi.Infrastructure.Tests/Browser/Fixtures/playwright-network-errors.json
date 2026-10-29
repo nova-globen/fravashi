@@ -1,0 +1,61 @@
+{
+  "measured": "2026-10-07 in the studio container (v0.9.62 image, the baked chromium_headless_shell-1243, Microsoft.Playwright from Directory.Packages.props) by an agent session for #233. Each message is Playwright's exception text verbatim; requestFailure is the main frame's RequestFailed text for the same navigation; urlAfter is page.Url after it.",
+  "cases": [
+    {
+      "case": "name_not_resolved",
+      "how": "GotoAsync http://fravashi-netfault.invalid/",
+      "exception": "Microsoft.Playwright.PlaywrightException",
+      "message": "net::ERR_NAME_NOT_RESOLVED at http://fravashi-netfault.invalid/\nCall log:\n  - navigating to \"http://fravashi-netfault.invalid/\", waiting until \"load\"",
+      "requestFailure": "net::ERR_NAME_NOT_RESOLVED",
+      "urlAfter": "about:blank"
+    },
+    {
+      "case": "closed_port",
+      "how": "GotoAsync http://127.0.0.1:<a port nothing listens on>/",
+      "exception": "Microsoft.Playwright.PlaywrightException",
+      "message": "net::ERR_CONNECTION_REFUSED at http://127.0.0.1:36013/\nCall log:\n  - navigating to \"http://127.0.0.1:36013/\", waiting until \"load\"",
+      "requestFailure": "net::ERR_CONNECTION_REFUSED",
+      "urlAfter": "chrome-error://chromewebdata/"
+    },
+    {
+      "case": "black_holed",
+      "how": "GotoAsync http://192.0.2.1/ (TEST-NET-1, nothing answers) with a 5 s timeout; Chromium's own connect timeout is far longer, so Playwright's timeout is what fires",
+      "exception": "System.TimeoutException",
+      "message": "Timeout 5000ms exceeded.\nCall log:\n  - navigating to \"http://192.0.2.1/\", waiting until \"load\"",
+      "requestFailure": "net::ERR_ABORTED (arrives LATE, during the next navigation, when Chromium drops the abandoned one)",
+      "urlAfter": "chrome-error://chromewebdata/"
+    },
+    {
+      "case": "connected_no_answer",
+      "how": "GotoAsync to a loopback listener that never accepts or answers, 3 s timeout",
+      "exception": "System.TimeoutException",
+      "message": "Timeout 3000ms exceeded.\nCall log:\n  - navigating to \"http://127.0.0.1:39689/\", waiting until \"load\"",
+      "requestFailure": "net::ERR_CONNECTION_RESET (arrives LATE, when the listener is closed)",
+      "urlAfter": "chrome-error://chromewebdata/"
+    },
+    {
+      "case": "reset_or_closed_without_answer",
+      "how": "GotoAsync to a listener that accepts then resets (linger 0), and to one that reads the request then closes; both measured the same",
+      "exception": "Microsoft.Playwright.PlaywrightException",
+      "message": "net::ERR_EMPTY_RESPONSE at http://127.0.0.1:41757/\nCall log:\n  - navigating to \"http://127.0.0.1:41757/\", waiting until \"load\"",
+      "requestFailure": "net::ERR_EMPTY_RESPONSE",
+      "urlAfter": "chrome-error://chromewebdata/"
+    },
+    {
+      "case": "internet_disconnected",
+      "how": "GotoAsync http://example.com/ in a context created with Offline = true",
+      "exception": "Microsoft.Playwright.PlaywrightException",
+      "message": "net::ERR_INTERNET_DISCONNECTED at http://example.com/\nCall log:\n  - navigating to \"http://example.com/\", waiting until \"load\"",
+      "requestFailure": "net::ERR_INTERNET_DISCONNECTED",
+      "urlAfter": "about:blank"
+    },
+    {
+      "case": "form_submit_to_unresolvable_name",
+      "how": "a page whose form posts to http://fravashi-netfault.invalid/submit; LocatorClickAsync on its submit button, then the load wait",
+      "exception": "none: the click and the load wait both succeed",
+      "message": "",
+      "requestFailure": "net::ERR_NAME_NOT_RESOLVED (POST, IsNavigationRequest true, main frame)",
+      "urlAfter": "chrome-error://chromewebdata/"
+    }
+  ]
+}

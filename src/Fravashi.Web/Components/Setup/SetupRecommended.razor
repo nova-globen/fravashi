@@ -1,0 +1,167 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Application
+@using Fravashi.Application.Setup
+@using Fravashi.Web.Services
+@implements IDisposable
+
+@* The recommended setup (item #373, the host's decision 2): what was found and what will happen, in plain lines, and
+   ONE button that does exactly that. Most people press it and are done; "Choose step by step" opens the steps with the
+   same answers, and "Start empty" is the quick way to a bare project. *@
+<section class="setup-card setup-card-narrow setup-recommended" aria-labelledby="setup-heading" data-testid="setup-recommended">
+    <div class="setup-card-body">
+        <h2 class="setup-title" id="setup-heading" tabindex="-1" @ref="_heading">Set up @Page.FolderName</h2>
+        <p class="setup-helper">
+            @ProductName.Short looked at the folder. This is what setting it up will do; nothing in the folder changes.
+        </p>
+
+        @if (Page.WasInDefault && Page.DefaultRecord is not null)
+        {
+            <div class="setup-note" role="note" data-testid="setup-default-note">
+                <p>
+                    Earlier versions of @ProductName.Short put every new folder in one shared project, Default. Its work
+                    items and documents are still there.
+                </p>
+                <button type="button" class="studio-link-btn" data-testid="setup-join-default" disabled="@Page.Busy"
+                        @onclick="() => Page.ChooseStepByStepAsync(joinDefault: true)">Join Default instead</button>
+            </div>
+        }
+
+        <ul class="setup-plan" data-testid="setup-plan">
+            <li class="setup-plan-row" data-testid="setup-plan-project">
+                <SetupGlyph Kind="project" />
+                <span class="setup-plan-text">A new project, <strong>@Page.Draft.NewName</strong></span>
+            </li>
+            <li class="setup-plan-row" data-testid="setup-plan-providers">
+                <SetupGlyph Kind="board" />
+                <span class="setup-plan-text">@Page.Connections.Describe(Page.Draft.Board, Page.Draft.Wiki)</span>
+            </li>
+            <li class="setup-plan-row" data-testid="setup-plan-source">
+                <SetupGlyph Kind="branch" />
+                <span class="setup-plan-text @(Page.Source.State == SetupSourceState.Reading ? "is-pending" : null)">@Page.Source.Summary(Page.FolderName)</span>
+            </li>
+            <li class="setup-plan-row" data-testid="setup-plan-import">
+                <SetupGlyph Kind="import" />
+                <span class="setup-plan-text @(ImportPending ? "is-pending" : null)">
+                    @ImportLine
+                    @if (ImportCaption is { } caption)
+                    {
+                        <span class="setup-plan-caption">@caption</span>
+                    }
+                </span>
+                @if (ImportPending)
+                {
+                    <span class="setup-spinner" aria-hidden="true"></span>
+                }
+            </li>
+            <li class="setup-plan-row" data-testid="setup-plan-agents">
+                <SetupGlyph Kind="agents" />
+                <span class="setup-plan-text">Agents use the install's defaults and ask before every change</span>
+            </li>
+        </ul>
+        <p class="fv-visually-hidden" aria-live="polite" data-testid="setup-scan-status">@Page.Scan?.Announcement</p>
+
+        @if (Page.ApplyRefusal is { Length: > 0 } refusal)
+        {
+            <p class="setup-alert" role="alert" data-testid="setup-apply-refusal">@refusal</p>
+        }
+
+        <div class="setup-recommended-actions">
+            <button type="button" class="studio-btn setup-primary setup-primary-large" data-testid="setup-apply"
+                    disabled="@Page.Busy" @onclick="Page.ApplyAsync">
+                @if (Page.Busy)
+                {
+                    <span class="setup-spinner setup-spinner-on-accent" aria-hidden="true"></span>
+                    <span>@(Page.Scan?.IsRunning == true ? $"Finishing the look through {Page.FolderName} ..." : "Setting up ...")</span>
+                }
+                else
+                {
+                    <span>Set up @Page.FolderName</span>
+                }
+            </button>
+            <button type="button" class="studio-link-btn setup-quiet" data-testid="setup-step-by-step" disabled="@Page.Busy"
+                    @onclick="() => Page.ChooseStepByStepAsync()">Choose step by step</button>
+        </div>
+        <p class="setup-empty-line">
+            Or <button type="button" class="studio-link-btn setup-inline-link" data-testid="setup-start-empty" disabled="@Page.Busy"
+                       @onclick="Page.StartEmptyAsync">start empty</button>: a project named @Page.FolderName with nothing imported.
+        </p>
+    </div>
+</section>
+
+@code {
+    [Parameter, EditorRequired]
+    public SetupPage Page { get; set; } = default!;
+
+    private ElementReference _heading;
+
+    private bool ImportPending => Page.Scan is { IsRunning: true };
+
+    private string ImportLine
+    {
+        get
+        {
+            if (Page.Scan is not { } scan)
+            {
+                return "Nothing to import";
+            }
+
+            if (scan.IsRunning || (scan.Result is null && scan.Error is null && !scan.Unavailable && !scan.Cancelled))
+            {
+                return scan.Progress is { FilesSeen: > 0 } progress
+                    ? $"Looking through {Page.FolderName} ... {progress.FilesSeen:N0} files so far"
+                    : $"Looking through {Page.FolderName} ...";
+            }
+
+            if (scan.Unavailable || scan.Error is not null)
+            {
+                return $"The files in {Page.FolderName} could not be read, so nothing will be imported";
+            }
+
+            if (scan.Result is not { } result)
+            {
+                return "Nothing will be imported";
+            }
+
+            var selection = Page.CurrentSelection();
+            var documents = selection.DocumentTypes.Count;
+            var asItems = selection.WorkItemFiles.Select(f => f.Path).ToHashSet(StringComparer.Ordinal);
+            var items = result.Candidates.Where(c => asItems.Contains(c.Path)).Sum(c => c.WorkItemCount);
+            return (documents, items) switch
+            {
+                (0, 0) => result.Candidates.Count == 0
+                    ? "Nothing to import: no markdown documents or backlog files"
+                    : "Nothing to import by default; the steps let you choose files",
+                (_, 0) => $"Found {Plural(documents, "document")} to import",
+                (0, _) => $"Found {Plural(items, "work item")} to import",
+                _ => $"Found {Plural(documents, "document")} and {Plural(items, "work item")} to import",
+            };
+        }
+    }
+
+    private string? ImportCaption =>
+        Page.Scan?.Result is { } result && Page.CurrentSelection().Files.Count > 0
+            ? result.Capped
+                ? "Copied in from the first 5,000 markdown files; the files stay as they are."
+                : "Copied in; the files stay exactly as they are."
+            : null;
+
+    private static string Plural(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n:N0} {noun}s";
+
+    protected override void OnInitialized()
+    {
+        Page.Refreshed += OnRefreshed;
+        Page.StartScan();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await SetupFocus.HeadingAsync(_heading);
+        }
+    }
+
+    private void OnRefreshed() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Page.Refreshed -= OnRefreshed;
+}

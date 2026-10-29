@@ -1,0 +1,273 @@
+@namespace Fravashi.Web.Components.Git
+@using Fravashi.Application.Git
+@using Fravashi.Domain.Git
+@using Fravashi.Infrastructure.Sessions.Tools
+@using Fravashi.Web.Components.Code
+@using Fravashi.Web.Services
+@inject IGitService Git
+@inject TimeProvider Clock
+@inject IServiceProvider ServiceLookup
+@implements IDisposable
+
+@* The history (work item #367): what the Git page opens on. The VS-Code-style swimlane graph (lanes from
+   GitGraphLayout) with branch and tag chips on their commits, and a filter by message, author or path. A filter
+   drops the lanes, because a lane drawn through commits that are not shown would draw a history that is not
+   there: the matches are listed flat, newest first. *@
+<section class="git-history-panel" data-testid="git-graph" aria-label="History">
+    <div class="git-history-head">
+        <span class="git-section-label">History</span>
+        <div class="git-history-filter">
+            <select class="studio-input git-history-filter-kind" data-testid="git-history-filter-kind"
+                    aria-label="Filter the history by" @bind="FilterKind" @bind:after="OnFilterChangedAsync">
+                <option value="message">Message</option>
+                <option value="author">Author</option>
+                <option value="path">Path</option>
+            </select>
+            <input class="studio-input git-history-filter-text" type="search" data-testid="git-history-filter"
+                   placeholder="@FilterPlaceholder" aria-label="Filter the history"
+                   @bind="_filterText" @bind:event="oninput" @bind:after="OnFilterChangedAsync" />
+        </div>
+        <button type="button" class="code-section-action" title="Refresh the history" aria-label="Refresh the history"
+                data-testid="git-graph-refresh" @onclick="() => OnRefresh.InvokeAsync()">
+            <CodeIcon Kind="CodeIcon.IconKind.Refresh" />
+        </button>
+    </div>
+    @if (_filterNote is { } note)
+    {
+        <p class="git-history-note" data-testid="git-history-filter-note">@note</p>
+    }
+    <div class="git-history-rows" role="list">
+        @if (IsFiltering)
+        {
+            @foreach (var commit in _matches)
+            {
+                <div class="git-graph-row git-graph-row-flat @(SelectedSha == commit.Sha ? "active" : string.Empty)" role="listitem"
+                     data-testid="git-commit-row" title="@($"{commit.ShortSha} · {commit.Author} · {commit.Subject}")"
+                     @onclick="() => OnSelect.InvokeAsync(commit.Sha)">
+                    @foreach (var reference in commit.Refs)
+                    {
+                        <span class="git-ref-chip @RefChipClass(reference)" title="@reference">@ShortRef(reference)</span>
+                    }
+                    <span class="git-graph-subject">@commit.Subject</span>
+                    <span class="git-graph-meta">@commit.ShortSha · @commit.Author · @Relative(commit.When)</span>
+                </div>
+            }
+        }
+        else
+        {
+            @if (_layout.Rows.Count == 0)
+            {
+                <p class="git-history-note" data-testid="git-graph-empty">No commits yet.</p>
+            }
+            var laneWidth = Math.Min(_layout.MaxLanes, 10) * LaneStep + 4;
+            @foreach (var row in _layout.Rows)
+            {
+                var commit = row.Commit;
+                <div class="git-graph-row @(SelectedSha == commit.Sha ? "active" : string.Empty)" role="listitem"
+                     data-testid="git-commit-row" title="@($"{commit.ShortSha} · {commit.Author} · {commit.Subject}")"
+                     @onclick="() => OnSelect.InvokeAsync(commit.Sha)">
+                    <svg class="git-graph-svg" width="@laneWidth" height="@RowHeight"
+                         viewBox="0 0 @laneWidth @RowHeight" aria-hidden="true">
+                        @foreach (var lane in row.Through)
+                        {
+                            <line x1="@LaneX(lane)" y1="0" x2="@LaneX(lane)" y2="@RowHeight"
+                                  stroke="@LaneColor(lane)" stroke-width="1.5" />
+                        }
+                        @foreach (var edge in row.In)
+                        {
+                            @if (edge.From == row.DotLane)
+                            {
+                                <line x1="@LaneX(edge.From)" y1="0" x2="@LaneX(edge.From)" y2="@(RowHeight / 2)"
+                                      stroke="@LaneColor(edge.From)" stroke-width="1.5" />
+                            }
+                            else
+                            {
+                                <path d="@CurveIn(edge.From, row.DotLane)" fill="none"
+                                      stroke="@LaneColor(edge.From)" stroke-width="1.5" />
+                            }
+                        }
+                        @foreach (var edge in row.Out)
+                        {
+                            @if (edge.To == row.DotLane)
+                            {
+                                <line x1="@LaneX(edge.To)" y1="@(RowHeight / 2)" x2="@LaneX(edge.To)" y2="@RowHeight"
+                                      stroke="@LaneColor(edge.To)" stroke-width="1.5" />
+                            }
+                            else
+                            {
+                                <path d="@CurveOut(row.DotLane, edge.To)" fill="none"
+                                      stroke="@LaneColor(edge.To)" stroke-width="1.5" />
+                            }
+                        }
+                        <circle cx="@LaneX(row.DotLane)" cy="@(RowHeight / 2)" r="3.5"
+                                fill="@LaneColor(row.DotLane)" />
+                    </svg>
+                    @foreach (var reference in commit.Refs)
+                    {
+                        <span class="git-ref-chip @RefChipClass(reference)" title="@reference">@ShortRef(reference)</span>
+                    }
+                    <span class="git-graph-subject">@commit.Subject</span>
+                    <span class="git-graph-meta">@commit.ShortSha · @commit.Author · @Relative(commit.When)</span>
+                </div>
+            }
+        }
+    </div>
+</section>
+
+@code {
+    /// <summary>The graph rows, newest first, as the git service read them.</summary>
+    [Parameter, EditorRequired]
+    public IReadOnlyList<GitGraphCommit> Commits { get; set; } = [];
+
+    /// <summary>The checked-out branch, whose chip is drawn as the head.</summary>
+    [Parameter]
+    public string CurrentBranch { get; set; } = string.Empty;
+
+    /// <summary>The remotes' names, so a remote branch's chip can be told from a local one.</summary>
+    [Parameter]
+    public IReadOnlyList<string> RemoteNames { get; set; } = [];
+
+    /// <summary>The commit open in the detail pane, if any.</summary>
+    [Parameter]
+    public string? SelectedSha { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnSelect { get; set; }
+
+    [Parameter]
+    public EventCallback OnRefresh { get; set; }
+
+    /// <summary>The most commits a path filter asks git for; more than the graph holds, so older matches are found.</summary>
+    public const int PathFilterLimit = 300;
+
+    private const int LaneStep = 11;
+    private const int RowHeight = 22;
+
+    private static readonly string[] LanePalette =
+        ["#0078d4", "#f14c4c", "#3fb950", "#d29922", "#a371f7", "#ec6cb9", "#2bc4c4", "#e8825a"];
+
+    private IReadOnlyList<GitGraphCommit>? _laidOut;
+    private GitGraphLayout.Layout _layout = GitGraphLayout.Layout.Empty;
+    private string _filterKind = "message";
+    private string _filterText = string.Empty;
+    private IReadOnlyList<GitGraphCommit> _matches = [];
+    private string? _filterNote;
+    private CancellationTokenSource? _pathQuery;
+
+    private string FilterKind
+    {
+        get => _filterKind;
+        set => _filterKind = value;
+    }
+
+    private bool IsFiltering => !string.IsNullOrWhiteSpace(_filterText);
+
+    private string FilterPlaceholder => _filterKind switch
+    {
+        "author" => "Filter by author",
+        "path" => "Filter by path, e.g. src/Program.cs",
+        _ => "Filter by message",
+    };
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!ReferenceEquals(_laidOut, Commits))
+        {
+            _laidOut = Commits;
+            _layout = GitGraphLayout.Compute(Commits);
+            if (IsFiltering)
+            {
+                await ApplyFilterAsync();
+            }
+        }
+    }
+
+    private async Task OnFilterChangedAsync() => await ApplyFilterAsync();
+
+    private async Task ApplyFilterAsync()
+    {
+        _pathQuery?.Cancel();
+        _filterNote = null;
+        if (!IsFiltering)
+        {
+            _matches = [];
+            return;
+        }
+
+        var text = _filterText.Trim();
+        if (_filterKind != "path")
+        {
+            Func<GitGraphCommit, string> field = _filterKind == "author" ? c => c.Author : c => c.Subject;
+            _matches = Commits.Where(c => field(c).Contains(text, StringComparison.OrdinalIgnoreCase)).ToList();
+            _filterNote = $"{_matches.Count} of the latest {Commits.Count} commits match.";
+            return;
+        }
+
+        // A path reaches git only after "--" and only once it is a plain repository-relative path: no leading
+        // hyphen, no "..", nothing rooted, and no leading ':' (git's pathspec magic). The same rule the agent tools
+        // keep (CLAUDE.md: never pass free text through as a git argument unchecked).
+        var path = text.StartsWith(':') ? null : GitToolArguments.NormalizePath(text);
+        if (path is null)
+        {
+            _matches = [];
+            _filterNote = GitToolArguments.PathRule;
+            return;
+        }
+
+        var query = new CancellationTokenSource();
+        _pathQuery = query;
+        try
+        {
+            // A short pause, so typing a path asks git once rather than once per letter.
+            await Task.Delay(250, query.Token);
+            var commits = await Git.GetCommitsAsync("HEAD", PathFilterLimit, path, query.Token);
+            if (query.IsCancellationRequested)
+            {
+                return;
+            }
+
+            var refsBySha = Commits.ToDictionary(c => c.Sha, c => c.Refs, StringComparer.Ordinal);
+            _matches = commits
+                .Select(c => new GitGraphCommit(c.Sha, c.ShortSha, c.Subject, c.Author, c.When, [],
+                    refsBySha.TryGetValue(c.Sha, out var refs) ? refs : []))
+                .ToList();
+            _filterNote = _matches.Count == 0
+                ? $"No commit on the current branch touches {path}."
+                : $"{_matches.Count} commit{(_matches.Count == 1 ? "" : "s")} on the current branch touch {path}.";
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer filter replaced this one.
+        }
+    }
+
+    private static int LaneX(int lane) => 6 + Math.Min(lane, 9) * LaneStep;
+
+    private static string LaneColor(int lane) => LanePalette[lane % LanePalette.Length];
+
+    /// <summary>A child's lane bending into the dot (top half of the row).</summary>
+    private static string CurveIn(int fromLane, int dotLane) =>
+        $"M {LaneX(fromLane)} 0 C {LaneX(fromLane)} {RowHeight / 2}, {LaneX(dotLane)} {RowHeight / 4}, {LaneX(dotLane)} {RowHeight / 2}";
+
+    /// <summary>The dot branching toward a parent's lane (bottom half of the row).</summary>
+    private static string CurveOut(int dotLane, int toLane) =>
+        $"M {LaneX(dotLane)} {RowHeight / 2} C {LaneX(dotLane)} {RowHeight * 3 / 4}, {LaneX(toLane)} {RowHeight / 2}, {LaneX(toLane)} {RowHeight}";
+
+    private string RefChipClass(string reference) =>
+        reference.StartsWith("tag: ", StringComparison.Ordinal) ? "git-ref-tag"
+        : reference == CurrentBranch ? "git-ref-head"
+        : RemoteNames.Any(r => reference.StartsWith(r + "/", StringComparison.Ordinal)) ? "git-ref-remote"
+        : "git-ref-local";
+
+    private static string ShortRef(string reference) =>
+        reference.StartsWith("tag: ", StringComparison.Ordinal) ? reference[5..] : reference;
+
+    private string Relative(DateTimeOffset when) =>
+        RelativeTime.Since(when, Clock.GetUtcNow(), brief: true, PersonTimeZone.Of(ServiceLookup)?.Zone);
+
+    public void Dispose()
+    {
+        _pathQuery?.Cancel();
+        _pathQuery?.Dispose();
+    }
+}

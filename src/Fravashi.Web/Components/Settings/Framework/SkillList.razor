@@ -1,0 +1,57 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* The Skills list: a card per skill showing its small icon, brand-colour accent, display name and short
+   description (UI3). Cards link to the read-only view. *@
+
+<div class="skill-list" data-testid="skill-list">
+    <div class="skill-list-header">
+        <h2>Skills</h2>
+        <a class="studio-btn" href="/settings/framework/skills/new" data-testid="skill-new">New skill</a>
+    </div>
+
+    @if (_skills.Count == 0)
+    {
+        <div class="page-body-empty" data-testid="skill-list-empty">
+            <p class="studio-muted">No skills yet. Create one to get started.</p>
+        </div>
+    }
+    else
+    {
+        <div class="skill-cards">
+            @foreach (var item in _skills)
+            {
+                var skill = item.Definition;
+                <a class="skill-card" href="@($"/settings/framework/skills/view/{item.Id}")"
+                   style="@AccentStyle(skill.BrandColor)" data-testid="@($"skill-card-{skill.Name}")">
+                    <SkillIconDisplay Icon="skill.IconSmall" BrandColor="@skill.BrandColor" Size="44"
+                                      Fallback="@skill.DisplayName" TestId="@($"skill-card-icon-{skill.Name}")" />
+                    <div class="skill-card-text">
+                        <div class="skill-card-title">@skill.DisplayName</div>
+                        <div class="skill-card-subtitle">@skill.ShortDescription</div>
+                        <div class="skill-card-name">$@skill.Name</div>
+                    </div>
+                </a>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private sealed record Item(string Id, SkillDefinition Definition);
+
+    private IReadOnlyList<Item> _skills = [];
+
+    protected override void OnInitialized() => Load();
+
+    private void Load() =>
+        _skills = Store.List(FrameworkArtifactKind.Skill)
+            .Select(a => new Item(a.Id, SkillPayload.From(a)))
+            .ToList();
+
+    private static string AccentStyle(string? brandColor) =>
+        string.IsNullOrWhiteSpace(brandColor) ? string.Empty : $"border-left-color:{brandColor};";
+}

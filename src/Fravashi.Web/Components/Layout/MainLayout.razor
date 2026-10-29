@@ -1,0 +1,94 @@
+@namespace Fravashi.Web.Components.Layout
+@inherits LayoutComponentBase
+@using Fravashi.Web.Components.Shell
+@using Fravashi.Web.Components.Updates
+@using Fravashi.Web.Services
+@using Fravashi.Application.Updates
+@inject NavigationManager Nav
+@inject ThemeState Theme
+@inject IProductUpdateStatus UpdateStatus
+@inject ScratchpadState Scratchpad
+@implements IDisposable
+
+<FluentDesignTheme @bind-Mode="Theme.Mode" StorageName="fravashi-theme" CustomColor="#00CC33" />
+
+@* The window title bar renders above everything (lock panel included) and only shows inside the
+   studio window shell (html.window-host). The wrapper turns 100vh into a column so the shell fills the
+   remainder. *@
+<div class="studio-window-root">
+<WindowTitleBar />
+<Fravashi.Web.Components.Auth.SignInGraceStrip />
+@if (UpdateStatus.Current.IsLocked)
+{
+    <UpdateRequiredPanel />
+}
+else
+{
+@* Work item #350: no folder open means no studio. StartDialogHost shows the start dialog INSTEAD of the shell (rail,
+   page and scratchpad are never rendered) while this window has no folder, and draws the same dialog over the shell
+   when the title bar's workspace button asks for it. *@
+<StartDialogHost>
+<div class="studio-shell @(Current.HasSidebar ? string.Empty : "no-sidebar") @(Scratchpad.IsOpen ? "has-scratchpad" : string.Empty)">
+    <ActivityBar CurrentArea="Current.Area" />
+
+    @if (Current.HasSidebar)
+    {
+        <aside class="studio-sidebar">
+            <div class="studio-sidebar-header">@Current.Label</div>
+            <div class="studio-sidebar-body">
+                <ActivityExplorer Area="Current.Area" />
+            </div>
+        </aside>
+    }
+
+    <main class="studio-main">
+        <div class="studio-main-body">
+            @* Item #373: a folder that is not set up lands on its setup; the page is held back until that is decided, so
+               a page the window was loaded on (a restored Code tab) is never started and then left behind. *@
+            <Fravashi.Web.Components.Setup.FirstOpenLanding>@Body</Fravashi.Web.Components.Setup.FirstOpenLanding>
+        </div>
+    </main>
+
+    @* Backlog 67: drawn by the layout, not by a page, so it stays open with its contents while the person
+       moves between pages. *@
+    @if (Scratchpad.IsOpen)
+    {
+        <ScratchpadPanel />
+    }
+
+    @* The status bar is retired for now (its theme toggle and notifications moved to the activity
+       rail's bottom group); StudioStatusBar.razor is kept should a bottom strip return later. *@
+</div>
+</StartDialogHost>
+}
+</div>
+
+<FluentToastProvider />
+<FluentDialogProvider />
+<FluentTooltipProvider />
+<FluentMessageBarProvider />
+<FluentMenuProvider />
+
+@code {
+    private StudioActivity Current => StudioActivities.ForPath(new Uri(Nav.Uri).AbsolutePath);
+
+    protected override void OnInitialized()
+    {
+        Nav.LocationChanged += OnLocationChanged;
+        Theme.Changed += OnThemeChanged;
+        Scratchpad.Changed += OnScratchpadChanged;
+    }
+
+    private void OnScratchpadChanged() => InvokeAsync(StateHasChanged);
+
+    private void OnLocationChanged(object? sender, LocationChangedEventArgs e) => InvokeAsync(StateHasChanged);
+
+    private void OnThemeChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Nav.LocationChanged -= OnLocationChanged;
+        Theme.Changed -= OnThemeChanged;
+        Scratchpad.Changed -= OnScratchpadChanged;
+    }
+}

@@ -1,0 +1,199 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Microsoft.JSInterop
+@inject IAgentBrowser Browser
+@inject IJSRuntime JS
+@implements IDisposable
+
+@* Backlog 159. The page the agent's browser holds, as a picture refreshed while this band is open, with the three
+   things a person needs to take over for a moment: click on the picture, type into what has focus, press Enter.
+   That is how a sign-in a site needs is done by the person and never by the agent: what is typed here goes straight
+   to the page and is not recorded anywhere. Shown only while the session has a page open. *@
+@if (Session is { } session && _page is { } state)
+{
+    <div class="session-browser" data-testid="session-browser">
+        <div class="session-browser-head">
+            <button type="button" class="studio-link-btn" data-testid="session-browser-toggle"
+                    aria-expanded="@(_open ? "true" : "false")" @onclick="ToggleAsync">
+                @(_open ? "Hide browser" : "Browser")
+            </button>
+            <span class="session-browser-url" data-testid="session-browser-url" title="@state.Url">@state.Title · @state.Url</span>
+            @if (state.ConsoleErrors.Count > 0 || state.FailedRequests.Count > 0)
+            {
+                <span class="session-browser-errors" data-testid="session-browser-errors"
+                      title="@string.Join("\n", state.ConsoleErrors.Concat(state.FailedRequests).TakeLast(10))">
+                    @(state.ConsoleErrors.Count) console error(s), @(state.FailedRequests.Count) failed request(s)
+                </span>
+            }
+            <button type="button" class="studio-link-btn" data-testid="session-browser-close" @onclick="CloseAsync">Close page</button>
+        </div>
+
+        @if (_open)
+        {
+            @if (_frame is { } frame)
+            {
+                <img class="session-browser-frame" data-testid="session-browser-frame" alt="The agent's browser page"
+                     src="@frame" @ref="_image" @onclick="ClickAsync" />
+            }
+            else
+            {
+                <div class="session-browser-frame studio-muted">Taking a picture of the page...</div>
+            }
+
+            <div class="session-browser-type">
+                <input class="studio-input" type="@(_reveal ? "text" : "password")" spellcheck="false" autocomplete="off"
+                       placeholder="Type into what has focus on the page (not recorded)"
+                       data-testid="session-browser-input" @bind="_typed" @bind:event="oninput" />
+                <label class="diag-check"><input type="checkbox" @bind="_reveal" /><span>show</span></label>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="session-browser-send"
+                        disabled="@string.IsNullOrEmpty(_typed)" @onclick="SendAsync">Type</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="session-browser-enter" @onclick="EnterAsync">Enter</button>
+            </div>
+            @if (_said is { Length: > 0 })
+            {
+                <div class="studio-muted" data-testid="session-browser-said">@_said</div>
+            }
+        }
+    </div>
+}
+
+@code {
+    /// <summary>The session whose page this shows.</summary>
+    [Parameter]
+    public AgentSessionId? Session { get; set; }
+
+    private BrowserPageState? _page;
+    private string? _frame;
+    private bool _open = true;
+    private bool _reveal;
+    private string _typed = string.Empty;
+    private string? _said;
+    private ElementReference _image;
+    private CancellationTokenSource? _refresh;
+
+    protected override void OnInitialized() => Browser.Changed += OnChanged;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _page = Session is { } session ? Browser.Current(session) : null;
+        await RestartRefreshAsync();
+    }
+
+    public void Dispose()
+    {
+        Browser.Changed -= OnChanged;
+        _refresh?.Cancel();
+        _refresh?.Dispose();
+    }
+
+    private void OnChanged(AgentSessionId session)
+    {
+        if (session != Session)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(async () =>
+        {
+            var had = _page is not null;
+            _page = Browser.Current(session);
+            if (had != (_page is not null))
+            {
+                await RestartRefreshAsync();
+            }
+
+            StateHasChanged();
+        });
+    }
+
+    private async Task ToggleAsync()
+    {
+        _open = !_open;
+        await RestartRefreshAsync();
+    }
+
+    /// <summary>A picture while the band is open and there is a page, every second and a half; nothing otherwise.</summary>
+    private Task RestartRefreshAsync()
+    {
+        _refresh?.Cancel();
+        _refresh?.Dispose();
+        _refresh = null;
+        if (!_open || _page is null || Session is not { } session)
+        {
+            _frame = null;
+            return Task.CompletedTask;
+        }
+
+        var cts = new CancellationTokenSource();
+        _refresh = cts;
+        _ = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(1500));
+            do
+            {
+                var bytes = await Browser.FrameAsync(session, cts.Token);
+                if (bytes is not null)
+                {
+                    var frame = "data:image/jpeg;base64," + Convert.ToBase64String(bytes);
+                    await InvokeAsync(() =>
+                    {
+                        _frame = frame;
+                        StateHasChanged();
+                    });
+                }
+            }
+            while (!cts.IsCancellationRequested && await timer.WaitForNextTickAsync(cts.Token).ConfigureAwait(false));
+        }, cts.Token).ContinueWith(_ => { }, TaskScheduler.Default);
+        return Task.CompletedTask;
+    }
+
+    private async Task ClickAsync(MouseEventArgs e)
+    {
+        if (Session is not { } session)
+        {
+            return;
+        }
+
+        // The picture is scaled to the band; the click is mapped back onto the page's own viewport.
+        var size = await JS.InvokeAsync<double[]>("fravashiBrowserPane.size", _image);
+        if (size.Length < 2 || size[0] <= 0 || size[1] <= 0)
+        {
+            return;
+        }
+
+        var x = e.OffsetX * Fravashi.Infrastructure.Browser.PlaywrightAgentBrowser.ViewportWidth / size[0];
+        var y = e.OffsetY * Fravashi.Infrastructure.Browser.PlaywrightAgentBrowser.ViewportHeight / size[1];
+        Settle(await Browser.ClickAtAsync(session, x, y));
+    }
+
+    private async Task SendAsync()
+    {
+        if (Session is not { } session || string.IsNullOrEmpty(_typed))
+        {
+            return;
+        }
+
+        var text = _typed;
+        _typed = string.Empty;
+        Settle(await Browser.TypeTextAsync(session, text));
+    }
+
+    private async Task EnterAsync()
+    {
+        if (Session is { } session)
+        {
+            Settle(await Browser.PressAsync(session, "Enter"));
+        }
+    }
+
+    private async Task CloseAsync()
+    {
+        if (Session is { } session)
+        {
+            await Browser.CloseAsync(session);
+        }
+    }
+
+    private void Settle(BrowserOutcome outcome) => _said = outcome.Refusal;
+}

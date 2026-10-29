@@ -1,0 +1,384 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Framework
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject IConfigurationStore Config
+@inject IModelListResolver ModelResolver
+@inject NavigationManager Nav
+
+@* Create / edit an Agent (UI8 - UI10) - a Claude subagent. The contract fields (name, the load-bearing
+   description, an optional tools allowlist, an optional model, and the system-prompt body) are required where the
+   contract requires them; the interface.* fields (display name, short description, icons, brand colour, default
+   prompt, targets) are all optional. The model dropdown draws from the selected targets' models (D03-12), with
+   `inherit` offered as the subagent default. *@
+
+<div class="skill-form" data-testid="agent-form">
+    <div class="skill-form-header">
+        <h2>@(IsEdit ? "Edit agent" : "New agent")</h2>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/agents" data-testid="agent-form-cancel">Cancel</a>
+    </div>
+
+    @if (_saveError is not null)
+    {
+        <div class="studio-error" data-testid="agent-form-error">@_saveError</div>
+    }
+
+    <div class="skill-form-grid">
+        <label class="skill-field">
+            <span class="skill-field-label">Name (kebab-case, unique)</span>
+            <input class="studio-input" @bind="_name" @bind:event="oninput" placeholder="code-reviewer"
+                   data-testid="agent-name" disabled="@IsEdit" />
+            <span class="ob-field-hint">Claude receives this as the subagent's <code>agent_type</code>. @(IsEdit ? "The name is fixed after creation." : string.Empty)</span>
+            @FieldError("name")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Display name (optional)</span>
+            <input class="studio-input" @bind="_displayName" @bind:event="oninput" placeholder="Code reviewer"
+                   data-testid="agent-display-name" />
+        </label>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Description (when to delegate - Claude reads this to route work here)</span>
+            <textarea class="studio-input skill-textarea-sm" @bind="_description" @bind:event="oninput"
+                      data-testid="agent-description"
+                      placeholder="Use for reviewing code changes for correctness, security and style before a commit."></textarea>
+            @FieldError("description")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Short description (optional)</span>
+            <input class="studio-input" @bind="_shortDescription" @bind:event="oninput"
+                   data-testid="agent-short-description" />
+            <span class="ob-field-hint">Shown as the card subtitle.</span>
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Tools allowlist (optional, comma-separated)</span>
+            <input class="studio-input" @bind="_toolsText" @bind:event="oninput"
+                   placeholder="Read, Grep, Glob, Bash" data-testid="agent-tools" />
+            <span class="ob-field-hint">Serialized as the <code>tools</code> frontmatter. Leave blank to inherit all tools.</span>
+        </label>
+
+        <div class="skill-field">
+            <span class="skill-field-label">Brand colour (optional)</span>
+            <div class="skill-color-row">
+                <input type="color" class="skill-color-input" value="@ColorValue" @onchange="OnColorChanged"
+                       data-testid="agent-brand-color" />
+                <input class="studio-input skill-color-hex" @bind="_brandColor" @bind:event="oninput"
+                       placeholder="#7C4DFF" data-testid="agent-brand-color-hex" />
+            </div>
+            @FieldError("brand_color")
+        </div>
+
+        <div class="skill-field">
+            <span class="skill-field-label">Small icon (optional)</span>
+            <IconPicker Value="_iconSmall" ValueChanged="OnSmallIconChanged" OnUpload="RegisterUpload"
+                        BrandColor="@_brandColor" Fallback="@_displayName" TestId="agent-icon-small" />
+        </div>
+
+        <div class="skill-field">
+            <span class="skill-field-label">Large icon (defaults to the small icon when unset)</span>
+            <IconPicker Value="_iconLarge" ValueChanged="OnLargeIconChanged" OnUpload="RegisterUpload"
+                        BrandColor="@_brandColor" Fallback="@_displayName" TestId="agent-icon-large" />
+            @if (!_iconLarge.IsSet && _iconSmall.IsSet)
+            {
+                <span class="ob-field-hint" data-testid="agent-icon-large-defaulted">
+                    Not set - the large icon uses the small icon.
+                </span>
+            }
+        </div>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Default prompt (optional - a surrounding prompt to invoke the agent with)</span>
+            <textarea class="studio-input skill-textarea-sm" @bind="_defaultPrompt" @bind:event="oninput"
+                      data-testid="agent-default-prompt"></textarea>
+        </label>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">System prompt (the subagent's instructions - Markdown body)</span>
+            <textarea class="studio-input skill-textarea-lg" @bind="_systemPrompt" @bind:event="oninput"
+                      data-testid="agent-system-prompt"
+                      placeholder="You are a meticulous code reviewer. When invoked…"></textarea>
+            @FieldError("system_prompt")
+        </label>
+
+        <div class="skill-field skill-field-wide">
+            <span class="skill-field-label">Target runtimes (optional)</span>
+            @if (_configuredRuntimes.Count == 0)
+            {
+                <p class="studio-muted" data-testid="agent-targets-empty">
+                    No agent runtimes are configured. Select runtimes in Settings › Agents › Runtimes and sign-in;
+                    they then appear here as targets.
+                </p>
+            }
+            else
+            {
+                <div class="skill-targets" data-testid="agent-targets">
+                    @foreach (var tool in _configuredRuntimes)
+                    {
+                        var t = tool;
+                        <label class="skill-target-chip @(_targets.Contains(t) ? "selected" : string.Empty)">
+                            <input type="checkbox" checked="@_targets.Contains(t)"
+                                   @onchange="e => ToggleTarget(t, (bool)e.Value!)"
+                                   data-testid="@($"agent-target-{t}")" />
+                            <span>@AgentRuntimeCatalog.For(t).DisplayName</span>
+                        </label>
+                    }
+                </div>
+                <span class="ob-field-hint">
+                    Claude is the canonical authoring format. Non-Claude targets are recorded as intent now and
+                    translated per-runtime when file-sync / execution arrives (untranslatable fields will show
+                    visibly rather than drop silently).
+                </span>
+            }
+        </div>
+
+        <div class="skill-field skill-field-wide">
+            <span class="skill-field-label">Model (optional)</span>
+            @if (_targets.Count == 0)
+            {
+                <select class="studio-input" value="@(_model ?? string.Empty)" @onchange="OnModelChanged"
+                        data-testid="agent-model">
+                    <option value="">No model set</option>
+                    <option value="@AgentDefinition.InheritModel">inherit - use the main conversation's model</option>
+                </select>
+                <span class="ob-field-hint" data-testid="agent-model-hint">
+                    Select a target runtime to choose from its models, or keep <code>inherit</code>.
+                </span>
+            }
+            else
+            {
+                <select class="studio-input" value="@(_model ?? string.Empty)" @onchange="OnModelChanged"
+                        data-testid="agent-model">
+                    <option value="">No model set</option>
+                    <option value="@AgentDefinition.InheritModel">inherit - use the main conversation's model</option>
+                    @foreach (var tool in _targets)
+                    {
+                        if (_modelsByTool.TryGetValue(tool, out var result) && result.Models.Count > 0)
+                        {
+                            <optgroup label="@AgentRuntimeCatalog.For(tool).DisplayName">
+                                @foreach (var m in result.Models)
+                                {
+                                    <option value="@m.Id">@m.Id@(m.Note is null ? "" : $" - {m.Note}")</option>
+                                }
+                            </optgroup>
+                        }
+                    }
+                </select>
+                <span class="ob-field-hint" data-testid="agent-model-provenance">@ModelProvenance</span>
+            }
+        </div>
+    </div>
+
+    <div class="skill-form-actions">
+        <button class="studio-btn" @onclick="SaveAsync" disabled="@_saving" data-testid="agent-save">
+            @(_saving ? "Saving…" : IsEdit ? "Save changes" : "Create agent")
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private bool IsEdit => !string.IsNullOrWhiteSpace(Id);
+
+    private string _name = string.Empty;
+    private string _displayName = string.Empty;
+    private string _shortDescription = string.Empty;
+    private string _description = string.Empty;
+    private string _toolsText = string.Empty;
+    private string _brandColor = string.Empty;
+    private string _defaultPrompt = string.Empty;
+    private string _systemPrompt = string.Empty;
+    private SkillIcon _iconSmall = SkillIcon.None;
+    private SkillIcon _iconLarge = SkillIcon.None;
+    private readonly List<AgentTool> _targets = [];
+    private string? _model;
+
+    private IReadOnlyList<AgentTool> _configuredRuntimes = [];
+    private readonly Dictionary<AgentTool, ModelListResult> _modelsByTool = [];
+
+    private readonly List<PendingResourceUpload> _pending = [];
+    private readonly HashSet<string> _iconResourceIds = [];
+
+    private IReadOnlyList<SkillValidationError> _errors = [];
+    private string? _saveError;
+    private bool _saving;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _configuredRuntimes = AgentRuntimeSelection.Read(Config);
+
+        if (IsEdit && Store.Get(Id!) is { } artifact)
+        {
+            var agent = FrameworkPayload<AgentDefinition>.From(artifact);
+            _name = agent.Name;
+            _displayName = agent.DisplayName;
+            _shortDescription = agent.ShortDescription;
+            _description = agent.Description;
+            _toolsText = string.Join(", ", agent.Tools);
+            _brandColor = agent.BrandColor;
+            _defaultPrompt = agent.DefaultPrompt;
+            _systemPrompt = agent.SystemPrompt;
+            _iconSmall = agent.IconSmall;
+            _iconLarge = agent.IconLarge;
+            _targets.AddRange(agent.Targets);
+            _model = agent.Model;
+        }
+
+        await ResolveModelsAsync();
+    }
+
+    private string ColorValue =>
+        SkillValidation.IsHexColor(_brandColor) && _brandColor.Length == 7 ? _brandColor : "#7C4DFF";
+
+    private void OnColorChanged(ChangeEventArgs e) => _brandColor = e.Value?.ToString() ?? _brandColor;
+
+    private async Task OnSmallIconChanged(SkillIcon icon) { _iconSmall = icon; await Task.CompletedTask; }
+
+    private async Task OnLargeIconChanged(SkillIcon icon) { _iconLarge = icon; await Task.CompletedTask; }
+
+    private void RegisterUpload(PendingResourceUpload upload)
+    {
+        _pending.Add(upload);
+        _iconResourceIds.Add(upload.Id);
+    }
+
+    private async Task ToggleTarget(AgentTool tool, bool on)
+    {
+        if (on && !_targets.Contains(tool))
+        {
+            _targets.Add(tool);
+        }
+        else if (!on)
+        {
+            _targets.Remove(tool);
+        }
+
+        await ResolveModelsAsync();
+    }
+
+    private void OnModelChanged(ChangeEventArgs e)
+    {
+        var value = e.Value?.ToString();
+        _model = string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private async Task ResolveModelsAsync()
+    {
+        foreach (var tool in _targets)
+        {
+            if (!_modelsByTool.ContainsKey(tool))
+            {
+                _modelsByTool[tool] = await ModelResolver.ResolveAsync(tool);
+            }
+        }
+    }
+
+    private string ModelProvenance
+    {
+        get
+        {
+            var parts = _targets
+                .Where(t => _modelsByTool.ContainsKey(t))
+                .Select(t => $"{AgentRuntimeCatalog.For(t).DisplayName}: {_modelsByTool[t].Provenance}");
+            return string.Join("  ·  ", parts);
+        }
+    }
+
+    private AgentDefinition BuildDefinition() => new()
+    {
+        Name = _name.Trim(),
+        DisplayName = _displayName.Trim(),
+        ShortDescription = _shortDescription.Trim(),
+        Description = _description.Trim(),
+        Tools = _toolsText.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+        Model = _model,
+        BrandColor = _brandColor.Trim(),
+        DefaultPrompt = _defaultPrompt,
+        SystemPrompt = _systemPrompt,
+        IconSmall = _iconSmall,
+        IconLarge = _iconLarge,
+        Targets = _targets.ToList(),
+    };
+
+    private async Task SaveAsync()
+    {
+        _saveError = null;
+        var definition = BuildDefinition();
+        _errors = AgentValidation.Validate(definition);
+
+        var clash = Store.GetByName(FrameworkArtifactKind.Agent, definition.Name);
+        if (clash is not null && clash.Id != Id)
+        {
+            _errors = [.. _errors, new SkillValidationError("name", $"An agent named '{definition.Name}' already exists.")];
+        }
+
+        if (_errors.Count > 0)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var payload = FrameworkPayload<AgentDefinition>.Serialize(definition);
+            string artifactId;
+
+            if (IsEdit && Store.Get(Id!) is { } existing)
+            {
+                artifactId = existing.Id;
+                Store.Update(existing with { Name = definition.Name, PayloadJson = payload, UpdatedUtc = now });
+            }
+            else
+            {
+                artifactId = Guid.NewGuid().ToString("N");
+                Store.Add(new FrameworkArtifact(
+                    artifactId, FrameworkArtifactKind.Agent, definition.Name, payload, now, now));
+            }
+
+            foreach (var pending in _pending.Where(p => _iconResourceIds.Contains(p.Id)))
+            {
+                Store.AddResource(new FrameworkResource(
+                    pending.Id, artifactId, pending.FileName, pending.ContentType, pending.Content, now));
+            }
+
+            Nav.NavigateTo($"/settings/framework/agents/view/{artifactId}");
+        }
+        catch (DuplicateArtifactNameException ex)
+        {
+            _saveError = ex.Message;
+        }
+        catch (ResourceTooLargeException ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private RenderFragment? FieldError(string field)
+    {
+        var error = _errors.FirstOrDefault(e => e.Field == field);
+        if (error is null)
+        {
+            return null;
+        }
+
+        return builder =>
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "skill-field-error");
+            builder.AddAttribute(2, "data-testid", $"agent-error-{field}");
+            builder.AddContent(3, error.Message);
+            builder.CloseElement();
+        };
+    }
+}

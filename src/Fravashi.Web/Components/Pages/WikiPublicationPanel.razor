@@ -1,0 +1,185 @@
+@using Fravashi.Application.Wiki
+@using Fravashi.Domain.Wiki
+@inject WikiPublisher Publisher
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+
+@* Backlog 83: where this document stands against the user's own wiki, and the acts that change that.
+   Publishing is a button and never a side effect of saving, because it writes to somebody's company wiki.
+   Every state that is a person's question offers exactly the ways out of it and no "publish" beside them,
+   so the ordinary button can never be the thing that overwrites an edit made on the site. Drawn only from
+   classes the page already uses: there is no approved design for this section, so it takes no new look. *@
+@* Backlog 142: a project that publishes to no wiki shows what was published before, as a record, and offers no act. *@
+@if (_publication is not null || Follows || _elsewhere.Count > 0)
+{
+    <section class="work-item-section" data-testid="wiki-publication">
+        <h3 class="work-item-section-title">Publication (@Publisher.Provider)</h3>
+
+        @* Backlog 232: the site's outage, since when and why, learned from the calls publishing and the mirror's pull made.
+           It is said beside the state and changes none of it: what a publish left behind is still the state's to say. *@
+        @if (Publisher.Outage is { } outage)
+        {
+            <div class="work-item-empty" data-testid="wiki-publication-outage">
+                <StampedText Words="@(Fravashi.Application.Time.StampedWords.Of(outage.Sentence, $". This document is served from {ProductName.Short}, and nothing is sent until the site answers."))" />
+            </div>
+        }
+
+        <div class="work-item-empty" data-testid="wiki-publication-state">
+            @WikiPublishDiscipline.Sentence(_publication, Item)
+            @* The spaces are C# strings on purpose: Blazor trims the whitespace at the edge of an element's content,
+               so a literal space in markup vanished and the sentences ran together ("unasked.Confluence", seen in the
+               installed v0.9.31). *@
+            @if (WikiPublishDiscipline.DetailToShow(_publication, Item) is { } detail)
+            {
+                <span data-testid="wiki-publication-detail">@(" " + detail)</span>
+            }
+            @if (_publication?.WebUrl is { Length: > 0 } url)
+            {
+                @(" ")<a href="@url" target="_blank" rel="noopener" data-testid="wiki-publication-link">open on the site ↗</a>
+            }
+        </div>
+
+        @* Backlog 145: where it was published before the project moved to this wiki. Kept, never changed from here. *@
+        @foreach (var before in _elsewhere)
+        {
+            <div class="work-item-empty" data-testid="wiki-publication-elsewhere">
+                @($"Published before to {before.Provider}, where the page is kept as it was.")
+                @if (before.WebUrl is { Length: > 0 } oldUrl)
+                {
+                    @(" ")<a href="@oldUrl" target="_blank" rel="noopener">open it there ↗</a>
+                }
+            </div>
+        }
+
+        @if (_refusal is { Length: > 0 } refusal)
+        {
+            <div class="session-error" data-testid="wiki-publication-refusal">
+                <span class="session-error-mark" aria-hidden="true">!</span>
+                <span class="session-error-text">@refusal</span>
+            </div>
+        }
+
+        @if (_losses.Count > 0)
+        {
+            <ul class="work-item-list" data-testid="wiki-publication-losses">
+                @foreach (var loss in _losses)
+                {
+                    <li>Not carried across: @loss.What. @loss.Detail</li>
+                }
+            </ul>
+        }
+
+        @if (!Follows)
+        {
+            <div class="work-item-empty" data-testid="wiki-publication-kept">
+                This project publishes to no wiki now, so this is a record of what was published before.
+            </div>
+        }
+        else
+        {
+        <div class="work-item-form-actions">
+            @switch (WikiPublishDiscipline.Next(_publication, Item))
+            {
+                case WikiPublishStep.Create:
+                case WikiPublishStep.Update:
+                case WikiPublishStep.SettleFirst:
+                    <button type="button" class="studio-btn" disabled="@_busy" data-testid="wiki-publish"
+                            @onclick="@(() => RunAsync(Publisher.PublishAsync))">
+                        @(_publication?.PageId is null ? "Publish" : "Publish changes")
+                    </button>
+                    break;
+                case WikiPublishStep.NeedsAPerson when _publication?.State == WikiPublicationState.Gone:
+                    <button type="button" class="studio-btn" disabled="@_busy" data-testid="wiki-publish-as-new"
+                            @onclick="@(() => RunAsync(Publisher.PublishAsNewAsync))">
+                        Publish as a new page
+                    </button>
+                    break;
+                case WikiPublishStep.NeedsAPerson:
+                    <button type="button" class="studio-btn" disabled="@_busy" data-testid="wiki-take-site"
+                            @onclick="@(() => RunAsync(Publisher.TakeSiteVersionAsync))">
+                        Take the site's version
+                    </button>
+                    <button type="button" class="studio-btn studio-btn-alt" disabled="@_busy" data-testid="wiki-overwrite-site"
+                            @onclick="@(() => RunAsync(Publisher.OverwriteSiteAsync))">
+                        Overwrite the site with this
+                    </button>
+                    break;
+            }
+
+            @if (_publication?.PageId is not null)
+            {
+                <button type="button" class="studio-btn studio-btn-alt" disabled="@_busy" data-testid="wiki-publication-check"
+                        @onclick="@(() => RunAsync(Publisher.CheckAsync))">
+                    Check the site
+                </button>
+            }
+
+            @if (_publication?.ReplacedBody is not null)
+            {
+                <button type="button" class="studio-btn studio-btn-alt" disabled="@_busy" data-testid="wiki-restore-replaced"
+                        @onclick="@(() => RunAsync(Publisher.RestoreReplacedAsync))">
+                    Put back what the site's version replaced
+                </button>
+            }
+        </div>
+        }
+    </section>
+}
+
+@code {
+    private bool Follows => CurrentProject.Id is { } project && Publisher.CanPublishFor(project);
+
+    /// <summary>The document this panel is about.</summary>
+    [Parameter, EditorRequired]
+    public WikiItem Item { get; set; } = default!;
+
+    /// <summary>Raised after every act, because some of them change the DOCUMENT (the site's version taken, or put back).</summary>
+    [Parameter]
+    public EventCallback OnDocumentChanged { get; set; }
+
+    private WikiPublication? _publication;
+    private IReadOnlyList<WikiPublication> _elsewhere = [];
+    private IReadOnlyList<ConversionLoss> _losses = [];
+    private string? _refusal;
+    private string? _loadedFor;
+    private bool _busy;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // Reading the row is local and cheap; the site is only ever asked when somebody presses a button.
+        _publication = await Publisher.GetAsync(Item.Id);
+        _elsewhere = await Publisher.ElsewhereAsync(Item.Id);
+        if (_loadedFor != Item.Id)
+        {
+            _loadedFor = Item.Id;
+            _losses = [];
+            _refusal = null;
+        }
+    }
+
+    private async Task RunAsync(Func<string, CancellationToken, Task<WikiPublishReport>> act)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        _refusal = null;
+        try
+        {
+            var report = await act(Item.Id, CancellationToken.None);
+            _publication = report.Publication ?? await Publisher.GetAsync(Item.Id);
+            _elsewhere = await Publisher.ElsewhereAsync(Item.Id);
+            _losses = report.Losses;
+            _refusal = report.Refusal;
+
+            // Two of these acts change the document itself. Telling the page after every one costs a local
+            // read and means no act can leave a stale body on screen.
+            await OnDocumentChanged.InvokeAsync();
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

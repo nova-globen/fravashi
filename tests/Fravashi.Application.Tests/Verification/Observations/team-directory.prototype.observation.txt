@@ -1,0 +1,245 @@
+@screen 0
+@phase at rest
+@viewport wide 1280
+- region "Team directory" [ref=e2]:
+  - heading "Team directory" [level=1] [ref=e3]
+  - toolbar [ref=e4]:
+    - generic "Search by name" [ref=e5]:
+      - searchbox "Search by name" [ref=e6]
+    - button "Add person" [ref=e7] [cursor=pointer]
+    - button "Refresh" [ref=e8] [cursor=pointer]
+  - table [ref=e9]:
+    - caption
+    - rowgroup [ref=e10]:
+      - row [ref=e11]:
+        - columnheader "Name" [ref=e12]
+        - columnheader "Role" [ref=e13]
+        - columnheader "Office" [ref=e14]
+    - rowgroup [ref=e15]:
+      - row [ref=e16] [cursor=pointer]:
+        - cell "Ada Lovelace" [ref=e17]
+        - cell "Engineer" [ref=e18]
+        - cell "London" [ref=e19]
+      - row [ref=e20] [cursor=pointer]:
+        - cell "Grace Hopper" [ref=e21]
+        - cell "Admiral" [ref=e22]
+        - cell "Arlington" [ref=e23]
+      - row [ref=e24] [cursor=pointer]:
+        - cell "Alan Turing" [ref=e25]
+        - cell "Researcher" [ref=e26]
+        - cell "Manchester" [ref=e27]
+      - row [ref=e28] [cursor=pointer]:
+        - cell "Katherine Johnson" [ref=e29]
+        - cell "Mathematician" [ref=e30]
+        - cell "Hampton" [ref=e31]
+@box e2 24 24 1232 317.11
+@box e3 49 49 1182 27
+@box e4 49 101.39 1182 35.78
+@box e6 49 101.39 155 32.19
+@box e7 216 101.39 109.7 35.78
+@box e8 337.7 101.39 30.78 35.78
+@box e9 49 149.17 1182 166.94
+@box e12 49.5 149.67 472.52 33.19
+@box e13 522.02 149.67 388.17 33.19
+@box e14 910.19 149.67 320.31 33.19
+@contrast e3 17.40
+@contrast e7 18.07
+@phase add-dialog opened by Add person
+@viewport wide 1280
+- region "Team directory" [ref=e2]:
+  - heading "Team directory" [level=1] [ref=e3]
+  - toolbar [ref=e4]:
+    - generic "Search by name" [ref=e5]:
+      - searchbox "Search by name" [ref=e6]
+    - button "Add person" [active] [ref=e7] [cursor=pointer]
+    - button "Refresh" [ref=e8] [cursor=pointer]
+  - table [ref=e9]:
+    - caption
+    - rowgroup [ref=e10]:
+      - row [ref=e11]:
+        - columnheader "Name" [ref=e12]
+        - columnheader "Role" [ref=e13]
+        - columnheader "Office" [ref=e14]
+    - rowgroup [ref=e15]:
+      - row [ref=e16] [cursor=pointer]:
+        - cell "Ada Lovelace" [ref=e17]
+        - cell "Engineer" [ref=e18]
+        - cell "London" [ref=e19]
+      - row [ref=e20] [cursor=pointer]:
+        - cell "Grace Hopper" [ref=e21]
+        - cell "Admiral" [ref=e22]
+        - cell "Arlington" [ref=e23]
+      - row [ref=e24] [cursor=pointer]:
+        - cell "Alan Turing" [ref=e25]
+        - cell "Researcher" [ref=e26]
+        - cell "Manchester" [ref=e27]
+      - row [ref=e28] [cursor=pointer]:
+        - cell "Katherine Johnson" [ref=e29]
+        - cell "Mathematician" [ref=e30]
+        - cell "Hampton" [ref=e31]
+  - dialog "Add a person" [ref=e32]:
+    - heading "Add a person" [level=2] [ref=e33]
+    - generic [ref=e34]:
+      - generic [ref=e35]:
+        - generic [ref=e36]: Name
+        - textbox "Name" [ref=e37]
+      - generic [ref=e38]:
+        - generic [ref=e39]: Role
+        - combobox "Role" [ref=e40]:
+          - option "Engineer" [selected]
+          - option "Researcher"
+          - option "Manager"
+      - generic [ref=e41]:
+        - generic [ref=e42]: Office
+        - textbox "Office" [ref=e43]
+      - generic [ref=e44]:
+        - generic [ref=e45]: Send a welcome email
+        - checkbox "Send a welcome email" [checked] [ref=e46]
+      - generic [ref=e47]:
+        - button "Save" [ref=e48] [cursor=pointer]
+        - button "Cancel" [ref=e49] [cursor=pointer]
+@box e2 24 24 1232 317.11
+@box e3 49 49 1182 27
+@box e4 49 101.39 1182 35.78
+@box e6 49 101.39 155 32.19
+@box e7 216 101.39 109.7 35.78
+@box e8 337.7 101.39 30.78 35.78
+@box e9 49 149.17 1182 166.94
+@box e12 49.5 149.67 472.52 33.19
+@box e13 522.02 149.67 388.17 33.19
+@box e14 910.19 149.67 320.31 33.19
+@box e32 543.48 49 193.03 402.16
+@box e33 562.48 87.91 155.03 32
+@box e37 562.48 162.81 155.03 32.19
+@box e40 562.48 230 155.03 33.19
+@box e43 562.48 298.19 155.03 32.19
+@box e46 566.48 368.38 148.03 13
+@box e48 562.48 396.38 64.97 35.78
+@box e49 639.45 396.38 78.06 35.78
+@contrast e3 17.40
+@contrast e7 18.07
+@contrast e33 21.00
+@contrast e48 18.07
+@contrast e49 18.07
+@phase at rest
+@viewport narrow 390
+- region "Team directory" [ref=e2]:
+  - heading "Team directory" [level=1] [ref=e3]
+  - toolbar [ref=e4]:
+    - generic "Search by name" [ref=e5]:
+      - searchbox "Search by name" [ref=e6]
+    - button "Add person" [ref=e7] [cursor=pointer]
+    - button "Refresh" [ref=e8] [cursor=pointer]
+  - table [ref=e9]:
+    - caption
+    - rowgroup [ref=e10]:
+      - row [ref=e11]:
+        - columnheader "Name" [ref=e12]
+        - columnheader "Role" [ref=e13]
+        - columnheader "Office" [ref=e14]
+    - rowgroup [ref=e15]:
+      - row [ref=e16] [cursor=pointer]:
+        - cell "Ada Lovelace" [ref=e17]
+        - cell "Engineer" [ref=e18]
+        - cell "London" [ref=e19]
+      - row [ref=e20] [cursor=pointer]:
+        - cell "Grace Hopper" [ref=e21]
+        - cell "Admiral" [ref=e22]
+        - cell "Arlington" [ref=e23]
+      - row [ref=e24] [cursor=pointer]:
+        - cell "Alan Turing" [ref=e25]
+        - cell "Researcher" [ref=e26]
+        - cell "Manchester" [ref=e27]
+      - row [ref=e28] [cursor=pointer]:
+        - cell "Katherine Johnson" [ref=e29]
+        - cell "Mathematician" [ref=e30]
+        - cell "Hampton" [ref=e31]
+@box e2 24 24 342 472.08
+@box e3 49 49 292 27
+@box e4 49 101.39 292 106.75
+@box e6 49 101.39 292 32.19
+@box e7 49 145.58 292 35.78
+@box e8 49 193.36 292 14.78
+@box e9 49 220.14 305.03 250.94
+@box e12 49.5 220.64 84.08 33.19
+@box e13 133.58 220.64 120.52 33.19
+@box e14 254.09 220.64 99.44 33.19
+@contrast e3 17.40
+@contrast e7 18.07
+@phase add-dialog opened by Add person
+@viewport narrow 390
+- region "Team directory" [ref=e2]:
+  - heading "Team directory" [level=1] [ref=e3]
+  - toolbar [ref=e4]:
+    - generic "Search by name" [ref=e5]:
+      - searchbox "Search by name" [ref=e6]
+    - button "Add person" [active] [ref=e7] [cursor=pointer]
+    - button "Refresh" [ref=e8] [cursor=pointer]
+  - table [ref=e9]:
+    - caption
+    - rowgroup [ref=e10]:
+      - row [ref=e11]:
+        - columnheader "Name" [ref=e12]
+        - columnheader "Role" [ref=e13]
+        - columnheader "Office" [ref=e14]
+    - rowgroup [ref=e15]:
+      - row [ref=e16] [cursor=pointer]:
+        - cell "Ada Lovelace" [ref=e17]
+        - cell "Engineer" [ref=e18]
+        - cell "London" [ref=e19]
+      - row [ref=e20] [cursor=pointer]:
+        - cell "Grace Hopper" [ref=e21]
+        - cell "Admiral" [ref=e22]
+        - cell "Arlington" [ref=e23]
+      - row [ref=e24] [cursor=pointer]:
+        - cell "Alan Turing" [ref=e25]
+        - cell "Researcher" [ref=e26]
+        - cell "Manchester" [ref=e27]
+      - row [ref=e28] [cursor=pointer]:
+        - cell "Katherine Johnson" [ref=e29]
+        - cell "Mathematician" [ref=e30]
+        - cell "Hampton" [ref=e31]
+  - dialog "Add a person" [ref=e32]:
+    - heading "Add a person" [level=2] [ref=e33]
+    - generic [ref=e34]:
+      - generic [ref=e35]:
+        - generic [ref=e36]: Name
+        - textbox "Name" [ref=e37]
+      - generic [ref=e38]:
+        - generic [ref=e39]: Role
+        - combobox "Role" [ref=e40]:
+          - option "Engineer" [selected]
+          - option "Researcher"
+          - option "Manager"
+      - generic [ref=e41]:
+        - generic [ref=e42]: Office
+        - textbox "Office" [ref=e43]
+      - generic [ref=e44]:
+        - generic [ref=e45]: Send a welcome email
+        - checkbox "Send a welcome email" [checked] [ref=e46]
+      - generic [ref=e47]:
+        - button "Save" [ref=e48] [cursor=pointer]
+        - button "Cancel" [ref=e49] [cursor=pointer]
+@box e2 24 24 342 472.08
+@box e3 49 49 292 27
+@box e4 49 101.39 292 106.75
+@box e6 49 101.39 292 32.19
+@box e7 49 145.58 292 35.78
+@box e8 49 193.36 292 14.78
+@box e9 49 220.14 305.03 250.94
+@box e12 49.5 220.64 84.08 33.19
+@box e13 133.58 220.64 120.52 33.19
+@box e14 254.09 220.64 99.44 33.19
+@box e32 98.48 49 193.03 402.16
+@box e33 117.48 87.91 155.03 32
+@box e37 117.48 162.81 155.03 32.19
+@box e40 117.48 230 155.03 33.19
+@box e43 117.48 298.19 155.03 32.19
+@box e46 121.48 368.38 148.03 13
+@box e48 117.48 396.38 64.97 35.78
+@box e49 194.45 396.38 78.06 35.78
+@contrast e3 17.40
+@contrast e7 18.07
+@contrast e33 21.00
+@contrast e48 18.07
+@contrast e49 18.07

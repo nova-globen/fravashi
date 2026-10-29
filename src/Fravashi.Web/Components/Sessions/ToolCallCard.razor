@@ -1,0 +1,189 @@
+@using Fravashi.Domain.AgentSessions
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Application.Sessions.Tools
+
+@* A tool the agent used, as ONE compact row (backlog 18, approved mockup 2026-08-06).
+
+   Collapsed by default, and that is a decision the mockup records rather than a default nobody chose:
+   a session of any length becomes unreadable when every Read prints its file into the transcript. The
+   row itself is the toggle, so the whole width is the target in a 280px panel.
+
+   Two things are never collapsed. A failure opens itself, because a call that went wrong is the reason
+   the reader is looking; and a call with no output at all has nothing to open, so it renders as a plain
+   row instead of a button that does nothing. *@
+<div class="session-tool session-tool-@StatusClass" data-testid="tool-call">
+    @if (Expandable)
+    {
+        <button type="button" class="session-tool-row" data-testid="tool-call-toggle"
+                aria-expanded="@(Open ? "true" : "false")"
+                title="@(Open ? "Hide the output" : "Show the output")"
+                @onclick="Toggle">
+            <span class="session-tool-chevron @(Open ? "is-open" : null)" aria-hidden="true">&#9656;</span>
+            @Row
+        </button>
+    }
+    else
+    {
+        <div class="session-tool-row session-tool-row-static">
+            <span class="session-tool-chevron is-empty" aria-hidden="true"></span>
+            @Row
+        </div>
+    }
+
+    @if (Expandable && Open)
+    {
+        @* Work item #351: a studio tool's row says what it did in words, so the raw name and its arguments are here,
+           one click away, never gone. *@
+        @if (ShownLabel is not null)
+        {
+            <div class="session-tool-raw" data-testid="tool-call-raw">
+                <span class="session-tool-raw-name">@ToolName</span>
+                @if (ShownArguments is { Length: > 0 } shownArguments)
+                {
+                    <pre class="session-tool-out session-tool-args" data-testid="tool-call-arguments"><ReferencedText Text="@shownArguments" /></pre>
+                }
+                else if (ShownDetail.Length > 0)
+                {
+                    <pre class="session-tool-out session-tool-args" data-testid="tool-call-arguments">@ShownDetail</pre>
+                }
+            </div>
+        }
+
+        @if (ShownOutput is { Length: > 0 })
+        {
+            <pre class="session-tool-out" data-testid="tool-call-output">@ShownOutput</pre>
+        }
+
+        @* Standard error is its own block, so a sub-command that failed by writing to stderr is visible
+           and not lost among (or mistaken for) the tool's stdout (backlog 104 D3). *@
+        @if (ShownError is { Length: > 0 })
+        {
+            <pre class="session-tool-out session-tool-err" data-testid="tool-call-stderr">@ShownError</pre>
+        }
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string ToolName { get; set; } = string.Empty;
+
+    [Parameter]
+    public string Detail { get; set; } = string.Empty;
+
+    /// <summary>
+    /// A studio tool call's arguments as the transcript kept them (work item #351), or null. Read by the label and shown
+    /// when the row is opened.
+    /// </summary>
+    [Parameter]
+    public IReadOnlyDictionary<string, string>? Arguments { get; set; }
+
+    /// <summary>Null while the call is still running.</summary>
+    [Parameter]
+    public bool? Success { get; set; }
+
+    [Parameter]
+    public string? Output { get; set; }
+
+    /// <summary>The tool's standard error, shown as its own block when present (backlog 104 D3).</summary>
+    [Parameter]
+    public string? Error { get; set; }
+
+    private bool? _toggled;
+
+    private bool HasError => !string.IsNullOrWhiteSpace(Error);
+
+    private bool Expandable => !string.IsNullOrWhiteSpace(Output) || HasError || ShownLabel is not null;
+
+    /// <summary>
+    /// What a studio tool call did, in words (work item #351), from the one describer the approval card also reads;
+    /// null for a built-in tool, which keeps its name and subject. A stored row with no arguments still gets words,
+    /// with the subject it kept standing in for its one argument where the describer can use it.
+    /// </summary>
+    private string? ShownLabel =>
+        StudioToolDescriptions.Label(ToolName, Arguments) is { } label
+            ? TranscriptRedactor.Redact(label)
+            : null;
+
+    /// <summary>The arguments, one per line, redacted like everything else this card renders.</summary>
+    private string? ShownArguments => Arguments is not { Count: > 0 } arguments
+        ? null
+        : TranscriptRedactor.Redact(string.Join('\n', arguments.Select(a => a.Key + ": " + a.Value)));
+
+    /// <summary>
+    /// Backlog 102: what is RENDERED goes through the shared transcript redactor, so a row stored
+    /// before the persistence-side redaction existed still never shows a secret. Backlog 103: the
+    /// stored Detail is RAW now, so the display cap is applied HERE, redaction first (shortening a
+    /// value could cut a secret in half and slip it past the patterns), with the head-and-tail
+    /// contract of AgentToolSubject.Shorten so the cut cannot disguise a path's destination.
+    /// </summary>
+    private string ShownDetail =>
+        AgentToolSubject.Shorten(TranscriptRedactor.Redact(Detail), AgentToolSubject.MaxLength);
+
+    // Backlog 127: when the "result" of a call is the studio's own gate refusing it, the text is the paragraph
+    // written for the MODEL, and the grey note right under this card already says the same thing to the person.
+    // So the card says it once, shortly, instead of repeating fifteen lines in somebody else's voice.
+    private string? ShownOutput => Output is null
+        ? null
+        : AgentWorkGate.ForThePerson(Output) is { } forThePerson
+            ? $"Refused by the studio: {forThePerson}. The agent was told how to clear this."
+            : TranscriptRedactor.Redact(Output);
+
+    private string? ShownError => Error is null ? null : TranscriptRedactor.Redact(Error);
+
+    /// <summary>
+    /// Open when the reader opened it, closed when the reader closed it, and open by default for a
+    /// failure OR for a call that wrote to stderr, because that output is the news (backlog 104 D3). The
+    /// nullable is what keeps those apart from a reader's own choice: a reader who closes it keeps it
+    /// closed, which a plain bool defaulting from <c>Success</c> could not express.
+    /// </summary>
+    private bool Open => _toggled ?? (Success == false || HasError);
+
+    private void Toggle() => _toggled = !Open;
+
+    /// <summary>The row's content, shared by the button and the static form so they cannot drift.</summary>
+    private RenderFragment Row => ShownLabel is { } label ? LabelRow(label) : PlainRow;
+
+    /// <summary>A studio tool's row: its label, with any reference in it a link to its preview (work item #351).</summary>
+    private RenderFragment LabelRow(string label) => @<text>
+        <span class="session-tool-label" data-testid="tool-call-label" title="@label"><ReferencedText Text="@label" /></span>
+        <span class="session-tool-state" data-testid="tool-call-state" title="@StatusTitle">@StatusMark</span>
+    </text>;
+
+    private RenderFragment PlainRow => @<text>
+        <span class="session-tool-name">@StudioToolDescriptions.DisplayName(ToolName)</span>
+        @* The bdi is load-bearing, not decoration. The span clips from the FRONT (direction: rtl), which
+           is what keeps the identifying tail of a path visible in a 280px panel, and that also reorders
+           the neutral characters at the ends of anything that is not a path: measured in Chromium, a
+           Grep pattern of "@@ref|FocusAsync" rendered as "ref|FocusAsync@@". Isolating the value gives
+           it its own direction from its own first strong character, so it reads correctly inside a
+           right-to-left box. *@
+        <span class="session-tool-arg" title="@ShownDetail"><bdi>@ShownDetail</bdi></span>
+        <span class="session-tool-state" data-testid="tool-call-state" title="@StatusTitle">@StatusMark</span>
+    </text>;
+
+    private string StatusClass => Success switch
+    {
+        true => "ok",
+        false => "fail",
+        null => "running",
+    };
+
+    /// <summary>
+    /// A finished call is a mark, because there are many of them and they are not the news. A running
+    /// one says the word, because that IS the news: it is what the agent is doing right now.
+    /// </summary>
+    private string StatusMark => Success switch
+    {
+        true => "✓",
+        false => "✗",
+        null => "running",
+    };
+
+    private string StatusTitle => Success switch
+    {
+        true => "Finished",
+        false => "Failed, or you denied it",
+        null => "Running now",
+    };
+}

@@ -1,0 +1,24 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+
+@* Dispatches the MCP servers CRUD routes under Settings › Framework › MCP servers. *@
+
+@switch (Action?.ToLowerInvariant())
+{
+    case "new":
+        <McpServerForm />
+        break;
+    case "edit":
+        <McpServerForm Id="@Id" />
+        break;
+    case "view":
+        <McpServerView Id="@Id" />
+        break;
+    default:
+        <McpServerList />
+        break;
+}
+
+@code {
+    [Parameter] public string? Action { get; set; }
+    [Parameter] public string? Id { get; set; }
+}

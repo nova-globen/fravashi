@@ -1,0 +1,32 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Web.Services
+@implements IDisposable
+@inject ScratchpadState Scratchpad
+
+@* Backlog 67: shows and hides the scratchpad. The owner placed it "next to the minimize button in the app
+   title bar", so it sits immediately left of the window buttons, after the agent-panel toggle.
+
+   It takes no new look: it wears the agent-panel toggle's class, the one precedent for a panel toggle in this
+   bar. The glyph is a page with ruled lines and a tick, the one part of the scratchpad a person would name
+   first. State travels three ways, as the agent toggle's does, so none is the only one that works: the
+   highlighted colour, aria-pressed, and the wording. *@
+<button type="button" class="studio-titlebar-agentbtn @(Scratchpad.IsOpen ? "is-open" : string.Empty)"
+        data-testid="titlebar-scratchpad-toggle" title="@Wording" aria-label="@Wording"
+        aria-pressed="@(Scratchpad.IsOpen ? "true" : "false")" @onclick="Scratchpad.Toggle">
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+        <rect x="2.6" y="1.6" width="10.8" height="12.8" rx="1.4" />
+        <path d="M5 5.2h6M5 8h6" />
+        <path d="M5 11l1.3 1.3L8.6 10" />
+    </svg>
+</button>
+
+@code {
+    private string Wording => Scratchpad.IsOpen ? "Hide the scratchpad" : "Show the scratchpad";
+
+    protected override void OnInitialized() => Scratchpad.Changed += OnChanged;
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Scratchpad.Changed -= OnChanged;
+}

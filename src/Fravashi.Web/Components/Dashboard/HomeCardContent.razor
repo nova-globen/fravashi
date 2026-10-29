@@ -1,0 +1,86 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using Fravashi.Web.Components.Updates
+
+@* Work item #360: which component each of Home's card ids draws (HomeLayout.Kinds names them). An id this build does
+   not know draws nothing; HomeLayout.Parse already drops such ids, so this is only the last line of defence. *@
+
+@* Item #373: for a folder that is not set up, the cards that are a PROJECT'S draw nothing at all (no component is even
+   made, so none reads a project), and Home leads with the "not set up" state instead. The studio assistant is among them:
+   it files work items, which live in a project. The cards that read every folder stay. *@
+@if (!IsSetUp && ProjectCards.Contains(Id))
+{
+    return;
+}
+
+@switch (Id)
+{
+    case HomeLayout.Conversation:
+        <HomeConversationBox />
+        break;
+    case HomeLayout.Waiting:
+        @* Backlog 304 (ADR 0031 decision 12): everything waiting on a person. Renders nothing while nothing waits, and
+           its card then takes no room (studio.css hides a card with nothing in it). *@
+        <WaitingForYouPanel />
+        break;
+    case HomeLayout.Updates:
+        @* Work item #358: one Updates card for Fravashi itself and the agent CLI. *@
+        <UpdatesCard />
+        break;
+    case HomeLayout.Wiki:
+        <WikiSyncCard />
+        break;
+    case HomeLayout.LiveSessions:
+        @* Backlog 35: every agent running right now, in every workspace, and which are blocked on the owner. *@
+        <LiveSessionsCard />
+        break;
+    case HomeLayout.Progress:
+        <ProgressCard />
+        break;
+    case HomeLayout.Autopilot:
+        @* Work item #358: the autopilot, on Home now that backlog 303's autopilot page is retired. *@
+        <AutopilotCard />
+        break;
+    case HomeLayout.RecentDispatches:
+        <RecentDispatchesCard />
+        break;
+    @* Backlog 36: four insight cards, each read from data the studio actually stores and each stating the period it
+       covers. Spend, throughput and time are cross-workspace (the session store is); repository health is bound to the
+       folder this window has open. *@
+    case HomeLayout.AgentSpend:
+        <AgentSpendCard />
+        break;
+    case HomeLayout.Throughput:
+        <ThroughputCard />
+        break;
+    case HomeLayout.TimeSpent:
+        <TimeSpentCard />
+        break;
+    case HomeLayout.RepositoryHealth:
+        <RepositoryHealthCard />
+        break;
+    case HomeLayout.RecentConversations:
+        @* Backlog 34: across every workspace. *@
+        <RecentConversationsCard />
+        break;
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>The cards that show one project's data, and so have nothing to show for a folder that is in none.</summary>
+    public static IReadOnlySet<string> ProjectCards { get; } = new HashSet<string>(StringComparer.Ordinal)
+    {
+        HomeLayout.Conversation,
+        HomeLayout.Autopilot,
+        HomeLayout.Progress,
+        HomeLayout.RecentDispatches,
+        HomeLayout.Wiki,
+    };
+
+    [Inject]
+    private IServiceProvider Services { get; set; } = default!;
+
+    private bool IsSetUp =>
+        (Services.GetService(typeof(ICurrentProject)) as ICurrentProject ?? SingleProject.Instance).IsSetUp();
+}

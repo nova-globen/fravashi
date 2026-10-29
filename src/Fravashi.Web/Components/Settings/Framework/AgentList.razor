@@ -1,0 +1,63 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* The Agents list (UI8): a card per agent showing its small icon, brand-colour accent, display name (or the
+   kebab name), and short description (or the load-bearing description). Cards link to the read-only view. *@
+
+<div class="skill-list" data-testid="agent-list">
+    <div class="skill-list-header">
+        <h2>Agents</h2>
+        <a class="studio-btn" href="/settings/framework/agents/new" data-testid="agent-new">New agent</a>
+    </div>
+
+    @if (_agents.Count == 0)
+    {
+        <div class="page-body-empty" data-testid="agent-list-empty">
+            <p class="studio-muted">No agents yet. Create one to get started.</p>
+        </div>
+    }
+    else
+    {
+        <div class="skill-cards">
+            @foreach (var item in _agents)
+            {
+                var agent = item.Definition;
+                <a class="skill-card" href="@($"/settings/framework/agents/view/{item.Id}")"
+                   style="@AccentStyle(agent.BrandColor)" data-testid="@($"agent-card-{agent.Name}")">
+                    <SkillIconDisplay Icon="agent.IconSmall" BrandColor="@agent.BrandColor" Size="44"
+                                      Fallback="@Title(agent)" TestId="@($"agent-card-icon-{agent.Name}")" />
+                    <div class="skill-card-text">
+                        <div class="skill-card-title">@Title(agent)</div>
+                        <div class="skill-card-subtitle">@Subtitle(agent)</div>
+                        <div class="skill-card-name">@agent.Name</div>
+                    </div>
+                </a>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private sealed record Item(string Id, AgentDefinition Definition);
+
+    private IReadOnlyList<Item> _agents = [];
+
+    protected override void OnInitialized() => Load();
+
+    private void Load() =>
+        _agents = Store.List(FrameworkArtifactKind.Agent)
+            .Select(a => new Item(a.Id, FrameworkPayload<AgentDefinition>.From(a)))
+            .ToList();
+
+    private static string Title(AgentDefinition a) =>
+        string.IsNullOrWhiteSpace(a.DisplayName) ? a.Name : a.DisplayName;
+
+    private static string Subtitle(AgentDefinition a) =>
+        string.IsNullOrWhiteSpace(a.ShortDescription) ? a.Description : a.ShortDescription;
+
+    private static string AccentStyle(string? brandColor) =>
+        string.IsNullOrWhiteSpace(brandColor) ? string.Empty : $"border-left-color:{brandColor};";
+}

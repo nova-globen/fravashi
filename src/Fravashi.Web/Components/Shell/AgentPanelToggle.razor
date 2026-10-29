@@ -1,0 +1,55 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Web.Services
+@implements IDisposable
+@inject AgentPanelState Panel
+
+@* Backlog 23: the control that shows and hides the agent panel. It replaced a full-height vertical
+   strip on the right edge of the window with the word "Agent" rotated in it, which was visually heavy
+   and, being inside the split, took width away from the editor.
+
+   The glyph is the panel it toggles: a window outline with its right column drawn empty when the panel
+   is hidden and filled when it is showing. State is carried three ways so none of them has to be the
+   only one that works: the fill, aria-pressed, and the title/label wording.
+
+   The button renders only while a surface that can draw the panel is mounted, so it is never a control
+   for something that is not there.
+
+   Two instances of this exist, and CSS decides which one a user sees. The primary sits beside the
+   window buttons in the title bar, which only exists under html.window-host. The fallback sits in the
+   activity rail's bottom group and is hidden by that same class, so a browser-hosted studio (a dev
+   `dotnet run`, where the title bar is not drawn at all) still has a way to open the panel instead of
+   being stranded with no control anywhere. *@
+@if (Panel.IsAvailable)
+{
+    <button type="button" class="@Class @(Panel.IsOpen ? "is-open" : string.Empty)" data-testid="@TestId"
+            title="@Wording" aria-label="@Wording" aria-pressed="@(Panel.IsOpen ? "true" : "false")"
+            @onclick="Panel.Toggle">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"
+             stroke-linejoin="round" aria-hidden="true">
+            <rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.6" />
+            <path d="M10 2.6v10.8" />
+            @if (Panel.IsOpen)
+            {
+                <path d="M10.6 4.1h3.2v7.8h-3.2z" fill="currentColor" stroke="none" />
+            }
+        </svg>
+    </button>
+}
+
+@code {
+    /// <summary>The CSS class for this instance, which is what places it (title bar or activity rail).</summary>
+    [Parameter, EditorRequired]
+    public string Class { get; set; } = string.Empty;
+
+    /// <summary>This instance's test id; the two instances are distinguishable on purpose.</summary>
+    [Parameter, EditorRequired]
+    public string TestId { get; set; } = string.Empty;
+
+    private string Wording => Panel.IsOpen ? "Hide the agent panel" : "Show the agent panel";
+
+    protected override void OnInitialized() => Panel.Changed += OnPanelChanged;
+
+    private void OnPanelChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Panel.Changed -= OnPanelChanged;
+}

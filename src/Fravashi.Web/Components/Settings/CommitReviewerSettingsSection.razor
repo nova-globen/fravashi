@@ -1,0 +1,116 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Framework
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@inject IConfigurationStore ConfigStore
+@inject INotificationHistory Notifications
+
+@* Settings > Agents > Commit reviewer (backlog 243, decided 2026-10-07). The reviewer is a ROLE: which
+   runtime and model fill it is chosen here, from the runtimes the catalog offers, so a runtime that returns from
+   docs/v2.md section 1 appears in this list with nothing else changing. One default ships: on, the one runtime this
+   version has, on its most capable model. *@
+<div class="ob-step" data-testid="commit-reviewer-settings">
+    <h2>Commit reviewer</h2>
+    <p class="studio-muted">
+        Before an agent's commit reaches you, a second agent reads the exact change, the work item, its plan and the
+        ADRs it names, and gives a verdict. If it finds something, the commit goes back to the agent with the findings
+        and you are not asked. If it passes, you are asked as before, with its summary on the card. It only reads: it
+        cannot change files, run commands or write to the board. A review is stopped after 10 minutes or 400,000 tokens,
+        and then the card says it was not reviewed.
+    </p>
+
+    <label class="diag-check">
+        <input type="checkbox" data-testid="commit-reviewer-enabled" @bind="_enabled" />
+        <span>Review every agent commit before I am asked</span>
+    </label>
+    @if (!_enabled)
+    {
+        <p class="studio-muted" data-testid="commit-reviewer-off-note">
+            Off: every commit card will say the commit was not reviewed.
+        </p>
+    }
+
+    <label class="studio-modal-field">
+        <span>Runtime</span>
+        <select class="studio-input" data-testid="commit-reviewer-runtime" value="@_runtime.ToString()" @onchange="RuntimeChanged">
+            @foreach (var runtime in CommitReviewerSetting.Runtimes)
+            {
+                <option value="@runtime.Tool.ToString()">@runtime.DisplayName</option>
+            }
+        </select>
+    </label>
+
+    <label class="studio-modal-field">
+        <span>Model</span>
+        <select class="studio-input" data-testid="commit-reviewer-model" @bind="_model">
+            @foreach (var model in Models)
+            {
+                <option value="@model.Id">@model.Id@(model.MostCapable ? " (default)" : string.Empty)</option>
+            }
+        </select>
+    </label>
+    @if (Models.FirstOrDefault(m => m.Id == _model)?.Note is { Length: > 0 } note)
+    {
+        <p class="studio-muted">@note</p>
+    }
+
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn" data-testid="commit-reviewer-save" disabled="@(!Dirty)" @onclick="Save">Save</button>
+        <button type="button" class="studio-btn studio-btn-alt" data-testid="commit-reviewer-default" @onclick="UseDefault">Use the default</button>
+    </div>
+</div>
+
+@code {
+    private bool _enabled;
+    private AgentTool _runtime;
+    private string _model = string.Empty;
+    private CommitReviewerRole _saved = CommitReviewerSetting.Default;
+
+    private IReadOnlyList<ModelOption> Models
+    {
+        get
+        {
+            var list = AgentModelCatalog.For(_runtime);
+
+            // A stored model the curated list does not carry is still the stored one: shown, not silently replaced.
+            return list.Any(m => m.Id == _model) || string.IsNullOrEmpty(_model)
+                ? list
+                : [new ModelOption(_model, "Stored model, not in the curated list."), .. list];
+        }
+    }
+
+    private CommitReviewerRole Current => new(_enabled, _runtime, _model);
+
+    private bool Dirty => Current != _saved;
+
+    protected override void OnInitialized()
+    {
+        _saved = CommitReviewerSetting.Read(ConfigStore);
+        Show(_saved);
+    }
+
+    private void Show(CommitReviewerRole role) => (_enabled, _runtime, _model) = (role.Enabled, role.Runtime, role.Model);
+
+    private void RuntimeChanged(ChangeEventArgs e)
+    {
+        if (Enum.TryParse<AgentTool>(e.Value?.ToString(), out var runtime) && runtime != _runtime)
+        {
+            _runtime = runtime;
+            _model = CommitReviewerSetting.DefaultModelFor(runtime);
+        }
+    }
+
+    private void UseDefault() => Show(CommitReviewerSetting.Default);
+
+    private void Save()
+    {
+        CommitReviewerSetting.Write(ConfigStore, Current);
+        _saved = CommitReviewerSetting.Read(ConfigStore);
+        Show(_saved);
+        Notifications.Add(
+            _saved.Enabled ? $"Commit reviewer saved: {_saved.Filler}." : "Commit reviewer switched off.",
+            NotificationSeverity.Success);
+    }
+}

@@ -1,0 +1,184 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+
+@* A question the agent stopped to ask, drawn as real controls (backlog item 92, approved mockup state 3
+   "Waiting on you"). The archived studio guessed at these by regex-matching "(y/n)" out of prose; this
+   one reads a typed document (ADR 0022) and draws what it says.
+
+   Two things stop the agent and they are deliberately NOT the same shape: an approval is warn-coloured
+   and sits between the transcript and the composer, because it blocks a change the user did not ask for.
+   A question is accent-ringed and sits IN the transcript flow, where the agent's own words are, because
+   it is part of the conversation rather than an interruption of it.
+
+   Each option is a full-width stacked button carrying a bold label and a plain description of its
+   trade-off, which is the mockup's own decision: a description long enough to be worth writing is too
+   long to be a tooltip.
+
+   Answering is never the only way out. The composer below is always live, and a typed reply closes the
+   question exactly as a click does, because both produce the same thing: an ordinary user turn. *@
+<div class="session-ask @StateClass" data-testid="session-ask">
+    @foreach (var (question, index) in Questions.Select((q, i) => (q, i)))
+    {
+        <div class="session-ask-block" data-testid="session-ask-block">
+            @if (!string.IsNullOrWhiteSpace(question.Header))
+            {
+                <div class="session-ask-header">@question.Header</div>
+            }
+            <div class="session-ask-q">@question.Question</div>
+            @foreach (var option in question.Options)
+            {
+                var picked = IsPicked(index, option.Label);
+                <button type="button"
+                        class="session-ask-opt @(picked ? "is-picked" : null)"
+                        data-testid="session-ask-option"
+                        aria-pressed="@(picked ? "true" : "false")"
+                        disabled="@(!Interactive || Busy)"
+                        @onclick="() => PickAsync(index, option.Label)">
+                    <b>@option.Label</b>
+                    @if (!string.IsNullOrWhiteSpace(option.Description))
+                    {
+                        <span>@option.Description</span>
+                    }
+                </button>
+            }
+            @if (Interactive && question.MultiSelect)
+            {
+                <div class="session-ask-note">Pick as many as apply.</div>
+            }
+        </div>
+    }
+
+    @if (Interactive && NeedsSendButton)
+    {
+        @* One question with one answer sends on the click itself, which is what the mockup draws: bare
+           option buttons and no Send. Anything the user cannot finish in one click gets the button,
+           because the alternative is a first click that fires a turn while the rest is unanswered. *@
+        <div class="session-ask-actions">
+            <button type="button" class="studio-btn" data-testid="session-ask-send"
+                    disabled="@(Busy || !Complete)" @onclick="SendAsync">
+                @(Questions.Count > 1 ? "Send answers" : "Send answer")
+            </button>
+            <span class="session-ask-hint">
+                @(Complete ? "Or answer in your own words below." : "Pick an answer for each question, or answer below.")
+            </span>
+        </div>
+    }
+    else if (Interactive)
+    {
+        <div class="session-ask-hint">Or answer in your own words below.</div>
+    }
+    else if (Answered)
+    {
+        <div class="session-ask-state" data-testid="session-ask-answered">Answered.</div>
+    }
+    else
+    {
+        @* Open, and there is nothing here that could send it: a stored conversation, or one whose process
+           is gone. Saying so beats leaving live-looking buttons that do nothing (the studio restarted
+           while a question was waiting, which is the case backlog 92 names). *@
+        <div class="session-ask-state" data-testid="session-ask-unanswerable">
+            This conversation is not running, so there is nothing to answer to. Resume it to reply.
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public IReadOnlyList<AgentTurnQuestion> Questions { get; set; } = [];
+
+    /// <summary>
+    /// True once a user turn has followed the question. Read off the transcript by the caller, so it
+    /// survives a reload, a reconnect and a restart: the answer is a persisted row, not UI state.
+    /// </summary>
+    [Parameter]
+    public bool Answered { get; set; }
+
+    /// <summary>True when this surface can actually send a turn (a live conversation, not a stored one).</summary>
+    [Parameter]
+    public bool CanAnswer { get; set; }
+
+    [Parameter]
+    public bool Busy { get; set; }
+
+    /// <summary>Raised with the text of the user turn the picks compose into.</summary>
+    [Parameter]
+    public EventCallback<string> Answer { get; set; }
+
+    /// <summary>One pick set per question, by position: the schema's id is optional and is not a key.</summary>
+    private List<HashSet<string>> _picked = [];
+
+    private IReadOnlyList<AgentTurnQuestion> _shown = [];
+
+    private bool Interactive => !Answered && CanAnswer && Answer.HasDelegate;
+
+    /// <summary>Nothing to send until every question has an answer; the composer is the way to skip one.</summary>
+    private bool Complete => _picked.Count == Questions.Count && _picked.All(set => set.Count > 0);
+
+    private bool NeedsSendButton => Questions.Count > 1 || Questions.Any(q => q.MultiSelect);
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(_shown, Questions))
+        {
+            return;
+        }
+
+        // A different question block is a different set of picks. Reference equality is enough: the
+        // caller reads the questions once per document and hands the same list back on every render.
+        _shown = Questions;
+        _picked = [.. Questions.Select(_ => new HashSet<string>(StringComparer.Ordinal))];
+    }
+
+    private bool IsPicked(int index, string label) =>
+        index < _picked.Count && _picked[index].Contains(label);
+
+    private async Task PickAsync(int index, string label)
+    {
+        if (!Interactive || index >= _picked.Count)
+        {
+            return;
+        }
+
+        var set = _picked[index];
+        if (Questions[index].MultiSelect)
+        {
+            if (!set.Remove(label))
+            {
+                set.Add(label);
+            }
+        }
+        else
+        {
+            set.Clear();
+            set.Add(label);
+        }
+
+        if (!NeedsSendButton)
+        {
+            await SendAsync();
+        }
+    }
+
+    private async Task SendAsync()
+    {
+        if (!Interactive || !Complete)
+        {
+            return;
+        }
+
+        var text = AgentTurnQuestionsReader.Compose(Questions
+            .Select((question, index) => new AgentTurnQuestionAnswer(
+                question,
+                [.. question.Options.Select(o => o.Label).Where(label => _picked[index].Contains(label))])));
+
+        if (text.Length == 0)
+        {
+            return;
+        }
+
+        await Answer.InvokeAsync(text);
+    }
+
+    private string? StateClass => Interactive ? "session-ask-open" : "session-ask-closed";
+}

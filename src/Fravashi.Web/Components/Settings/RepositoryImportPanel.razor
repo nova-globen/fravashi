@@ -1,0 +1,139 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Migration
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Repository
+@using Fravashi.Domain.Repository
+@inject IRepositoryReader Reader
+@inject RepositoryImport Import
+@inject ICurrentProject CurrentProject
+
+@* Backlog 49, the dogfood migration (docs/plans/dogfood-migration.md): bring this folder's markdown backlog and
+   documents into its project. A preview first, then the import, and only into an EMPTY project, which is what keeps
+   every backlog number meaning the same tracker item. Drawn only from classes the section above already uses: there
+   is no approved design for it, so it takes no new look. *@
+<div class="studio-detail-block" data-testid="import-panel">
+    <h3>Import this folder's backlog and documents</h3>
+    <p class="studio-muted">
+        Reads <code>docs/backlog.md</code> into work items that keep their numbers, and every other markdown document
+        under <code>docs/</code> into the wiki in the same folders, each folder a document of its own, with links between
+        them kept. Nothing in the folder is changed. It goes into an empty project only.
+    </p>
+    @* This repository's cut-over (backlog 49, 2026-09-30) moved its work into the tracker and kept its documents in
+       git, where its code and tests cite them by path; a team can make the same choice here. *@
+    <label class="diag-check" data-testid="import-documents-row">
+        <input type="checkbox" data-testid="import-documents" checked="@_includeDocuments" disabled="@_busy"
+               @onchange="e => { _includeDocuments = e.Value is true; _preview = null; _report = null; }" />
+        <span>Also bring the documents under <code>docs/</code> into the wiki. Leave this off to keep them in the
+            repository and bring only the work items.</span>
+    </label>
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn studio-btn-alt" data-testid="import-preview" disabled="@_busy" @onclick="PreviewAsync">
+            @(_busy && !_importing ? "Reading ..." : "Preview")
+        </button>
+        <button type="button" class="studio-btn" data-testid="import-run" disabled="@(_busy || _preview is not { Refusal: null })" @onclick="ImportAsync">
+            @(_importing ? "Importing ..." : "Import")
+        </button>
+    </div>
+
+    @if (_report is { } report)
+    {
+        @if (report.Refusal is { Length: > 0 } refusal)
+        {
+            <div class="studio-error" data-testid="import-refusal">@refusal</div>
+        }
+        <p class="studio-muted" data-testid="import-summary">
+            @(_imported ? "Imported" : "Would import"): @report.WorkItems work items (@report.Placeholders numbers kept by a
+            placeholder), @report.Links blocking links, @report.PersonBlockers person blockers, @report.Documents documents.
+        </p>
+        @if (report.Problems.Count > 0)
+        {
+            <ul class="work-item-list" data-testid="import-problems">
+                @foreach (var problem in report.Problems)
+                {
+                    <li>@problem</li>
+                }
+            </ul>
+        }
+        @if (_imported && report.Refusal is null)
+        {
+            <p class="rt-ok" data-testid="import-done">
+                @(report.Documents > 0
+                    ? "Done. The board and the wiki of this project now hold them; the files in the folder are unchanged."
+                    : "Done. The board of this project now holds them; the documents stay in the folder, and nothing in it was changed.")
+            </p>
+        }
+    }
+</div>
+
+@code {
+    private bool _busy;
+    private bool _importing;
+    private bool _imported;
+    private bool _includeDocuments = true;
+    private ImportReport? _preview;
+    private ImportReport? _report;
+
+    private async Task PreviewAsync()
+    {
+        _busy = true;
+        _imported = false;
+        try
+        {
+            _preview = await Import.PreviewAsync(CurrentProject.Require(), await ReadAsync(), _includeDocuments);
+            _report = _preview;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task ImportAsync()
+    {
+        _busy = _importing = true;
+        try
+        {
+            _report = await Import.ImportAsync(CurrentProject.Require(), await ReadAsync(), _includeDocuments);
+            _imported = true;
+            _preview = null;
+        }
+        finally
+        {
+            _busy = _importing = false;
+        }
+    }
+
+    /// <summary>
+    /// Every markdown file under docs/, by repository-relative path. Read as BYTES: the editor's text read stops at
+    /// 512 KB and hands back a placeholder, and this repository's own backlog is larger than that.
+    /// </summary>
+    private async Task<Dictionary<string, string>> ReadAsync()
+    {
+        var files = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!Reader.IsConfigured)
+        {
+            return files;
+        }
+
+        var pending = new Stack<RepositoryNode>();
+        pending.Push(await Reader.GetTreeAsync("docs"));
+        while (pending.Count > 0)
+        {
+            var node = pending.Pop();
+            foreach (var child in node.Children)
+            {
+                if (child.IsDirectory)
+                {
+                    pending.Push(await Reader.GetTreeAsync(child.RelativePath));
+                }
+                else if (child.RelativePath.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+                         && await Reader.ReadBytesAsync(child.RelativePath) is { } bytes)
+                {
+                    files[child.RelativePath] = System.Text.Encoding.UTF8.GetString(bytes);
+                }
+            }
+        }
+
+        return files;
+    }
+}

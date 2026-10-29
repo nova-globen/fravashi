@@ -1,0 +1,1 @@
+fatal: unable to access 'https://[2001:db8::1]/r.git/': Failed to connect to 2001:db8::1 port 443 after 0 ms: Couldn't connect to server

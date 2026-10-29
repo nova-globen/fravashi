@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Fravashi.Domain</RootNamespace>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,255 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Create / edit a Plugin (UI11) - a Claude Code plugin.json manifest. Only the name is required; everything
+   else is optional. Component path fields are recorded as manifest metadata only (no file sync this version). *@
+
+<div class="skill-form" data-testid="plugin-form">
+    <div class="skill-form-header">
+        <h2>@(IsEdit ? "Edit plugin" : "New plugin")</h2>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/plugins" data-testid="plugin-form-cancel">Cancel</a>
+    </div>
+
+    @if (_saveError is not null)
+    {
+        <div class="studio-error" data-testid="plugin-form-error">@_saveError</div>
+    }
+
+    <div class="skill-form-grid">
+        <label class="skill-field">
+            <span class="skill-field-label">Name (kebab-case, unique)</span>
+            <input class="studio-input" @bind="_name" @bind:event="oninput" placeholder="deploy-tools"
+                   data-testid="plugin-name" disabled="@IsEdit" />
+            @FieldError("name")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Display name (optional)</span>
+            <input class="studio-input" @bind="_displayName" @bind:event="oninput" placeholder="Deploy Tools"
+                   data-testid="plugin-display-name" />
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Version (optional, semver)</span>
+            <input class="studio-input" @bind="_version" @bind:event="oninput" placeholder="1.0.0"
+                   data-testid="plugin-version" />
+            <span class="ob-field-hint">Omit to let the loader fall back to the git commit SHA.</span>
+            @FieldError("version")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">License (optional, SPDX id)</span>
+            <input class="studio-input" @bind="_license" @bind:event="oninput" placeholder="MIT"
+                   data-testid="plugin-license" />
+        </label>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Description (optional)</span>
+            <input class="studio-input" @bind="_description" @bind:event="oninput"
+                   data-testid="plugin-description" />
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Author name (optional)</span>
+            <input class="studio-input" @bind="_authorName" @bind:event="oninput" data-testid="plugin-author-name" />
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Author email (optional)</span>
+            <input class="studio-input" @bind="_authorEmail" @bind:event="oninput" data-testid="plugin-author-email" />
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Homepage (optional)</span>
+            <input class="studio-input" @bind="_homepage" @bind:event="oninput" data-testid="plugin-homepage" />
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Repository (optional)</span>
+            <input class="studio-input" @bind="_repository" @bind:event="oninput" data-testid="plugin-repository" />
+        </label>
+
+        <label class="skill-field skill-field-wide">
+            <span class="skill-field-label">Keywords (optional, comma-separated)</span>
+            <input class="studio-input" @bind="_keywordsText" @bind:event="oninput"
+                   placeholder="deployment, ci-cd" data-testid="plugin-keywords" />
+        </label>
+
+        <div class="skill-field skill-field-wide">
+            <span class="skill-field-label">Component paths (optional, comma-separated)</span>
+            <span class="ob-field-hint" data-testid="plugin-components-note">
+                Recorded as manifest metadata only - @(ProductName.Short) does not resolve or sync these paths this version.
+            </span>
+            <div class="skill-form-grid">
+                <label class="skill-field">
+                    <span class="skill-field-label">commands</span>
+                    <input class="studio-input" @bind="_commands" @bind:event="oninput" data-testid="plugin-commands" />
+                </label>
+                <label class="skill-field">
+                    <span class="skill-field-label">agents</span>
+                    <input class="studio-input" @bind="_agents" @bind:event="oninput" data-testid="plugin-agents" />
+                </label>
+                <label class="skill-field">
+                    <span class="skill-field-label">hooks</span>
+                    <input class="studio-input" @bind="_hooks" @bind:event="oninput" data-testid="plugin-hooks" />
+                </label>
+                <label class="skill-field">
+                    <span class="skill-field-label">mcpServers</span>
+                    <input class="studio-input" @bind="_mcpServers" @bind:event="oninput" data-testid="plugin-mcp" />
+                </label>
+                <label class="skill-field">
+                    <span class="skill-field-label">skills</span>
+                    <input class="studio-input" @bind="_skills" @bind:event="oninput" data-testid="plugin-skills" />
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <div class="skill-form-actions">
+        <button class="studio-btn" @onclick="Save" disabled="@_saving" data-testid="plugin-save">
+            @(_saving ? "Saving…" : IsEdit ? "Save changes" : "Create plugin")
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private bool IsEdit => !string.IsNullOrWhiteSpace(Id);
+
+    private string _name = string.Empty;
+    private string _displayName = string.Empty;
+    private string _description = string.Empty;
+    private string _version = string.Empty;
+    private string _authorName = string.Empty;
+    private string _authorEmail = string.Empty;
+    private string _homepage = string.Empty;
+    private string _repository = string.Empty;
+    private string _license = string.Empty;
+    private string _keywordsText = string.Empty;
+    private string _commands = string.Empty;
+    private string _agents = string.Empty;
+    private string _hooks = string.Empty;
+    private string _mcpServers = string.Empty;
+    private string _skills = string.Empty;
+
+    private IReadOnlyList<SkillValidationError> _errors = [];
+    private string? _saveError;
+    private bool _saving;
+
+    protected override void OnInitialized()
+    {
+        if (IsEdit && Store.Get(Id!) is { } artifact)
+        {
+            var plugin = FrameworkPayload<PluginDefinition>.From(artifact);
+            _name = plugin.Name;
+            _displayName = plugin.DisplayName;
+            _description = plugin.Description;
+            _version = plugin.Version;
+            _authorName = plugin.Author.Name;
+            _authorEmail = plugin.Author.Email;
+            _homepage = plugin.Homepage;
+            _repository = plugin.Repository;
+            _license = plugin.License;
+            _keywordsText = string.Join(", ", plugin.Keywords);
+            _commands = string.Join(", ", plugin.Components.Commands);
+            _agents = string.Join(", ", plugin.Components.Agents);
+            _hooks = string.Join(", ", plugin.Components.Hooks);
+            _mcpServers = string.Join(", ", plugin.Components.McpServers);
+            _skills = string.Join(", ", plugin.Components.Skills);
+        }
+    }
+
+    private static IReadOnlyList<string> Split(string text) =>
+        text.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private PluginDefinition BuildDefinition() => new()
+    {
+        Name = _name.Trim(),
+        DisplayName = _displayName.Trim(),
+        Description = _description.Trim(),
+        Version = _version.Trim(),
+        Author = new PluginAuthor(_authorName.Trim(), _authorEmail.Trim(), string.Empty),
+        Homepage = _homepage.Trim(),
+        Repository = _repository.Trim(),
+        License = _license.Trim(),
+        Keywords = Split(_keywordsText),
+        Components = new PluginComponents
+        {
+            Commands = Split(_commands),
+            Agents = Split(_agents),
+            Hooks = Split(_hooks),
+            McpServers = Split(_mcpServers),
+            Skills = Split(_skills),
+        },
+    };
+
+    private void Save()
+    {
+        _saveError = null;
+        var definition = BuildDefinition();
+        _errors = PluginValidation.Validate(definition);
+
+        var clash = Store.GetByName(FrameworkArtifactKind.Plugin, definition.Name);
+        if (clash is not null && clash.Id != Id)
+        {
+            _errors = [.. _errors, new SkillValidationError("name", $"A plugin named '{definition.Name}' already exists.")];
+        }
+
+        if (_errors.Count > 0)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var payload = FrameworkPayload<PluginDefinition>.Serialize(definition);
+            string artifactId;
+
+            if (IsEdit && Store.Get(Id!) is { } existing)
+            {
+                artifactId = existing.Id;
+                Store.Update(existing with { Name = definition.Name, PayloadJson = payload, UpdatedUtc = now });
+            }
+            else
+            {
+                artifactId = Guid.NewGuid().ToString("N");
+                Store.Add(new FrameworkArtifact(
+                    artifactId, FrameworkArtifactKind.Plugin, definition.Name, payload, now, now));
+            }
+
+            Nav.NavigateTo($"/settings/framework/plugins/view/{artifactId}");
+        }
+        catch (DuplicateArtifactNameException ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private RenderFragment? FieldError(string field)
+    {
+        var error = _errors.FirstOrDefault(e => e.Field == field);
+        if (error is null)
+        {
+            return null;
+        }
+
+        return builder =>
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "skill-field-error");
+            builder.AddAttribute(2, "data-testid", $"plugin-error-{field}");
+            builder.AddContent(3, error.Message);
+            builder.CloseElement();
+        };
+    }
+}

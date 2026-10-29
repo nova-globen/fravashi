@@ -1,0 +1,88 @@
+@namespace Fravashi.Web.Components.Updates
+@using Fravashi.Application.Updates
+@inject IProductUpdateStatus Status
+
+@if (Show)
+{
+    <div class="product-update-banner" role="status">
+        <span class="product-update-banner-icon" aria-hidden="true">⬆</span>
+        <span class="product-update-banner-text">
+            @(ProductName.Short) @State.TargetVersion is available
+            @(string.IsNullOrWhiteSpace(State.CurrentVersion) ? null : $"(you are on {State.CurrentVersion})").
+            Run <code>@(ProductName.Command) update</code> to install it.
+            @if (!string.IsNullOrWhiteSpace(State.ReleaseNotesUrl))
+            {
+                <a href="@State.ReleaseNotesUrl" target="_blank" rel="noopener noreferrer">Release notes →</a>
+            }
+            @if (State.ManifestVerified)
+            {
+                <span data-testid="product-update-verified">Its release manifest is signed by this product's release key.</span>
+            }
+            @if (State.ManifestRefused is { } refused)
+            {
+                <span data-testid="product-update-unsigned">
+                    The latest check found that the update channel's manifest is not signed by this product's release key,
+                    so nothing from it is used (@Why(refused)); this is what the last verified check found.
+                </span>
+            }
+            else if (State.ChannelUnreachableSince is { } since)
+            {
+                <span>
+                    The update channel could not be checked since <LocalTime At="since" TestId="update-banner-since" />
+                    (@(State.ChannelUnreachableReason ?? "no reason was recorded")), so this is what the last successful check found.
+                </span>
+            }
+        </span>
+        <button type="button" class="product-update-banner-dismiss" aria-label="Dismiss" @onclick="Dismiss">✕</button>
+    </div>
+}
+else if (ShowRefused)
+{
+    <div class="product-update-banner" role="status" data-testid="product-update-unsigned">
+        <span class="product-update-banner-icon" aria-hidden="true">⚠</span>
+        <span class="product-update-banner-text">
+            The update channel's manifest is not signed by this product's release key, so nothing from it is used
+            (@Why(State.ManifestRefused!.Value), since <LocalTime At="State.ChannelUnreachableSince!.Value" TestId="update-banner-since" />).
+            Whether a newer @(ProductName.Short) exists is unknown.
+        </span>
+        <button type="button" class="product-update-banner-dismiss" aria-label="Dismiss" @onclick="Dismiss">✕</button>
+    </div>
+}
+else if (ShowUnreachable)
+{
+    <div class="product-update-banner" role="status" data-testid="product-update-unreachable">
+        <span class="product-update-banner-icon" aria-hidden="true">⚠</span>
+        <span class="product-update-banner-text">
+            Could not check for updates since <LocalTime At="State.ChannelUnreachableSince!.Value" TestId="update-banner-since" />
+            (@(State.ChannelUnreachableReason ?? "no reason was recorded")). Whether a newer @(ProductName.Short) exists is unknown.
+        </span>
+        <button type="button" class="product-update-banner-dismiss" aria-label="Dismiss" @onclick="Dismiss">✕</button>
+    </div>
+}
+
+@code {
+    private bool _dismissed;
+
+    private ProductUpdateState State => Status.Current;
+
+    // A NON-critical available update shows a dismissible banner (a critical one is handled by the lock, never
+    // reaching a page that renders this). Dismissal is per-session; it returns on the next full load.
+    private bool Show => !_dismissed && State.Severity == ProductUpdateSeverity.Available;
+
+    // Backlog 242: a manifest the launcher refused for its signature is said as that, not as an outage.
+    private bool ShowRefused => !_dismissed && State.Severity == ProductUpdateSeverity.None
+        && State.ManifestRefused is not null && State.ChannelUnreachableSince is not null;
+
+    // Backlog 230: a channel the launcher could not reach is said as such, never left to read as "up to date".
+    private bool ShowUnreachable => !_dismissed && State.Severity == ProductUpdateSeverity.None
+        && State.ManifestRefused is null && State.ChannelUnreachableSince is not null;
+
+    private void Dismiss() => _dismissed = true;
+
+    /// <summary>Why a manifest was refused, in the launcher's words (backlog 242).</summary>
+    internal static string Why(ManifestSignatureRefusal refused) => refused switch
+    {
+        ManifestSignatureRefusal.Unsigned => "no signature was published beside it",
+        _ => "the signature beside it does not match it",
+    };
+}

@@ -1,0 +1,442 @@
+@namespace Fravashi.Web.Components.Onboarding
+@using System.Threading.Channels
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.AgentSessions
+@implements IAsyncDisposable
+@inject IAgentRuntimeCredentialStore Credentials
+@inject IAgentLoginProxy LoginProxy
+@inject IConfigurationReloader Reloader
+
+@* Per-runtime configure + sign-in (S12/S13/S14). Two honest paths, exactly what the CLI offers:
+   a headless credential (stored encrypted, injected as the CLI's env var on every run) FIRST, and - where the
+   CLI has an interactive sign-in - a live proxy of that flow (the CLI runs here, its output streams to the
+   browser, the user's input is forwarded back), with the verification URL and device code highlighted. *@
+
+<div class="rt-login" data-testid="@($"runtime-login-{Tool}")">
+    @if (Folded)
+    {
+        @* Owner report 2026-09-30: an interactive sign-in said "Login successful" and the panel stayed exactly as it
+           was, key field, start button and all, with only a badge up in the card's corner changing. A runtime that is
+           signed in shows THAT, and the ways to sign in again sit behind one button. *@
+        <div class="rt-signed-in" data-testid="@($"login-signed-in-{Tool}")">
+            <p class="rt-ok">
+                @(_justSignedIn ? $"Signed in. {_descriptor.DisplayName} is ready to use." : $"{_descriptor.DisplayName} is signed in.")
+            </p>
+            @if (!string.IsNullOrWhiteSpace(Status?.AuthDetail))
+            {
+                <p class="ob-hint">@Status!.AuthDetail</p>
+            }
+            <div class="rt-login-row">
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="@($"login-change-{Tool}")"
+                        @onclick="() => { _changing = true; _justSignedIn = false; }">Change how it signs in</button>
+            </div>
+        </div>
+    }
+    else if (!_usesStoredKey)
+    {
+        @* Backlog 108, third clause. When the credential broker carries this runtime (or this build forbids a
+           local key), a stored key authenticates nothing and is pure exposure, so none is asked for. One left
+           over from before is NOT deleted behind the owner's back: it is named as unused and offered for
+           removal, drawn from the classes this panel already uses. *@
+        <div class="rt-login-token">
+            <span class="rt-login-label">@_descriptor.ApiKeyLabel</span>
+            <p class="ob-hint" data-testid="@($"login-brokered-{Tool}")">
+                @_descriptor.DisplayName is authenticated through the credential broker here, with a short-lived
+                token, so no @_descriptor.ApiKeyLabel.ToLowerInvariant() is kept in this container@(_hasSubscriptionToken ? "." : ", and no sign-in is kept either.")
+                If the broker refuses, sign in to it or mint a new token under
+                <a href="/settings/broker" data-testid="@($"login-broker-settings-{Tool}")">Settings, Connections, Credential broker</a>.
+            </p>
+            @if (_hasKey)
+            {
+                <p class="ob-warning" data-testid="@($"login-key-leftover-{Tool}")">
+                    A @_descriptor.ApiKeyLabel.ToLowerInvariant() saved earlier is still stored here and nothing uses it.
+                    Remove it, so that no provider key is kept in this container at all.
+                </p>
+                <div class="rt-login-row">
+                    <button type="button" class="studio-btn studio-btn-alt"
+                            data-testid="@($"login-clear-{Tool}")" @onclick="ClearKeyAsync">Remove the stored key</button>
+                </div>
+            }
+            @if (_hasSubscriptionToken)
+            {
+                @* Backlog 267 leftover: a subscription token stored before the broker was turned on is kept but
+                   unused while the broker carries this runtime. Named here, never removed silently, same shape
+                   as the unused-key clause above. *@
+                <p class="ob-warning" data-testid="@($"login-subscription-leftover-{Tool}")">
+                    A sign-in made before the broker was turned on is still kept here, unused while the broker
+                    carries @_descriptor.DisplayName. Remove it, so that no sign-in is kept in this container either.
+                </p>
+                <div class="rt-login-row">
+                    <button type="button" class="studio-btn studio-btn-alt"
+                            data-testid="@($"login-clear-subscription-{Tool}")" @onclick="ClearSubscriptionTokenAsync">Remove the stored sign-in</button>
+                </div>
+            }
+        </div>
+    }
+    else
+    {
+    <div class="rt-login-token">
+        <label class="rt-login-label" for="@($"login-apikey-{Tool}")">@_descriptor.ApiKeyLabel</label>
+        <p class="ob-hint">@_descriptor.ApiKeyHelp</p>
+        <div class="rt-login-row">
+            <input type="password" id="@($"login-apikey-{Tool}")" class="rt-input" @bind="_apiKey" @bind:event="oninput"
+                   placeholder="@($"Paste a {_descriptor.ApiKeyLabel.ToLowerInvariant()}")" data-testid="@($"login-apikey-{Tool}")" />
+            <button type="button" class="studio-btn" disabled="@(string.IsNullOrWhiteSpace(_apiKey))"
+                    data-testid="@($"login-save-{Tool}")" @onclick="SaveKeyAsync">Save</button>
+            @if (_hasKey)
+            {
+                <button type="button" class="studio-btn studio-btn-alt"
+                        data-testid="@($"login-clear-{Tool}")" @onclick="ClearKeyAsync">Remove</button>
+            }
+        </div>
+        @if (_hasKey)
+        {
+            <p class="rt-ok" data-testid="@($"login-key-saved-{Tool}")">
+                A @_descriptor.ApiKeyLabel.ToLowerInvariant() is stored and will authenticate this runtime headlessly.
+            </p>
+        }
+    </div>
+    }
+
+    @if (!Folded)
+    {
+    <div class="rt-login-interactive">
+        @if (_outcome is not null)
+        {
+            <p class="ob-warning" data-testid="@($"login-outcome-{Tool}")">@_outcome</p>
+        }
+        @if (!_usesStoredKey)
+        {
+            @* Backlog 267. Where the broker carries the runtime, the store refuses whatever a sign-in would leave here
+               (AgentRuntimeCredentialStore.SaveSubscriptionToken throws on the same UsesStoredKey rule), so no sign-in
+               is offered: the paragraph above says the broker authenticates it and where to go when it refuses. *@
+        }
+        else if (_descriptor.SupportsInteractiveLogin)
+        {
+            <p class="ob-hint">
+                Or sign in interactively - @(ProductName.Short) runs the CLI's own sign-in here and streams it to your browser.
+                Any link or device code below is clickable/copyable; type into the box to answer a prompt.
+                @if (_descriptor.SubscriptionTokenEnvVar is not null)
+                {
+                    @(" ")<span data-testid="@($"login-token-hint-{Tool}")">It signs in with your subscription and makes a token that lasts about a year; @(ProductName.Short) keeps it encrypted, never shows it, and hands it to every conversation.</span>
+                }
+            </p>
+            <div class="rt-login-row">
+                @if (!_loginRunning)
+                {
+                    <button type="button" class="studio-btn" data-testid="@($"login-start-{Tool}")" @onclick="StartLoginAsync">
+                        Start interactive sign-in
+                    </button>
+                }
+                else
+                {
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="@($"login-stop-{Tool}")" @onclick="StopLoginAsync">
+                        Stop
+                    </button>
+                }
+            </div>
+
+            @if (_chunks.Count > 0)
+            {
+                <div class="rt-login-stream" data-testid="@($"login-output-{Tool}")" role="log" aria-live="polite">
+                    @foreach (var chunk in _chunks)
+                    {
+                        <div class="rt-line rt-line-@(chunk.Kind.ToString().ToLowerInvariant())" data-testid="login-chunk">
+                            @* The CLI's own line already contains the URL and the code. Drawing each again after the
+                               text made the address read twice back to back (seen in the installed window, backlog
+                               130), so each highlight is drawn IN PLACE, where the sentence has it. One the text does
+                               not contain is still drawn after it, so nothing the proxy found is ever dropped. *@
+                            @foreach (var part in Parts(chunk))
+                            {
+                                @switch (part.Kind)
+                                {
+                                    case LinePartKind.Url:
+                                        <a href="@part.Text" target="_blank" rel="noopener noreferrer"
+                                           class="rt-login-url" data-testid="login-url">@part.Text</a>
+                                        break;
+                                    case LinePartKind.Code:
+                                        <code class="rt-login-code" data-testid="login-code">@part.Text</code>
+                                        break;
+                                    default:
+                                        <span>@part.Text</span>
+                                        break;
+                                }
+                            }
+                        </div>
+                    }
+                </div>
+
+                @if (_loginRunning)
+                {
+                    <div class="rt-login-row">
+                        <input type="text" class="rt-input" @bind="_input" @bind:event="oninput"
+                               placeholder="Type here to answer the CLI…" data-testid="@($"login-input-{Tool}")"
+                               @onkeydown="OnInputKeyDown" />
+                        <button type="button" class="studio-btn" data-testid="@($"login-send-{Tool}")" @onclick="SendInputAsync">Send</button>
+                    </div>
+                }
+            }
+        }
+        else
+        {
+            <p class="ob-warning" data-testid="@($"login-no-interactive-{Tool}")">
+                @_descriptor.DisplayName has no interactive sign-in that works here - use the @_descriptor.ApiKeyLabel.ToLowerInvariant() above.
+            </p>
+        }
+
+        @if (SignedIn && _changing && !_loginRunning)
+        {
+            <div class="rt-login-row">
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="@($"login-keep-{Tool}")"
+                        @onclick="() => _changing = false">Keep the current sign-in</button>
+            </div>
+        }
+    </div>
+    }
+</div>
+
+@code {
+    [Parameter] public AgentTool Tool { get; set; }
+
+    /// <summary>Raised when the stored key or the login session state changes, so the parent re-reads auth status.</summary>
+    [Parameter] public EventCallback OnAuthChanged { get; set; }
+
+    /// <summary>What the runtime's own check last said, as the card above shows it. Null means not known yet.</summary>
+    [Parameter] public AgentRuntimeStatus? Status { get; set; }
+
+    private AgentRuntimeDescriptor _descriptor = null!;
+    private string _apiKey = string.Empty;
+    private string _input = string.Empty;
+    private bool _hasKey;
+    private bool _hasSubscriptionToken;
+    private bool _usesStoredKey = true;
+    private bool _loginRunning;
+    private readonly List<AgentLoginChunk> _chunks = [];
+    private IAgentLoginSession? _session;
+
+    /// <summary>The person asked to see the ways to sign in although the runtime is signed in.</summary>
+    private bool _changing;
+
+    /// <summary>The fold follows a sign-in or a saved key made on this panel, and says so.</summary>
+    private bool _justSignedIn;
+
+    /// <summary>What the last interactive sign-in came to, when that was not a signed-in runtime.</summary>
+    private string? _outcome;
+
+    private bool SignedIn => Status is { AuthState: AgentRuntimeAuthState.Authenticated };
+
+    /// <summary>
+    /// Signed in, nobody asked to change it, nothing running: the panel says so and folds its two ways to sign in
+    /// away. A key or a subscription token left over from before the broker keeps it open, because removing that
+    /// leftover is the one thing backlog 108 (and its #267 leftover) asks of the person here.
+    /// </summary>
+    private bool Folded => SignedIn && !_changing && !_loginRunning && !(!_usesStoredKey && (_hasKey || _hasSubscriptionToken));
+
+    protected override void OnParametersSet()
+    {
+        _descriptor = AgentRuntimeCatalog.For(Tool);
+        _hasKey = Credentials.HasApiKey(Tool);
+        _hasSubscriptionToken = Credentials.HasSubscriptionToken(Tool);
+        _usesStoredKey = Credentials.UsesStoredKey(Tool);
+    }
+
+    private async Task SaveKeyAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_apiKey))
+        {
+            return;
+        }
+
+        Credentials.SaveApiKey(Tool, _apiKey);
+        _apiKey = string.Empty;
+        _hasKey = true;
+        _changing = false;
+        _justSignedIn = true;
+        _outcome = null;
+        Reloader.Reload();
+        await OnAuthChanged.InvokeAsync();
+    }
+
+    private async Task ClearKeyAsync()
+    {
+        Credentials.ClearApiKey(Tool);
+        _hasKey = false;
+        Reloader.Reload();
+        await OnAuthChanged.InvokeAsync();
+    }
+
+    private async Task ClearSubscriptionTokenAsync()
+    {
+        Credentials.ClearSubscriptionToken(Tool);
+        _hasSubscriptionToken = false;
+        Reloader.Reload();
+        await OnAuthChanged.InvokeAsync();
+    }
+
+    private async Task StartLoginAsync()
+    {
+        await StopLoginAsync();
+        _chunks.Clear();
+        _outcome = null;
+        _justSignedIn = false;
+        _session = LoginProxy.Start(Tool);
+        _loginRunning = true;
+        _ = StreamAsync(_session);
+    }
+
+    private async Task StreamAsync(IAgentLoginSession session)
+    {
+        try
+        {
+            await foreach (var chunk in session.Output.ReadAllAsync())
+            {
+                _chunks.Add(chunk);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch
+        {
+            // Stream ended abnormally; the finally below still settles the UI.
+        }
+        finally
+        {
+            // #316: the stream can end before the exit code is known, so the code is awaited, never peeked at. Peeking read
+            // null on a busy machine, dropped a token refusal, folded the panel to "signed in" and never rendered again.
+            int? code;
+            try
+            {
+                code = await session.Completion;
+            }
+            catch
+            {
+                code = null;
+            }
+
+            await InvokeAsync(async () =>
+            {
+                // A sign-in replaced or stopped since is not this one's to settle: its end must not turn off the
+                // running flag of the one that replaced it.
+                if (!ReferenceEquals(session, _session))
+                {
+                    return;
+                }
+
+                _loginRunning = false;
+
+                // Backlog 267: a token the store refused signed nothing in, even when the runtime's check reads signed
+                // in for another reason (on a corporate-broker test machine it was the broker's bearer). The panel stays open on the
+                // refusal and its output, and never says "Signed in".
+                var refusal = code == 0 ? session.TokenRefusal : null;
+                if (refusal is not null)
+                {
+                    _changing = true;
+                    _justSignedIn = false;
+                    await OnAuthChanged.InvokeAsync();
+                    _outcome = $"The sign-in finished, but its token was not kept: {refusal}";
+                    StateHasChanged();
+                    return;
+                }
+
+                if (code == 0)
+                {
+                    _changing = false;
+                    _justSignedIn = true;
+                }
+
+                // The card re-reads the runtime's own check, and the Status parameter brings the answer back.
+                await OnAuthChanged.InvokeAsync();
+
+                _outcome = code switch
+                {
+                    0 when SignedIn => null,
+                    0 => $"The sign-in finished, but {_descriptor.DisplayName} still reports that it is not signed in. Its output is below.",
+                    null => "The sign-in ended without an exit code. Its output is below.",
+                    _ => $"The sign-in did not complete (exit code {code}). Its output is below.",
+                };
+                if (!SignedIn)
+                {
+                    _justSignedIn = false;
+                }
+
+                StateHasChanged();
+            });
+        }
+    }
+
+    internal enum LinePartKind { Text, Url, Code }
+
+    internal readonly record struct LinePart(LinePartKind Kind, string Text);
+
+    /// <summary>
+    /// A line as the parts it is drawn from: its text, with the URL and the device code each standing where
+    /// the sentence has them. A highlight the text does not contain comes after it.
+    /// </summary>
+    internal static IReadOnlyList<LinePart> Parts(AgentLoginChunk chunk)
+    {
+        var parts = new List<LinePart> { new(LinePartKind.Text, chunk.Text) };
+        var trailing = new List<LinePart>();
+        foreach (var (kind, value) in new[] { (LinePartKind.Url, chunk.Url), (LinePartKind.Code, chunk.DeviceCode) })
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                continue;
+            }
+
+            var at = parts.FindIndex(part => part.Kind == LinePartKind.Text && part.Text.Contains(value, StringComparison.Ordinal));
+            if (at < 0)
+            {
+                trailing.Add(new LinePart(kind, value));
+                continue;
+            }
+
+            var text = parts[at].Text;
+            var index = text.IndexOf(value, StringComparison.Ordinal);
+            parts.RemoveAt(at);
+            parts.InsertRange(at, new[]
+            {
+                new LinePart(LinePartKind.Text, text[..index]),
+                new LinePart(kind, value),
+                new LinePart(LinePartKind.Text, text[(index + value.Length)..]),
+            });
+        }
+
+        parts.AddRange(trailing);
+        return parts.Where(part => part.Kind != LinePartKind.Text || part.Text.Length > 0).ToList();
+    }
+
+    private async Task SendInputAsync()
+    {
+        if (_session is null || !_loginRunning)
+        {
+            return;
+        }
+
+        var text = _input;
+        _input = string.Empty;
+        await _session.SendInputAsync(text);
+    }
+
+    private async Task OnInputKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await SendInputAsync();
+        }
+    }
+
+    private async Task StopLoginAsync()
+    {
+        if (_session is not null)
+        {
+            // Forgotten BEFORE it is disposed, so its stream's ending finds it is no longer the current sign-in.
+            var stopping = _session;
+            _session = null;
+            await stopping.DisposeAsync();
+        }
+
+        _loginRunning = false;
+    }
+
+    public async ValueTask DisposeAsync() => await StopLoginAsync();
+}

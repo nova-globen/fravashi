@@ -1,0 +1,23 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Application.Time
+@using Fravashi.Web.Services
+
+@* Backlog 246: a sentence that carries instants (StampedWords), with every instant through LocalTime, so it is said in
+   the person's zone while everything else in it is exactly what the log line and the agent get. *@
+@foreach (var part in Words.Parts)
+{
+    @if (part is InstantPart instant)
+    {
+        <LocalTime At="instant.At" Style="@(instant.Seconds ? LocalTimeStyle.ClockSeconds : LocalTimeStyle.Clock)" />
+    }
+    else if (part is TextPart text)
+    {
+        @text.Text
+    }
+}
+
+@code {
+    /// <summary>The sentence.</summary>
+    [Parameter, EditorRequired]
+    public StampedWords Words { get; set; } = default!;
+}

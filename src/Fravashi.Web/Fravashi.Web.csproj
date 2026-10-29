@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <RootNamespace>Fravashi.Web</RootNamespace>
+    <!--
+      Reuses the existing user-secrets store (previously the AppHost's) so locally-stored credentials -
+      e.g. Tracker/Confluence/PullRequest tokens, Telegram notifications - are picked up in Development
+      without living in the tree. ADR 0003 moves all config/credentials to SQLite via onboarding (S5);
+      this keeps the studio configurable in the interim. Absent secrets, the app defaults to demo/local
+      mode and starts without live credentials.
+    -->
+    <UserSecretsId>fravashi-apphost</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Fravashi.Web.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.FluentUI.AspNetCore.Components" />
+    <PackageReference Include="Microsoft.FluentUI.AspNetCore.Components.Icons" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fravashi.Infrastructure\Fravashi.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

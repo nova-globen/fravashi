@@ -1,0 +1,150 @@
+@namespace Fravashi.Web.Components.Settings
+@using System.Globalization
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Telemetry
+@inject IConfigurationStore ConfigStore
+@inject IProductEventStore Events
+@inject IDiagnosticBundleWriter Bundles
+@inject INotificationHistory Notifications
+
+@* Settings > Advanced > Diagnostics (backlog 74). Two things live here and they are deliberately
+   separate: an OPT-IN switch for recording product events locally, and a bundle export that works
+   whether or not the switch was ever turned on. The copy below is the honest list of what a recorded
+   event can hold, which is also all the payload schema has room for. *@
+<div class="ob-step" data-testid="diagnostics-settings">
+    <h2>Diagnostics</h2>
+
+    <h3>Product events</h3>
+    <p class="studio-muted">
+        @(ProductName.Short) can record a small number of events about whether the product works, so a regression is
+        a fact rather than an impression. This is <strong>off until you switch it on</strong>, and the
+        events are written to <strong>this install's own database on this machine</strong>. Nothing is
+        sent anywhere: there is no remote destination in the product, and the only way an event leaves
+        this machine is you exporting a bundle below and sending it yourself.
+    </p>
+
+    <p class="studio-muted" data-testid="telemetry-what-is-recorded">
+        Each event holds exactly six things: what happened (onboarding completed, a session started or
+        failed to start, an agent CLI that could not be found, a tool approval answered, a turn that had
+        to be retried, a session that was aborted), when it happened, how it turned out, a one-way hash
+        of the workspace it happened in, and a duration or a count.
+        <strong>Prompts, code, file paths, commands, tool arguments, error messages and transcripts are
+        never recorded</strong>, whether this is on or off: the stored event has no field they could be
+        written into.
+    </p>
+
+    <label class="diag-check">
+        <input type="checkbox" data-testid="telemetry-enabled"
+               checked="@_enabled" @onchange="OnToggled" />
+        <span>Record product events on this machine</span>
+    </label>
+
+    <p class="studio-muted" data-testid="telemetry-count">
+        @_count.ToString(CultureInfo.InvariantCulture) event(s) recorded so far.
+    </p>
+
+    <h3>Diagnostic bundle</h3>
+    <p class="studio-muted" data-testid="diagnostics-redaction-copy">
+        Writes a zip you can send us when something is wrong: the product version and variant, the
+        container hardening the launcher was able to apply, the database's schema version and per-table
+        row counts, any recorded product events, and the most recent studio, launcher and window logs.
+        Every file in it is passed through the same redaction the studio applies to agent transcripts,
+        which replaces the credentials it recognises (known provider keys such as Anthropic, GitHub,
+        Slack, GitLab and AWS, and values assigned to names containing KEY, TOKEN, SECRET or PASSWORD). A
+        recognised provider key is replaced whole even when a terminal wrapped it across lines, at any
+        width and with indented continuation lines. It cannot recognise a credential that has neither a
+        known prefix nor a telling name, a key whose prefix itself was split by a wrap, or a named value
+        that continues onto a second line. Redaction is best-effort, not a guarantee, so look through the
+        zip before you send it anywhere. The file is written to disk and left there; nothing uploads it.
+    </p>
+
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn" data-testid="diagnostics-export"
+                disabled="@_writing" @onclick="ExportAsync">
+            @(_writing ? "Writing..." : "Write a diagnostic bundle")
+        </button>
+    </div>
+
+    @if (_bundle is { } bundle)
+    {
+        <div class="diag-result" data-testid="diagnostics-result">
+            <p>Written to <code data-testid="diagnostics-path">@bundle.Path</code></p>
+            <p class="studio-muted">
+                @bundle.SizeBytes.ToString(CultureInfo.InvariantCulture) bytes,
+                @string.Join(", ", bundle.Entries)
+            </p>
+        </div>
+    }
+    else if (_error is { Length: > 0 })
+    {
+        <div class="ob-warning" data-testid="diagnostics-error">@_error</div>
+    }
+</div>
+
+@code {
+    private bool _enabled;
+    private long _count;
+    private bool _writing;
+    private DiagnosticBundle? _bundle;
+    private string? _error;
+
+    protected override void OnInitialized()
+    {
+        _enabled = TelemetrySettings.IsEnabled(ConfigStore.Get(TelemetrySettings.EnabledKey));
+        _count = SafeCount();
+    }
+
+    /// <summary>
+    /// The switch is written straight through rather than sitting behind a Save button: an opt-in the
+    /// user has to remember to confirm is one they can believe they gave and did not.
+    /// </summary>
+    private void OnToggled(ChangeEventArgs args)
+    {
+        _enabled = args.Value is true or "true" or "on";
+        ConfigStore.Set(
+            TelemetrySettings.EnabledKey,
+            _enabled ? "true" : "false");
+        _count = SafeCount();
+        Notifications.Add(
+            _enabled
+                ? "Product events are now recorded on this machine."
+                : "Product-event recording is off.",
+            NotificationSeverity.Info);
+    }
+
+    private async Task ExportAsync()
+    {
+        _writing = true;
+        _error = null;
+        _bundle = null;
+        try
+        {
+            // Off the render thread: the bundle reads log files and walks the database.
+            _bundle = await Task.Run(Bundles.Write);
+            Notifications.Add("Diagnostic bundle written.", NotificationSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            _error = $"The bundle could not be written: {ex.Message}";
+            Notifications.Add("The diagnostic bundle could not be written.", NotificationSeverity.Error);
+        }
+        finally
+        {
+            _writing = false;
+        }
+    }
+
+    private long SafeCount()
+    {
+        try
+        {
+            return Events.Count();
+        }
+        catch (Exception)
+        {
+            // A count is decoration here; failing to read it must not take the page down.
+            return 0;
+        }
+    }
+}

@@ -1,0 +1,90 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Application.Scratchpad
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IScratchpadStore Store
+@inject IJSRuntime JS
+
+@* Backlog 67: the scratchpad. The LAYOUT draws it, which is what keeps it open with its contents while the
+   person moves between pages: a page's own component would be torn down on every navigation.
+
+   It takes no new look. It is the explorer sidebar's frame (the same surface, the same header), placed on the
+   right with its border on the left. The owner described its behaviour; there is no approved drawing of it,
+   and inventing a new visual language for it is the owner's call, not a session's. *@
+<aside class="studio-sidebar studio-scratchpad" data-testid="scratchpad">
+    <div class="studio-sidebar-header">Scratchpad</div>
+    <div class="studio-scratchpad-toolbar" role="toolbar" aria-label="Formatting">
+        <button type="button" data-testid="scratchpad-bold" title="Bold" aria-label="Bold" @onclick='() => Format("bold")'><b>B</b></button>
+        <button type="button" data-testid="scratchpad-italic" title="Italic" aria-label="Italic" @onclick='() => Format("italic")'><i>I</i></button>
+        <button type="button" data-testid="scratchpad-link" title="Link" aria-label="Link" @onclick='() => Format("link")'>link</button>
+        <button type="button" data-testid="scratchpad-bullet" title="Bulleted list" aria-label="Bulleted list" @onclick='() => Format("bullet")'>&bull; list</button>
+        <button type="button" data-testid="scratchpad-numbered" title="Numbered list" aria-label="Numbered list" @onclick='() => Format("numbered")'>1. list</button>
+        <button type="button" data-testid="scratchpad-check" title="Checklist item" aria-label="Checklist item" @onclick='() => Format("check")'>[ ] to-do</button>
+    </div>
+    <div class="studio-scratchpad-editor" data-testid="scratchpad-editor" @ref="_host"></div>
+</aside>
+
+@code {
+    private ElementReference _host;
+    private DotNetObjectReference<ScratchpadPanel>? _self;
+    private bool _opened;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        _self = DotNetObjectReference.Create(this);
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiScratchpad.open", _host, Store.Read(), _self);
+            _opened = true;
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit went away before the editor could open; there is nothing on screen to lose.
+        }
+    }
+
+    /// <summary>Called from the editor on a quiet moment and on blur. Saves exactly what it was handed.</summary>
+    [JSInvokable]
+    public void Save(string markdown) => Store.Save(markdown);
+
+    private async Task Format(string action)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiScratchpad.format", action);
+        }
+        catch (JSDisconnectedException)
+        {
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        // The editor hands back its final text on close and it is saved HERE, while this component can still
+        // act on it, rather than through a callback that could arrive after the reference below is gone.
+        if (_opened)
+        {
+            try
+            {
+                var last = await JS.InvokeAsync<string?>("fravashiScratchpad.close");
+                if (last is not null)
+                {
+                    Store.Save(last);
+                }
+            }
+            catch (JSDisconnectedException)
+            {
+                // The circuit is gone, and so is the page: the last quiet-moment save is what survives, which
+                // bounds the loss to the final half second of typing.
+            }
+        }
+
+        _self?.Dispose();
+    }
+}

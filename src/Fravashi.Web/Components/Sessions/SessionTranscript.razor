@@ -1,0 +1,480 @@
+@namespace Fravashi.Web.Components.Sessions
+@using System.Globalization
+@using Fravashi.Application.Sessions
+@using Fravashi.Application.Sessions.Tools
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Infrastructure.Sessions
+@using Fravashi.Web.Components.Code
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.JSInterop
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+@implements IAsyncDisposable
+
+@* The conversation. Tool calls are folded into one card per call (the result completes the card that
+   started it), and the message currently being typed trails the finished ones.
+
+   The wrapper exists so the jump button can float over the scroller's corner (backlog 17); the
+   transcript div itself keeps its class and its sizing, so the Sessions page's stored-transcript use
+   of the same class without a wrapper is unaffected. *@
+<div class="session-transcript-wrap">
+    @* Backlog 110. The right-click is caught on the SCROLLER, not only on the bubbles, so the menu opens
+       anywhere in the conversation: the studio window suppresses the browser's own menu (ADR 0014), so
+       anything not handled here is a right-click that does nothing. A bubble stops the event and sends
+       its own text along, which is what makes "Copy message" mean the message under the pointer. *@
+    <div class="session-transcript @CssClass" data-testid="session-transcript" @ref="_scroller"
+         @oncontextmenu="e => OpenMenuAsync(new TranscriptContextRequest(e.ClientX, e.ClientY, null))"
+         @oncontextmenu:preventDefault="true">
+        @if (Session.Transcript.Count == 0 && Session.PartialText.Length == 0)
+        {
+            <div class="session-transcript-empty">Waiting for the agent.</div>
+        }
+
+        @foreach (var (entry, index) in Entries().Select((e, i) => (e, i)))
+        {
+            switch (entry)
+            {
+                @* Backlog 25: wording the turn's document replaced (a rephrasing, a sentence about the tool). It
+                   is the agent's own text, so it is kept and can be opened, but it is folded so the turn reads
+                   as one answer (AgentTurnDrafts has the rule). *@
+                case MessageEmitted draft when _drafts.Contains(index):
+                    <details class="session-draft" data-testid="superseded-draft">
+                        <summary class="session-draft-summary">Earlier wording, replaced by this turn's answer</summary>
+                        <ChatBubble Role="draft.Role" Text="@draft.Text" Timestamp="draft.Timestamp"
+                                    OnContextMenu="OpenMenuAsync" />
+                    </details>
+                    break;
+
+                case MessageEmitted message:
+                    <ChatBubble Role="message.Role" Text="@message.Text" Timestamp="message.Timestamp"
+                                Images="TranscriptImages.For(_snapshot, index)"
+                                Untyped="_untyped.Contains(index)" OnContextMenu="OpenMenuAsync" />
+                    break;
+
+                @* Backlog 25 increment 6: a turn that failed (validation exhausted, or the budget reached) is
+                   said where it happened, with the attempts or the budget named, rather than only as the
+                   session ending below it. *@
+                case TurnCompleted failedTurn when TranscriptTurnOutcomes.FailedTurnNote(failedTurn) is { } turnNote:
+                    <div class="session-error" data-testid="failed-turn-note">
+                        <span class="session-error-mark" aria-hidden="true">!</span>
+                        <span class="session-error-text">@turnNote</span>
+                    </div>
+                    break;
+
+                @* Backlog 92. The turn's own prose is already an assistant bubble above this (the parser
+                   commits the document's message), so this draws only what prose cannot be: the choices.
+                   Keyed by the entry so a streaming re-render never carries one question's half-made
+                   selection over onto another. *@
+                case TurnCompleted turn when Questions(index, turn) is { Count: > 0 } questions:
+                    <QuestionPrompt @key="index" Questions="questions"
+                                    Answered="AgentTurnQuestionsReader.WasAnswered(_snapshot, index)"
+                                    CanAnswer="Session.IsRunning"
+                                    Busy="_answering"
+                                    Answer="AnswerQuestionsAsync" />
+                    break;
+
+                case ToolCallStarted tool:
+                    <ToolCallCard ToolName="@tool.ToolName" Detail="@tool.Detail" Arguments="tool.Arguments"
+                                  Success="Outcome(tool.ToolUseId)?.Success"
+                                  Output="@Outcome(tool.ToolUseId)?.Detail"
+                                  Error="@Outcome(tool.ToolUseId)?.Error" />
+                    break;
+
+                @* Backlog 114. A refusal says WHO made it, because the two are not the same event: the
+                   user turning a change down is the gate working, and the studio refusing on their
+                   behalf (a timeout, a released session, a shutdown) is the gate defaulting closed while
+                   nobody was there. Saying "You denied" for the second one told an owner they had
+                   refused a call they were never asked about, which reads as the gate being bypassed. *@
+                case ToolApprovalResolved { Approved: false, DecidedBy: ToolApprovalDecidedBy.User } denied:
+                    <div class="session-note session-note-denied" data-testid="denied-note">
+                        You denied @StudioToolDescriptions.DisplayName(denied.ToolName): @denied.Reason
+                    </div>
+                    break;
+
+                case ToolApprovalResolved resolved when !resolved.Approved:
+                    <div class="session-note session-note-refused" data-testid="refused-note">
+                        @RefusedSubject(resolved.ToolName) was not run (@RefusalCause(resolved.Reason))
+                        @if (resolved.RepeatCount > 1)
+                        {
+                            <span class="session-note-count" data-testid="refusal-count">@RepeatLabel(resolved.RepeatCount)</span>
+                        }
+                    </div>
+                    break;
+
+                @* Backlog 117. A refusal the studio made without asking anybody never parked, so there is no
+                   prompt and no answer to show for it; before this row existed it left no trace at all, and
+                   an agent could retry a refused call any number of times in silence. The count is what
+                   makes an agent pushing against a refusal visible as that. *@
+                case ToolCallRefused autoRefused:
+                    <div class="session-note session-note-refused" data-testid="auto-refused-note"
+                         title="@autoRefused.Detail">
+                        @RefusedSubject(autoRefused.ToolName) was refused automatically (@RefusalCause(autoRefused.Reason))
+                        @if (autoRefused.RepeatCount > 1)
+                        {
+                            <span class="session-note-count" data-testid="refusal-count">@RepeatLabel(autoRefused.RepeatCount)</span>
+                        }
+                    </div>
+                    break;
+
+                @* ADR 0028. A change the studio let run without asking under the folder's trust level. It is a
+                   row of its own for the same reason a refusal is: an unattended change that left no trace would
+                   be a gate nobody could see working, or failing. *@
+                case ToolCallTrusted trusted:
+                    <div class="session-note session-note-trusted" data-testid="trusted-note" title="@trusted.Reason">
+                        @RefusedSubject(trusted.ToolName) ran without asking (trusted edit inside the copy): @trusted.Detail
+                    </div>
+                    break;
+
+                @* ADR 0031 decisions 7 and 8 (backlog 299). A call the autopilot's own rule list or judge let
+                   run without asking, for a session the autopilot marked: as visible as a refusal or a trusted
+                   edit, and the title names which rule or judgement allowed it. *@
+                case ToolCallAutopilotAllowed allowed:
+                    <div class="session-note session-note-trusted" data-testid="autopilot-allowed-note" title="@allowed.Reason">
+                        @RefusedSubject(allowed.ToolName) ran without asking (the autopilot): @allowed.Detail
+                    </div>
+                    break;
+
+                @* The process ended but the conversation did not: the failed turn above already says why, so
+                   this is a note about what can happen next, not a second error. *@
+                case SessionEnded { Resumable: true } paused:
+                    <div class="session-note session-note-resume" data-testid="session-ended-note">
+                        @paused.FailureReason
+                    </div>
+                    break;
+
+                case SessionEnded { FinalState: AgentSessionState.Failed } failed:
+                    @* An error is its own shape, not a grey footnote in the same colour as everything
+                       else: it is the one line in the transcript that means the work did not happen. *@
+                    <div class="session-error" data-testid="session-ended-note">
+                        <span class="session-error-mark" aria-hidden="true">!</span>
+                        <span class="session-error-text">@EndedLabel(failed)</span>
+                    </div>
+                    break;
+
+                case SessionEnded ended:
+                    <div class="session-note session-note-@ended.FinalState.ToString().ToLowerInvariant()"
+                         data-testid="session-ended-note">
+                        @EndedLabel(ended)
+                    </div>
+                    break;
+            }
+        }
+
+        @if (Session.PartialText is { Length: > 0 } partial)
+        {
+            <ChatBubble Role="TranscriptRole.Assistant" Text="@partial" Pending="true"
+                        Timestamp="DateTimeOffset.Now" OnContextMenu="OpenMenuAsync" />
+        }
+
+        @* Backlog 20: the window between pressing send and the first byte coming back said nothing at
+           all. A typed turn can also be completely silent in text (ADR 0022), so this indicator is not a
+           nicety on top of streaming prose, it is the only thing moving on those turns. *@
+        @if (Session.IsRunning && Session.Phase is { } phase)
+        {
+            <div class="session-activity" data-testid="session-activity">
+                <span class="session-activity-dot" aria-hidden="true"></span>
+                <span class="session-activity-text">@PhaseLabel(phase)</span>
+            </div>
+        }
+    </div>
+
+    @* Only while the reader has scrolled away: the studio offers the newest content, it does not drag
+       them to it. *@
+    @if (_awayFromBottom)
+    {
+        <button type="button" class="session-jump-latest" data-testid="jump-to-latest"
+                @onclick="JumpToLatestAsync">
+            Jump to latest
+        </button>
+    }
+
+    @* The menu and the only place a failed copy from it can be reported. Inside the wrap on purpose: the
+       toast is positioned against it, and the menu itself is fixed to the viewport either way. *@
+    <TranscriptCopyMenu @ref="_copyMenu" />
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public LiveAgentSession Session { get; set; } = default!;
+
+    [Parameter]
+    public string? CssClass { get; set; }
+
+    /// <summary>
+    /// Where a clicked reference opens its preview (work item #351): the pane around this transcript. Without one a
+    /// reference simply opens its page.
+    /// </summary>
+    [CascadingParameter]
+    public ReferencePreviewState? Previews { get; set; }
+
+    /// <summary>
+    /// Sends a turn on this session's behalf, which is what answering a question is (backlog 92): the
+    /// answer goes back as an ordinary user turn, exactly as if it had been typed. Without a delegate the
+    /// question renders as a record of what was asked and offers no controls.
+    /// </summary>
+    [Parameter]
+    public EventCallback<string> Answer { get; set; }
+
+    private IReadOnlyList<AgentEvent> _snapshot = [];
+
+    /// <summary>The positions of this render's untyped answers (backlog 25 increment 5).</summary>
+    private IReadOnlySet<int> _untyped = new HashSet<int>();
+
+    /// <summary>The positions of this render's superseded drafts (backlog 25).</summary>
+    private IReadOnlySet<int> _drafts = new HashSet<int>();
+    private Dictionary<string, ToolCallCompleted> _outcomes = [];
+    /// <summary>
+    /// The questions read out of each turn that carried any, by transcript position. Cached because the
+    /// transcript re-renders on every streamed delta and the payload would otherwise be re-parsed each
+    /// time; keyed by position because the transcript only ever appends, so a position is stable for the
+    /// life of a conversation. Cleared when the pane shows a different one.
+    /// </summary>
+    private readonly Dictionary<int, IReadOnlyList<AgentTurnQuestion>> _questions = [];
+
+    private bool _answering;
+
+    private ElementReference _scroller;
+    private DotNetObjectReference<SessionTranscript>? _selfRef;
+    private bool _awayFromBottom;
+    private AgentSessionId? _shownSession;
+    private bool _repinNextRender;
+
+    /// <summary>
+    /// One pass over the transcript per render: the outcomes are indexed by tool_use_id so each started
+    /// call can show its own result.
+    /// </summary>
+    private IReadOnlyList<AgentEvent> Entries()
+    {
+        _snapshot = Session.Transcript;
+        _untyped = TranscriptTurnOutcomes.UntypedAnswers(_snapshot);
+        _drafts = AgentTurnDrafts.Superseded(_snapshot);
+        _outcomes = _snapshot.OfType<ToolCallCompleted>()
+            .GroupBy(c => c.ToolUseId)
+            .ToDictionary(g => g.Key, g => g.Last());
+        return _snapshot;
+    }
+
+    // ---- copy affordances (backlog 110) -----------------------------------------------------
+
+    /// <summary>
+    /// The menu, which is a component so the Sessions page's STORED conversation can open the same one.
+    /// Null only before the first render, and a right-click cannot happen before that.
+    /// </summary>
+    private TranscriptCopyMenu? _copyMenu;
+
+    private Task OpenMenuAsync(TranscriptContextRequest request) =>
+        _copyMenu?.OpenAsync(request) ?? Task.CompletedTask;
+
+    private ToolCallCompleted? Outcome(string toolUseId) =>
+        _outcomes.TryGetValue(toolUseId, out var outcome) ? outcome : null;
+
+    /// <summary>
+    /// The questions a completed turn asked, or none. A turn that ended in any other kind of document,
+    /// or in a document this build could only degrade, yields nothing here and is left to its message.
+    /// </summary>
+    private IReadOnlyList<AgentTurnQuestion> Questions(int index, TurnCompleted turn)
+    {
+        if (_questions.TryGetValue(index, out var cached))
+        {
+            return cached;
+        }
+
+        return _questions[index] = AgentTurnQuestionsReader.Read(turn.Document);
+    }
+
+    /// <summary>
+    /// The user picked. The answer leaves as an ordinary user turn (ADR 0022, decision 4), so the pane's
+    /// own send path owns it: it already knows whether that means writing to a running CLI's stdin or
+    /// starting a conversation, and nothing here needs a second transport.
+    ///
+    /// It sets a busy flag and awaits without calling StateHasChanged, which reads like the flag can
+    /// never be seen. It can: this method IS an EventCallback whose receiver is this component, so
+    /// ComponentBase renders it once the returned task turns out to be incomplete and again when it
+    /// completes. Measured rather than reasoned about, and held there by
+    /// SessionsUiTests.The_question_buttons_disable_themselves_while_an_answer_is_on_its_way, so a
+    /// render added here would be a no-op and its absence is not the defect it looks like.
+    /// </summary>
+    private async Task AnswerQuestionsAsync(string text)
+    {
+        if (_answering || string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        _answering = true;
+        try
+        {
+            await Answer.InvokeAsync(text);
+        }
+        finally
+        {
+            _answering = false;
+        }
+    }
+
+    /// <summary>
+    /// What the agent is doing, in the user's words rather than the protocol's. "Submitted" is the
+    /// studio's own knowledge (the turn went to the CLI's stdin and nothing has come back), the rest are
+    /// the CLI's partial-message stream.
+    /// </summary>
+    private static string PhaseLabel(AgentTurnPhase phase) => phase switch
+    {
+        AgentTurnPhase.Submitted => "Sent to the agent",
+        AgentTurnPhase.Thinking => "Thinking",
+        AgentTurnPhase.Composing => "Writing its answer",
+        AgentTurnPhase.ToolInput => "Preparing a tool call",
+        _ => "Working",
+    };
+
+    /// <summary>
+    /// The cause on a studio-imposed refusal, as the broker wrote it ("The studio saw no answer within
+    /// 4 hour(s), so the call was denied."). It is shown VERBATIM apart from a trailing full stop, which
+    /// would read oddly inside the sentence's brackets: naming the actual cause is the whole point of
+    /// this line (backlog 114), so nothing here summarises or replaces the reason.
+    /// </summary>
+    private static string RefusalCause(string reason)
+    {
+        // Backlog 127: a gate's refusal is written for the MODEL, as a job with tool names in it. The person
+        // gets the short sentence that says what is missing. Anything that is not a gate sentence is still
+        // shown verbatim.
+        if (AgentWorkGate.ForThePerson(reason) is { } forThePerson)
+        {
+            return forThePerson;
+        }
+
+        var text = (reason ?? string.Empty).Trim();
+        return text.Length == 0
+            ? "the studio refused it and gave no reason"
+            : StudioToolDescriptions.Humanize(text.TrimEnd('.'));
+    }
+
+    // Work item #356: a studio tool is named in words here ("Work item update"), never by its raw mcp__ name;
+    // a built-in keeps its own name.
+    private static string RefusedSubject(string toolName)
+    {
+        if (string.IsNullOrWhiteSpace(toolName))
+        {
+            return "A tool call";
+        }
+
+        var name = StudioToolDescriptions.DisplayName(toolName);
+        return name.Length > 0 && char.IsLower(name[0]) ? char.ToUpperInvariant(name[0]) + name[1..] : name;
+    }
+
+    /// <summary>How often the studio has refused this same call in this session (backlog 117).</summary>
+    private static string RepeatLabel(int count) =>
+        string.Create(CultureInfo.InvariantCulture, $"Refused {count} times in this session.");
+
+    private static string EndedLabel(SessionEnded ended) => ended.FinalState switch
+    {
+        AgentSessionState.Completed => "Session ended.",
+        AgentSessionState.Cancelled => "Session stopped.",
+        _ => $"Session failed: {ended.FailureReason}",
+    };
+
+    // ---- keeping the newest content in view (backlog 17) ------------------------------------
+
+    /// <summary>
+    /// A different conversation is a different reading position: it opens at its own newest message
+    /// rather than inheriting where the reader was in the previous one.
+    /// </summary>
+    protected override void OnParametersSet()
+    {
+        if (_shownSession == Session.Id)
+        {
+            return;
+        }
+
+        _shownSession = Session.Id;
+        _awayFromBottom = false;
+        _questions.Clear();
+
+        // Before the first render there is nothing to scroll yet, and attach pins it anyway.
+        _repinNextRender = _selfRef is not null;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _selfRef = DotNetObjectReference.Create(this);
+            _repinNextRender = false;
+
+            // ONE interop call for the element's whole lifetime: the script's observer does the
+            // per-update pinning client side, so a streamed token never costs a circuit round trip.
+            await JS.InvokeVoidAsync("fravashiSessionScroll.attach", _scroller, _selfRef);
+            return;
+        }
+
+        if (_repinNextRender)
+        {
+            _repinNextRender = false;
+            await JS.InvokeVoidAsync("fravashiSessionScroll.toBottom", _scroller);
+        }
+    }
+
+    /// <summary>
+    /// The script reports that the reader moved away from (or came back to) the newest content. The
+    /// studio deliberately does not scroll for a reader who moved away: it only offers the way back.
+    /// </summary>
+    [JSInvokable]
+    public Task AwayFromBottomChanged(bool away)
+    {
+        if (_awayFromBottom == away)
+        {
+            return Task.CompletedTask;
+        }
+
+        _awayFromBottom = away;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>
+    /// A reference in the conversation was clicked (work item #351; sessionScroll.js sends the link's text, "#343"). It
+    /// opens in the pane's preview sidebar, or as its page when there is no sidebar to open it in. Text that is not
+    /// exactly one reference is ignored: the script only sends links this component rendered, and nothing else is
+    /// trusted to name a route.
+    /// </summary>
+    [JSInvokable]
+    public Task OpenReference(string text)
+    {
+        if (SessionReferences.Parse(text) is not { } reference)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (Previews is { } previews)
+        {
+            return InvokeAsync(() => previews.Show(reference));
+        }
+
+        Nav.NavigateTo(SessionReferences.Route(reference));
+        return Task.CompletedTask;
+    }
+
+    private async Task JumpToLatestAsync()
+    {
+        _awayFromBottom = false;
+        await JS.InvokeVoidAsync("fravashiSessionScroll.toBottom", _scroller);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiSessionScroll.detach", _scroller);
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit already gone; nothing to clean client-side.
+        }
+        catch (InvalidOperationException)
+        {
+            // The PRERENDER instance disposing: it never had a JS runtime to clean up.
+        }
+        finally
+        {
+            _selfRef?.Dispose();
+        }
+    }
+}

@@ -1,0 +1,1 @@
+export default async (api) => api.evaluate(`({ ask: (document.querySelector('[data-testid=board-move-ask]') || {}).innerText || null, queued: (document.querySelector('[data-testid=board-move-queued]') || {}).innerText || null, error: (document.querySelector('[data-testid=board-error]') || {}).innerText || null })`);

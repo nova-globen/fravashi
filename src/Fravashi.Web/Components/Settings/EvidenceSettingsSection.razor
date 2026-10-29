@@ -1,0 +1,259 @@
+@namespace Fravashi.Web.Components.Settings
+@using System.Globalization
+@using Fravashi.Application.Evidence
+@using Fravashi.Application.Notifications
+@inject IEvidenceLifecycle Evidence
+@inject INotificationHistory Notifications
+@implements IDisposable
+
+@* Settings > Data > Evidence retention (backlog 75). Every kind of evidence the studio keeps on disk today, what
+   it holds, how long it is kept, what is redacted before it is stored, and a delete that removes it from disk.
+   The written policy is docs/evidence-lifecycle.md; the sentences below come from IEvidenceLifecycle so the page
+   and the code cannot drift apart. A delete is two clicks on purpose: several of these are the only copy of
+   something (a backup, a deleted file), and the second click comes after the page has said what stops working. *@
+<div class="ob-step" data-testid="evidence-settings">
+    <h2>Evidence</h2>
+
+    <p class="studio-muted">
+        What @(ProductName.Short) keeps on this machine that could hold a credential, personal data or your code: where it
+        lives, how much of it there is, how long it is kept and what is redacted before it is written. Each kind
+        can be deleted here, and a delete removes the files from disk (for transcripts in the database, the rows
+        are deleted and the database is compacted so they are not left in its free space). It is not a secure
+        wipe of the disk, and a copy that went into a backup stays there until you delete the backups too.
+    </p>
+
+    <p class="studio-muted" data-testid="evidence-export">
+        <strong>Export:</strong> the export is the backup. <a href="/settings/backup">Backup and restore</a>
+        writes one archive holding the database (with every transcript), the key ring and the agent-session
+        artifacts.
+    </p>
+
+    <p class="studio-muted" data-testid="evidence-provider">
+        <strong>Providers:</strong> none of this is synced to a wiki or tracker provider today, so there is
+        nothing to remove there. When the wiki gains a push path (backlog item 83), deleting evidence will also
+        have to remove it from the provider, and this page will say so.
+    </p>
+
+    @if (_message is { Length: > 0 })
+    {
+        <div class="diag-result" data-testid="evidence-message">@_message</div>
+    }
+
+    @* Work item #356: the page renders at once and each class fills in as it is measured. Measuring walks every
+       folder (about three thousand files on the owner's install, across the container's mount of the data folder)
+       and sums every stored transcript payload; it ran before the first render and held the whole page blank. *@
+    @foreach (var evidenceClass in Classes)
+    {
+        var slug = Slug(evidenceClass);
+        if (!_reports.TryGetValue(evidenceClass, out var report))
+        {
+            var failure = _failures.GetValueOrDefault(evidenceClass);
+            <section class="evidence-class" data-testid="@($"evidence-{slug}")" aria-busy="@(failure is null ? "true" : "false")">
+                <div class="evidence-class-head">
+                    <h3>@NameOf(evidenceClass)</h3>
+                    @if (failure is null)
+                    {
+                        <span class="evidence-size studio-muted" data-testid="@($"evidence-{slug}-loading")">Measuring...</span>
+                    }
+                </div>
+                @if (failure is not null)
+                {
+                    <p class="diag-result" role="alert" data-testid="@($"evidence-{slug}-error")">@failure</p>
+                }
+            </section>
+            continue;
+        }
+
+        <section class="evidence-class" data-testid="@($"evidence-{slug}")">
+            <div class="evidence-class-head">
+                <h3>@report.Name</h3>
+                <span class="evidence-size" data-testid="@($"evidence-{slug}-size")">
+                    @Items(report.ItemCount), @Bytes(report.SizeBytes)
+                </span>
+            </div>
+            <p class="evidence-location"><code>@report.Location</code></p>
+            <dl class="evidence-policy">
+                <dt>Kept</dt>
+                <dd data-testid="@($"evidence-{slug}-retention")">@report.Retention</dd>
+                <dt>Redaction</dt>
+                <dd data-testid="@($"evidence-{slug}-redaction")">@report.Redaction</dd>
+                <dt>Deleting</dt>
+                <dd>@report.DeleteEffect</dd>
+            </dl>
+
+            @if (report.DeleteBlockedReason is { Length: > 0 } blocked)
+            {
+                <p class="studio-muted" data-testid="@($"evidence-{slug}-blocked")">@blocked</p>
+            }
+            else if (_deleting == report.Class)
+            {
+                <p class="studio-muted" data-testid="@($"evidence-{slug}-deleting")">Deleting...</p>
+            }
+            else if (_confirming == report.Class)
+            {
+                <div class="studio-form-actions">
+                    <button type="button" class="studio-btn studio-btn-danger"
+                            data-testid="@($"evidence-{slug}-confirm")" @onclick="() => DeleteAsync(report.Class)">
+                        Delete permanently
+                    </button>
+                    <button type="button" class="studio-btn" data-testid="@($"evidence-{slug}-cancel")"
+                            @onclick="() => _confirming = null">
+                        Cancel
+                    </button>
+                </div>
+            }
+            else
+            {
+                <div class="studio-form-actions">
+                    <button type="button" class="studio-btn" data-testid="@($"evidence-{slug}-delete")"
+                            disabled="@(report.ItemCount == 0 || _deleting is not null)" @onclick="() => _confirming = report.Class">
+                        Delete
+                    </button>
+                </div>
+            }
+        </section>
+    }
+</div>
+
+@code {
+    private static readonly IReadOnlyList<EvidenceClass> Classes = Enum.GetValues<EvidenceClass>();
+
+    private readonly Dictionary<EvidenceClass, EvidenceClassReport> _reports = [];
+    private readonly Dictionary<EvidenceClass, string> _failures = [];
+    private readonly CancellationTokenSource _gone = new();
+    private EvidenceClass? _confirming;
+    private EvidenceClass? _deleting;
+    private string? _message;
+
+    protected override void OnInitialized()
+    {
+        foreach (var evidenceClass in Classes)
+        {
+            _ = MeasureAsync(evidenceClass);
+        }
+    }
+
+    public void Dispose()
+    {
+        _gone.Cancel();
+        _gone.Dispose();
+    }
+
+    /// <summary>
+    /// Measures one class on a worker thread and shows it when done (work item #356). A failure is shown in words on
+    /// that class; the others are unaffected.
+    /// </summary>
+    private async Task MeasureAsync(EvidenceClass evidenceClass)
+    {
+        EvidenceClassReport? report = null;
+        string? failure = null;
+        try
+        {
+            report = await Task.Run(() => Evidence.ReportFor(evidenceClass), _gone.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            // The lifecycle never throws by contract; a page must not go down if one does anyway.
+            failure = "This could not be measured: " + ex.Message;
+        }
+
+        if (_gone.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await InvokeAsync(() =>
+        {
+            if (report is not null)
+            {
+                _failures.Remove(evidenceClass);
+                _reports[evidenceClass] = report;
+            }
+            else
+            {
+                _reports.Remove(evidenceClass);
+                _failures[evidenceClass] = failure ?? "This could not be measured.";
+            }
+
+            StateHasChanged();
+        });
+    }
+
+    private async Task DeleteAsync(EvidenceClass evidenceClass)
+    {
+        _confirming = null;
+        _deleting = evidenceClass;
+        var name = _reports.TryGetValue(evidenceClass, out var known) ? known.Name : NameOf(evidenceClass);
+        try
+        {
+            var result = await Task.Run(() => Evidence.Delete(evidenceClass));
+            _message = name + ": " + result.Message;
+            Notifications.Add(
+                _message,
+                result.Completed ? NotificationSeverity.Success : NotificationSeverity.Warning);
+        }
+        catch (Exception ex)
+        {
+            _message = name + ": the delete failed: " + ex.Message;
+            Notifications.Add(_message, NotificationSeverity.Warning);
+        }
+        finally
+        {
+            _deleting = null;
+        }
+
+        _reports.Remove(evidenceClass);
+        await MeasureAsync(evidenceClass);
+    }
+
+    /// <summary>What a class is called while it is still being measured; the report's own name replaces it.</summary>
+    public static string NameOf(EvidenceClass evidenceClass) => evidenceClass switch
+    {
+        EvidenceClass.DiagnosticBundles => "Diagnostic bundles",
+        EvidenceClass.Backups => "Backups",
+        EvidenceClass.AgentTranscripts => "Agent transcripts",
+        EvidenceClass.AgentCliConversations => "Agent CLI conversation files",
+        EvidenceClass.SessionArtifacts => "Session artifacts",
+        EvidenceClass.TrashArchives => "Deleted-file archives",
+        EvidenceClass.Logs => "Logs",
+        EvidenceClass.VerificationArtifacts => "Verification artifacts",
+        _ => evidenceClass.ToString(),
+    };
+
+    /// <summary>A stable, lower-case, hyphenated id for test hooks.</summary>
+    public static string Slug(EvidenceClass evidenceClass) => evidenceClass switch
+    {
+        EvidenceClass.DiagnosticBundles => "diagnostic-bundles",
+        EvidenceClass.Backups => "backups",
+        EvidenceClass.AgentTranscripts => "agent-transcripts",
+        EvidenceClass.AgentCliConversations => "agent-cli-conversations",
+        EvidenceClass.SessionArtifacts => "session-artifacts",
+        EvidenceClass.TrashArchives => "trash-archives",
+        EvidenceClass.Logs => "logs",
+        _ => evidenceClass.ToString().ToLowerInvariant(),
+    };
+
+    private static string Items(int count) =>
+        count.ToString(CultureInfo.InvariantCulture) + (count == 1 ? " item" : " items");
+
+    /// <summary>A size a person reads at a glance, formatted invariantly (the host culture is Swedish).</summary>
+    public static string Bytes(long bytes)
+    {
+        string[] units = ["bytes", "KB", "MB", "GB", "TB"];
+        double value = bytes;
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1)
+        {
+            value /= 1024;
+            unit++;
+        }
+
+        return unit == 0
+            ? bytes.ToString(CultureInfo.InvariantCulture) + " bytes"
+            : value.ToString("0.0", CultureInfo.InvariantCulture) + " " + units[unit];
+    }
+}

@@ -1,0 +1,64 @@
+# CI of the PUBLIC repository, nova-globen/fravashi: it runs on every snapshot pushed there and nowhere else.
+# The private development repository runs its CI elsewhere.
+name: ci
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    if: github.repository == 'nova-globen/fravashi'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: no-uat-host (D28) and no old names
+        shell: bash
+        run: |
+          # The terms are assembled at run time from fragments, so this file never matches itself.
+          # Word boundaries on the stem, so a word merely containing it does not hit.
+          h="di""da""bit"; s="di""da"; t="to""nd"
+          # The host half: no exclusion, ever.
+          if git grep -nIiE "${h}" -- . ':!**/*.lock' ':!**/package-lock.json'; then
+            echo "::error::the UAT host is in the published tree (D28)"
+            exit 1
+          fi
+          # The old-name half. Fravashi's OWN former name is excepted in exactly these files (C43):
+          #   src/Fravashi.Domain/FormerNames.cs     the one file an installed copy's old names are read from, to move its data
+          #   Dockerfile                             the image label an older fravashi.exe reads, so it refuses the new image
+          #   setup/install/install-windows.ps1      the former data folder the installer reads the container engine pin from
+          if git grep -nIiE "\\b${s}(core|deck|bin|game|code)?\\b|\\b${t}\\b" -- . ':!**/*.lock' ':!**/package-lock.json' \
+              ':!src/Fravashi.Domain/FormerNames.cs' ':!Dockerfile' ':!setup/install/install-windows.ps1'; then
+            echo "::error::an old product name is in the published tree (the no-trace rule)"
+            exit 1
+          fi
+
+      - name: secret scan
+        shell: bash
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.21.2 detect --source /repo --no-git --redact --verbose
+
+  build-and-test:
+    if: github.repository == 'nova-globen/fravashi'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Build (warnings are errors)
+        run: dotnet build Fravashi.sln -c Release
+
+      - name: The fast tests
+        run: |
+          dotnet test tests/Fravashi.Domain.Tests -c Release --no-build
+          dotnet test tests/Fravashi.Application.Tests -c Release --no-build
+          dotnet test tests/Fravashi.Launcher.Tests -c Release --no-build
+          dotnet test tests/Fravashi.WebSetup.Tests -c Release --no-build
+          dotnet test tests/Fravashi.Bridge.Tests -c Release --no-build

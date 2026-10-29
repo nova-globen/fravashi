@@ -1,0 +1,149 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Read-only skill view (UI6): the rendered skill, its resources, and the SKILL.md preview pane (UIN1 - the
+   quoted-values/unquoted-keys frontmatter serialization, read-only, no file sync). Delete is confirmed. *@
+
+@if (_skill is null)
+{
+    <div class="page-body-empty" data-testid="skill-view-missing">
+        <p class="studio-muted">That skill no longer exists.</p>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/skills">Back to skills</a>
+    </div>
+}
+else
+{
+    <div class="skill-view" data-testid="skill-view">
+        <div class="skill-view-header">
+            <SkillIconDisplay Icon="_skill.EffectiveIconLarge" BrandColor="@_skill.BrandColor" Size="56"
+                              Fallback="@_skill.DisplayName" TestId="skill-view-icon" />
+            <div class="skill-view-heading">
+                <h2 data-testid="skill-view-title">@_skill.DisplayName</h2>
+                <div class="skill-view-name">$@_skill.Name</div>
+                <div class="studio-muted">@_skill.ShortDescription</div>
+            </div>
+            <div class="skill-view-actions">
+                <a class="studio-btn" href="@($"/settings/framework/skills/edit/{Id}")" data-testid="skill-edit">Edit</a>
+                <button class="studio-btn studio-btn-danger" @onclick="() => _confirmDelete = true"
+                        data-testid="skill-delete">Delete</button>
+            </div>
+        </div>
+
+        <dl class="skill-view-meta">
+            <dt>Description (when to use)</dt>
+            <dd data-testid="skill-view-description">@_skill.Description</dd>
+            @if (_skill.AllowedTools.Count > 0)
+            {
+                <dt>Allowed tools</dt>
+                <dd>@string.Join(", ", _skill.AllowedTools)</dd>
+            }
+            <dt>Brand colour</dt>
+            <dd><span class="skill-swatch" style="background:@_skill.BrandColor"></span> @_skill.BrandColor</dd>
+            <dt>Default prompt</dt>
+            <dd><code data-testid="skill-view-prompt">@_skill.DefaultPrompt</code></dd>
+            <dt>Targets</dt>
+            <dd data-testid="skill-view-targets">
+                @if (_skill.Targets.Count == 0)
+                {
+                    <span class="studio-muted">None</span>
+                }
+                else
+                {
+                    @string.Join(", ", _skill.Targets.Select(t => AgentRuntimeCatalog.For(t).DisplayName))
+                }
+            </dd>
+            @if (_skill.PinnedModel is { Length: > 0 })
+            {
+                <dt>Pinned model</dt>
+                <dd data-testid="skill-view-model">@_skill.PinnedModel</dd>
+            }
+        </dl>
+
+        <section class="skill-view-section">
+            <h2>Content</h2>
+            <pre class="skill-view-content" data-testid="skill-view-content">@_skill.Content</pre>
+        </section>
+
+        <section class="skill-view-section">
+            <h2>Resources</h2>
+            @if (_resources.Count == 0)
+            {
+                <p class="studio-muted" data-testid="skill-view-resources-empty">No resources.</p>
+            }
+            else
+            {
+                <ul class="skill-resource-list" data-testid="skill-view-resources">
+                    @foreach (var r in _resources)
+                    {
+                        <li class="skill-resource-item">
+                            <a href="@($"/api/framework/resources/{r.Id}")" download="@r.FileName">@r.FileName</a>
+                            <span class="studio-muted">@FormatBytes(r.SizeBytes)</span>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        <section class="skill-view-section">
+            <h2>SKILL.md preview</h2>
+            <p class="ob-field-hint">Read-only. Claude's canonical form - string values quoted, keys unquoted. Not written to disk (no file sync).</p>
+            <pre class="skill-view-skillmd" data-testid="skill-view-skillmd">@_skillMarkdown</pre>
+        </section>
+    </div>
+
+    @if (_confirmDelete)
+    {
+        <div class="studio-modal-backdrop" @onclick="() => _confirmDelete = false">
+            <div class="studio-modal" style="width:420px;" @onclick:stopPropagation>
+                <h2 style="margin:0 0 10px;">Delete skill</h2>
+                <p>Delete <strong>@_skill.DisplayName</strong> (<code>$@_skill.Name</code>)? This cannot be undone.</p>
+                <div class="studio-modal-actions" style="margin-top:14px;">
+                    <button class="studio-btn studio-btn-danger" @onclick="DeleteAsync" data-testid="skill-delete-confirm">Delete</button>
+                    <button class="studio-btn studio-btn-alt" @onclick="() => _confirmDelete = false"
+                            data-testid="skill-delete-cancel">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private SkillDefinition? _skill;
+    private IReadOnlyList<FrameworkResource> _resources = [];
+    private string _skillMarkdown = string.Empty;
+    private bool _confirmDelete;
+
+    protected override void OnParametersSet()
+    {
+        _skill = null;
+        if (!string.IsNullOrWhiteSpace(Id) && Store.Get(Id) is { } artifact)
+        {
+            _skill = SkillPayload.From(artifact);
+            _resources = Store.ListResources(artifact.Id);
+            _skillMarkdown = SkillDocument.ToSkillMarkdown(_skill);
+        }
+    }
+
+    private void DeleteAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(Id))
+        {
+            Store.Remove(Id);
+        }
+
+        Nav.NavigateTo("/settings/framework/skills");
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        return $"{bytes / (1024.0 * 1024):0.#} MB";
+    }
+}

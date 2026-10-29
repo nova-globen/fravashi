@@ -1,0 +1,36 @@
+@namespace Fravashi.Web.Components.Auth
+@using Fravashi.Infrastructure.Onboarding.Auth
+@inject IdpSessionState Session
+@inject IdpSessionGrace GraceState
+@inject NavigationManager Nav
+@implements IDisposable
+
+@* Backlog 234: while the sign-in's refresh cannot reach the identity provider, every page says so under the title
+   bar, with when it locks. A refresh that succeeds clears it without a word. The gate page says it itself. *@
+@if (Session.Required && Session.Grace is { Lapsed: false } grace && !OnGatePage)
+{
+    <div class="signin-grace-strip" role="status" data-testid="signin-grace-strip">
+        <SignInGraceWords Grace="grace" />
+    </div>
+}
+
+@code {
+    private bool OnGatePage =>
+        new Uri(Nav.Uri).AbsolutePath.StartsWith(Fravashi.Web.Services.SignInGate.GatePath, StringComparison.OrdinalIgnoreCase);
+
+    protected override void OnInitialized()
+    {
+        GraceState.Changed += OnChanged;
+        Nav.LocationChanged += OnLocationChanged;
+    }
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) => OnChanged();
+
+    public void Dispose()
+    {
+        GraceState.Changed -= OnChanged;
+        Nav.LocationChanged -= OnLocationChanged;
+    }
+}

@@ -1,0 +1,327 @@
+@page "/"
+@page "/welcome"
+@using Fravashi.Application.Persistence
+@using Fravashi.Web.Components.Dashboard
+@using Fravashi.Web.Components.Sessions
+@using Microsoft.JSInterop
+@inject IConfigurationStore Settings
+@inject ILogger<HomeLayoutStore> LayoutLogger
+@inject IJSRuntime JS
+
+@* Work item #350: Home is the product's dashboard, the page the whole product is centred on (the
+   owner, 2026-10-22). It has no page bar, and none of the folder boxes it used to lead with: opening,
+   switching, cloning and closing a folder all live in the start dialog now (Shell/StartDialog.razor), which a
+   window with no folder shows in place of the studio and the title bar's workspace button opens over it. Both
+   routes stay live: "/" is the rail brand's target and "/welcome" is baked into installed fravashi.exe binaries as the
+   bare-launch URL.
+
+   Work item #360: the cards are arranged by a layout document (HomeLayout), kept in the settings table
+   (HomeLayoutStore) and applied on every render: each card's place, its width in columns of a 12-column grid, its
+   height in rows, and whether it is hidden. The height is a hint, not a minimum (work item #363): a card is as tall
+   as its content, a row lines up with its tallest card, and the height is how far a card's list grows before it
+   scrolls inside the card. The built-in default (HomeLayout.BuiltInDefaultDocument) is the arrangement the owner
+   made here and handed over with "Copy layout" on 2026-10-23.
+   "Arrange" turns on the edit mode: drag a card (HTML drag events), resize it from its corner (homeLayout.js), or use
+   the buttons and keys on its handle; each move is saved once. Every card is an ordinary `dash-panel` reading data the
+   studio already stores. *@
+
+<PageTitle>@(ProductName.Short) · Home</PageTitle>
+
+<div class="studio-page dashboard home-page fv-home@(_arranging ? " is-arranging" : string.Empty)">
+    @* The page's level-one heading for assistive technology; there is no page bar to carry it (docs/layout.md). *@
+    <div class="fv-visually-hidden" role="heading" aria-level="1" data-testid="home-heading">Home</div>
+
+    @if (!_arranging)
+    {
+        <div class="home-arrange-bar">
+            <button type="button" class="studio-link-btn home-arrange-toggle" data-testid="home-arrange"
+                    title="Move, resize and hide the cards on this page" @onclick="StartArranging">
+                Arrange
+            </button>
+        </div>
+    }
+    else
+    {
+        <section class="dash-panel home-arrange-panel" aria-label="Arrange Home" data-testid="home-arrange-panel">
+            <div class="home-arrange-head">
+                <span class="home-arrange-title">Arranging Home</span>
+                <div class="home-arrange-actions">
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="home-arrange-reset" @onclick="ResetLayout">Reset to default</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="home-arrange-copy" @onclick="CopyLayout">Copy layout</button>
+                    <button type="button" class="studio-btn" data-testid="home-arrange-done" @onclick="StopArranging">Done</button>
+                </div>
+            </div>
+            <p class="home-arrange-hint">
+                Drag a card to a new place, or drag its corner to resize it. On a card's handle: the arrow keys move it,
+                Shift with the arrow keys makes it narrower, wider, shorter or taller, and Delete hides it. A card is only
+                ever as tall as its content; its height in rows is how far a list in it grows before it scrolls. Every
+                change is saved as you make it.
+            </p>
+            @if (_message is not null)
+            {
+                <p class="home-arrange-message" role="status" data-testid="home-arrange-message">@_message</p>
+            }
+            @if (_copyText is not null)
+            {
+                <label class="home-arrange-copy">
+                    <span>The layout document</span>
+                    <textarea class="studio-input home-arrange-json" readonly rows="10" spellcheck="false"
+                              data-testid="home-arrange-json">@_copyText</textarea>
+                </label>
+            }
+            @if (_layout.HiddenCards.Any())
+            {
+                <div class="home-arrange-hidden" data-testid="home-arrange-hidden">
+                    <span>Hidden:</span>
+                    @foreach (var card in _layout.HiddenCards)
+                    {
+                        var id = card.Id;
+                        <button type="button" class="studio-btn studio-btn-alt" data-testid="home-show-@id"
+                                @onclick="() => Show(id)">Show @HomeLayout.NameOf(id)</button>
+                    }
+                </div>
+            }
+            @* homeLayout.js writes "id|width|height" here when a corner drag ends, so a resize reaches the page as one
+               change event and is saved once. A script of ours, not an interop call, so nothing waits on the window. *@
+            <input class="fv-visually-hidden" tabindex="-1" aria-hidden="true" data-home-layout-resize
+                   data-testid="home-arrange-resize-input" @onchange="OnResizeInput" />
+            <p class="fv-visually-hidden" aria-live="polite" data-testid="home-arrange-announce">@_announce</p>
+        </section>
+    }
+
+    @* Item #373: a folder that is not set up leads with the one calm state, and the project cards under it draw nothing
+       (HomeCardContent.ProjectCards); the cards that read every folder stay. *@
+    @if (!IsSetUp)
+    {
+        <FolderNotSetUp Surface="home" />
+    }
+
+    <div class="home-grid" data-testid="home-grid">
+        @foreach (var card in _layout.Visible)
+        {
+            var id = card.Id;
+            var name = HomeLayout.NameOf(id);
+            <div @key="id"
+                 class="@CardClass(id)"
+                 style="--home-w: @card.Width; --home-h: @card.Height"
+                 data-home-card="@id"
+                 data-width="@card.Width"
+                 data-height="@card.Height"
+                 data-testid="home-card-@id"
+                 @attributes="DragAttributes(id)"
+                 @ondragover:preventDefault="_arranging">
+                @if (_arranging)
+                {
+                    <div class="home-card-chrome">
+                        <button type="button" class="home-card-handle" data-home-card-handle="@id"
+                                data-testid="home-card-handle-@id" aria-roledescription="movable card"
+                                aria-label="@($"{name}: arrow keys move it, Shift with the arrow keys resizes it, Delete hides it")"
+                                @onkeydown="e => OnHandleKey(e, id)">
+                            <span class="home-card-grip" aria-hidden="true">⠿</span>
+                            <span>@name</span>
+                        </button>
+                        <span class="home-card-size" data-testid="home-card-size-@id">@card.Width of @HomeLayout.Columns wide, up to @card.Height @(card.Height == 1 ? "row" : "rows")</span>
+                        <div class="home-card-tools" role="group" aria-label="@($"Arrange {name}")">
+                            <button type="button" title="Move earlier (Left)" aria-label="Move earlier" @onclick="() => Apply(_layout.MoveBy(id, -1), id)">←</button>
+                            <button type="button" title="Move up a row (Up)" aria-label="Move up a row" @onclick="() => Apply(_layout.MoveRow(id, -1), id)">↑</button>
+                            <button type="button" title="Move down a row (Down)" aria-label="Move down a row" @onclick="() => Apply(_layout.MoveRow(id, 1), id)">↓</button>
+                            <button type="button" title="Move later (Right)" aria-label="Move later" @onclick="() => Apply(_layout.MoveBy(id, 1), id)">→</button>
+                            <button type="button" title="Narrower (Shift+Left)" data-testid="home-card-narrower-@id" @onclick="() => Apply(_layout.Resize(id, card.Width - 1, card.Height), id)">Narrower</button>
+                            <button type="button" title="Wider (Shift+Right)" data-testid="home-card-wider-@id" @onclick="() => Apply(_layout.Resize(id, card.Width + 1, card.Height), id)">Wider</button>
+                            <button type="button" title="Shorter (Shift+Up)" @onclick="() => Apply(_layout.Resize(id, card.Width, card.Height - 1), id)">Shorter</button>
+                            <button type="button" title="Taller (Shift+Down)" @onclick="() => Apply(_layout.Resize(id, card.Width, card.Height + 1), id)">Taller</button>
+                            <button type="button" title="Hide (Delete)" data-testid="home-card-hide-@id" @onclick="() => Apply(_layout.SetHidden(id, true), id)">Hide</button>
+                        </div>
+                    </div>
+                    <span class="home-card-resize" data-home-card-resize aria-hidden="true" title="Drag to resize"></span>
+                }
+                <div class="home-card-body" inert="@_arranging">
+                    <HomeCardContent Id="@id" />
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    [Inject]
+    private IServiceProvider Services { get; set; } = default!;
+
+    private bool IsSetUp =>
+        (Services.GetService(typeof(ICurrentProject)) as ICurrentProject ?? SingleProject.Instance).IsSetUp();
+
+    private HomeLayoutStore _store = default!;
+    private HomeLayout _layout = HomeLayout.Default;
+    private bool _arranging;
+    private string? _dragging;
+    private string? _dropTarget;
+    private string? _message;
+    private string? _copyText;
+    private string? _announce;
+
+    protected override void OnInitialized()
+    {
+        _store = new HomeLayoutStore(Settings, LayoutLogger);
+        _layout = _store.Load();
+    }
+
+    private string CardClass(string id)
+    {
+        var css = "home-card";
+        if (_arranging && id == _dragging)
+        {
+            css += " is-dragging";
+        }
+
+        if (_arranging && id == _dropTarget && id != _dragging)
+        {
+            css += " is-drop-target";
+        }
+
+        return css;
+    }
+
+    /// <summary>The drag handlers, attached only while arranging, so the page outside the edit mode carries none.</summary>
+    private Dictionary<string, object>? DragAttributes(string id) => _arranging
+        ? new Dictionary<string, object>
+        {
+            ["draggable"] = "true",
+            ["ondragstart"] = EventCallback.Factory.Create<DragEventArgs>(this, () => { _dragging = id; _dropTarget = null; }),
+            ["ondragenter"] = EventCallback.Factory.Create<DragEventArgs>(this, () => { _dropTarget = id; }),
+            ["ondrop"] = EventCallback.Factory.Create<DragEventArgs>(this, () => Drop(id)),
+            ["ondragend"] = EventCallback.Factory.Create<DragEventArgs>(this, () => { _dragging = null; _dropTarget = null; }),
+        }
+        : null;
+
+    private void StartArranging()
+    {
+        _arranging = true;
+        _message = null;
+        _copyText = null;
+        _announce = null;
+    }
+
+    private void StopArranging()
+    {
+        _arranging = false;
+        _dragging = null;
+        _dropTarget = null;
+        _copyText = null;
+        _message = null;
+    }
+
+    private void Drop(string targetId)
+    {
+        var dragged = _dragging;
+        _dragging = null;
+        _dropTarget = null;
+        if (dragged is not null)
+        {
+            Apply(_layout.MoveTo(dragged, targetId), dragged);
+        }
+    }
+
+    private void OnHandleKey(KeyboardEventArgs e, string id)
+    {
+        var card = _layout.Find(id);
+        if (card is null)
+        {
+            return;
+        }
+
+        var next = (e.Key, e.ShiftKey) switch
+        {
+            ("ArrowLeft", true) => _layout.Resize(id, card.Width - 1, card.Height),
+            ("ArrowRight", true) => _layout.Resize(id, card.Width + 1, card.Height),
+            ("ArrowUp", true) => _layout.Resize(id, card.Width, card.Height - 1),
+            ("ArrowDown", true) => _layout.Resize(id, card.Width, card.Height + 1),
+            ("ArrowLeft", false) => _layout.MoveBy(id, -1),
+            ("ArrowRight", false) => _layout.MoveBy(id, 1),
+            ("ArrowUp", false) => _layout.MoveRow(id, -1),
+            ("ArrowDown", false) => _layout.MoveRow(id, 1),
+            ("Delete", _) => _layout.SetHidden(id, true),
+            _ => _layout,
+        };
+        Apply(next, id);
+    }
+
+    /// <summary>homeLayout.js's corner drag, as "id|width|height".</summary>
+    private void OnResizeInput(ChangeEventArgs e)
+    {
+        var parts = (e.Value?.ToString() ?? string.Empty).Split('|');
+        if (parts.Length == 3
+            && int.TryParse(parts[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var width)
+            && int.TryParse(parts[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var height))
+        {
+            Apply(_layout.Resize(parts[0], width, height), parts[0]);
+        }
+    }
+
+    private void Show(string id) => Apply(_layout.SetHidden(id, false), id);
+
+    /// <summary>One move: applied, saved once, and said aloud for a screen reader. A move that changes nothing saves nothing.</summary>
+    private void Apply(HomeLayout next, string id)
+    {
+        if (ReferenceEquals(next, _layout))
+        {
+            return;
+        }
+
+        _layout = next;
+        _message = _store.Save(next) ? null : "This change could not be saved; it lasts until the page is reloaded.";
+        var card = next.Find(id);
+        if (card is not null)
+        {
+            var visible = next.Visible.ToList();
+            var place = visible.FindIndex(c => c.Id == id) + 1;
+            _announce = card.Hidden
+                ? $"{HomeLayout.NameOf(id)} hidden."
+                : $"{HomeLayout.NameOf(id)}: place {place} of {visible.Count}, {card.Width} of {HomeLayout.Columns} columns wide, up to {card.Height} {(card.Height == 1 ? "row" : "rows")} tall.";
+        }
+    }
+
+    private void ResetLayout()
+    {
+        _layout = HomeLayout.Default;
+        _copyText = null;
+        _message = _store.Reset() ? "Home is back to the built-in layout." : "The built-in layout is shown, but the saved one could not be removed.";
+        _announce = _message;
+    }
+
+    private async Task CopyLayout()
+    {
+        _copyText = _layout.ToJson();
+        _message = "Copying...";
+        StateHasChanged();
+
+        // Bounded: a JavaScript call made while the window is disconnected is not replayed (CLAUDE.md), so the button
+        // must not wait on one for ever. The document is in the text box either way.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        string? reason;
+        try
+        {
+            var outcome = await JS.InvokeAsync<CopyOutcome?>(TranscriptClipboard.CopyFunction, timeout.Token, _copyText);
+            reason = outcome is null ? "the clipboard gave no answer" : outcome.Ok ? null : outcome.Reason ?? "the browser refused the copy";
+        }
+        catch (JSDisconnectedException)
+        {
+            reason = "the studio lost its connection to the window";
+        }
+        catch (JSException ex)
+        {
+            reason = ex.Message;
+        }
+        catch (OperationCanceledException)
+        {
+            reason = "the window did not answer";
+        }
+        catch (InvalidOperationException)
+        {
+            reason = "the window was not ready";
+        }
+
+        _message = reason is null
+            ? "The layout document is on the clipboard, and below."
+            : $"Not copied ({reason}). Select the document below and copy it.";
+    }
+}

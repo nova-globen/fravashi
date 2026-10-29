@@ -1,0 +1,435 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Application
+@using Fravashi.Application.Migration
+@using Fravashi.Application.Setup
+@implements IDisposable
+
+@* Step 5, Import (item #373, section 3.5): what the folder already has, as a preview a person can change, and nothing
+   read but paths and sizes until they look. The scan runs on its own task with a live count and Cancel, rows appear
+   as they are found, titles are read only for the rows on screen, and leaving the step cancels a scan still running.
+   The table is a real table: a tri-state check per folder and for everything, each row's check labelled with its
+   path, and Space toggles a check (they are buttons with role checkbox, which is what makes "mixed" honest). *@
+<h2 class="setup-title" id="setup-step-heading" tabindex="-1" @ref="_heading">Bring in what @Page.FolderName already has</h2>
+<p class="setup-helper">
+    @ProductName.Short can read markdown documents and backlog files from the folder and copy them into the project. The
+    files stay exactly as they are.
+</p>
+
+@if (Page.JoinedWithWork() is { } joined)
+{
+    <p class="setup-note" role="note" data-testid="setup-import-joined">
+        Import copies into a new, empty project only, which keeps every number meaning what it meant in the files.
+        @joined.Name already holds work, so this step is skipped.
+    </p>
+}
+else if (Page.Scan is not { } scan)
+{
+    <p class="setup-note" role="note" data-testid="setup-import-unavailable">Importing is not available in this window.</p>
+}
+else
+{
+    <p class="fv-visually-hidden" aria-live="polite" data-testid="setup-scan-status">@scan.Announcement</p>
+
+    @if (scan.IsRunning)
+    {
+        <div class="setup-scan-bar" data-testid="setup-scan-running">
+            <span class="setup-spinner" aria-hidden="true"></span>
+            <span class="setup-scan-text">
+                Looking through @Page.FolderName ...
+                @if (scan.Progress is { FilesSeen: > 0 } progress)
+                {
+                    <span>@progress.FilesSeen.ToString("N0") files so far</span>
+                }
+            </span>
+            <button type="button" class="studio-btn studio-btn-alt setup-btn-small" data-testid="setup-scan-cancel" @onclick="scan.Cancel">Cancel</button>
+        </div>
+    }
+    else if (scan.Unavailable)
+    {
+        <p class="setup-note" role="note" data-testid="setup-import-unreadable">
+            The files in @Page.FolderName could not be read from this window, so nothing can be imported now. You can
+            import later from Settings, Project.
+        </p>
+    }
+    else if (scan.Error is { } error)
+    {
+        <div class="setup-alert" role="alert" data-testid="setup-scan-error">
+            <p>@error</p>
+            <button type="button" class="studio-btn studio-btn-alt setup-btn-small" data-testid="setup-scan-retry" @onclick="Retry">Retry</button>
+        </div>
+    }
+    else if (scan.Result is null)
+    {
+        <div class="setup-scan-bar" data-testid="setup-scan-stopped">
+            <span class="setup-scan-text">Stopped looking. Nothing is chosen until the folder has been looked through.</span>
+            <button type="button" class="studio-btn studio-btn-alt setup-btn-small" data-testid="setup-scan-retry" @onclick="Retry">Look again</button>
+        </div>
+    }
+    else if (scan.Result.Candidates.Count == 0)
+    {
+        <p class="setup-note" role="note" data-testid="setup-import-none">
+            No markdown documents or backlog files were found in @Page.FolderName. You can import later from Settings, Project.
+        </p>
+    }
+
+    @if (Candidates.Count > 0)
+    {
+        <div class="setup-import-summary" data-testid="setup-import-summary">
+            <span>@Summary</span>
+            @if (scan.Result is { Capped: true })
+            {
+                <span class="setup-field-hint" data-testid="setup-import-capped">Showing the first 5,000 markdown files.</span>
+            }
+        </div>
+
+        <div class="setup-table-scroll @(Virtualized ? "is-virtual" : null)" data-testid="setup-import-table-scroll">
+            <table class="setup-table" data-testid="setup-import-table">
+                <colgroup>
+                    <col class="setup-col-check" />
+                    <col class="setup-col-file" />
+                    <col class="setup-col-becomes" />
+                    <col class="setup-col-title" />
+                    <col class="setup-col-size" />
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th scope="col" class="setup-cell-check">
+                            <SetupCheck State="@AllState" Label="Import every file" TestId="setup-import-all" OnToggle="ToggleAll" />
+                        </th>
+                        <th scope="col">File</th>
+                        <th scope="col">Becomes</th>
+                        <th scope="col">Title</th>
+                        <th scope="col" class="setup-cell-size">Size</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (Virtualized)
+                    {
+                        <Virtualize Items="_rows" ItemSize="44" OverscanCount="12" SpacerElement="tr" Context="row">
+                            @RowMarkup(row)
+                        </Virtualize>
+                    }
+                    else
+                    {
+                        @foreach (var row in _rows)
+                        {
+                            @RowMarkup(row)
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public SetupPage Page { get; set; } = default!;
+
+    /// <summary>Above this many rows the table is virtualised, so only what is on screen is drawn (and read).</summary>
+    public const int VirtualizeAbove = 150;
+
+    private ElementReference _heading;
+    private List<ImportRow> _rows = [];
+    private readonly HashSet<string> _collapsed = new(StringComparer.Ordinal);
+    private bool _collapseDecided;
+
+    /// <summary>A row of the table: a folder's header, or one file.</summary>
+    private sealed record ImportRow(string Folder, ScanCandidate? File, IReadOnlyList<ScanCandidate> Files);
+
+    private IReadOnlyList<ScanCandidate> Candidates =>
+        Page.Scan?.Result?.Candidates ?? Page.Scan?.Progress?.Found ?? [];
+
+    private bool Virtualized => _rows.Count > VirtualizeAbove;
+
+    private bool Included(ScanCandidate c) =>
+        !c.TooLarge && (Page.Draft.Import.TryGetValue(c.Path, out var o) ? o.Include : c.Include);
+
+    private ImportTarget TargetOf(ScanCandidate c) =>
+        Page.Draft.Import.TryGetValue(c.Path, out var o) && ImportTarget.Parse(o.Target) is { } t ? t : c.Suggested;
+
+    private string Summary
+    {
+        get
+        {
+            var chosen = Candidates.Where(Included).ToList();
+            var documents = chosen.Count(c => !TargetOf(c).IsWorkItems);
+            var itemFiles = chosen.Where(c => TargetOf(c).IsWorkItems).ToList();
+            var items = itemFiles.Sum(c => c.Suggested.IsWorkItems ? c.WorkItemCount : Page.Scan?.WorkItemsFor(c.Path)?.Count ?? 0);
+            if (documents == 0 && itemFiles.Count == 0)
+            {
+                return $"Nothing chosen. Check the files to bring in, out of {Count(Candidates.Count, "markdown file")}.";
+            }
+
+            var parts = new List<string>();
+            if (documents > 0)
+            {
+                parts.Add(Count(documents, "document"));
+            }
+
+            if (itemFiles.Count > 0)
+            {
+                parts.Add(items > 0 ? Count(items, "work item") : $"work items from {Count(itemFiles.Count, "file")}");
+            }
+
+            return $"{string.Join(" and ", parts)} will be copied in, from {Count(Candidates.Count, "markdown file")} found.";
+        }
+    }
+
+    private static string Count(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n:N0} {noun}s";
+
+    private RenderFragment RowMarkup(ImportRow row) => __builder =>
+    {
+        if (row.File is null)
+        {
+            var collapsed = _collapsed.Contains(row.Folder);
+            var chosen = row.Files.Count(Included);
+            <tr class="setup-group-row" data-testid="setup-import-group" data-folder="@row.Folder">
+                <td class="setup-cell-check">
+                    <SetupCheck State="@GroupState(row.Files)" Label="@($"Import everything in {FolderLabel(row.Folder)}")"
+                                TestId="setup-import-group-check" OnToggle="() => ToggleGroup(row.Files)" />
+                </td>
+                <td colspan="4">
+                    <button type="button" class="setup-group-toggle" aria-expanded="@(collapsed ? "false" : "true")"
+                            data-testid="setup-import-group-toggle" @onclick="() => ToggleCollapsed(row.Folder)">
+                        <span class="setup-group-chevron @(collapsed ? null : "is-open")" aria-hidden="true">
+                            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 2.5 3.5 3.5-3.5 3.5" /></svg>
+                        </span>
+                        <span class="setup-group-name">@FolderLabel(row.Folder)</span>
+                        <span class="setup-group-count">@chosen of @row.Files.Count chosen</span>
+                    </button>
+                </td>
+            </tr>
+            return;
+        }
+
+        var file = row.File;
+        var target = TargetOf(file);
+        var included = Included(file);
+        var note = NoteOf(file, target);
+        <tr class="setup-file-row @(included ? "is-chosen" : null) @(file.TooLarge ? "is-disabled" : null)" data-testid="setup-import-row" data-path="@file.Path">
+            <td class="setup-cell-check">
+                <SetupCheck State="@(included ? "true" : "false")" Label="@($"Import {file.Path}")" TestId="setup-import-check"
+                            Disabled="file.TooLarge" OnToggle="() => ToggleFile(file)" />
+            </td>
+            <td class="setup-cell-file">
+                <span class="setup-file-name" title="@file.Path">@NameOf(file.Path)</span>
+                @if (note is not null)
+                {
+                    <span class="setup-file-note @(file.TooLarge ? "is-warning" : null)" data-testid="setup-import-note">@note</span>
+                }
+            </td>
+            <td>
+                <select class="setup-select" aria-label="@($"{file.Path} becomes")" data-testid="setup-import-becomes"
+                        disabled="@file.TooLarge" value="@target.Name" @onchange="e => ChangeTarget(file, e.Value?.ToString())">
+                    <option value="@ImportTarget.WorkItemsName">Work items</option>
+                    @foreach (var type in ImportTarget.DocumentTypes)
+                    {
+                        var option = ImportTarget.Document(type);
+                        <option value="@option.Name">@option.Label</option>
+                    }
+                </select>
+            </td>
+            <td class="setup-cell-title">
+                @if (Page.Scan?.TitleFor(file.Path) is { } title)
+                {
+                    <span class="setup-title-text" title="@title">@title</span>
+                }
+                else
+                {
+                    <span class="setup-title-pending">Reading ...</span>
+                }
+            </td>
+            <td class="setup-cell-size">@SizeOf(file.Size)</td>
+        </tr>
+    };
+
+    private string? NoteOf(ScanCandidate file, ImportTarget target)
+    {
+        if (file.TooLarge)
+        {
+            return "Too large to import (over 1 MB)";
+        }
+
+        if (!target.IsWorkItems)
+        {
+            return null;
+        }
+
+        if (file.Suggested.IsWorkItems)
+        {
+            return file.Note;
+        }
+
+        return Page.Scan?.WorkItemsFor(file.Path)?.Note ?? "Counting its items ...";
+    }
+
+    /// <summary>The root folder is named after the folder itself, so no group reads as blank.</summary>
+    private string FolderLabel(string folder) => folder.Length == 0 ? $"{Page.FolderName} (top level)" : folder + "/";
+
+    private static string NameOf(string path) => path[(path.LastIndexOf('/') + 1)..];
+
+    /// <summary>A size as a person reads it: 820 B, 12 KB, 1.2 MB.</summary>
+    public static string SizeOf(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{Math.Max(1, (int)Math.Round(bytes / 1024.0))} KB",
+        _ => (bytes / (1024.0 * 1024.0)).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " MB",
+    };
+
+    private static string StateOf(int chosen, int choosable) =>
+        chosen == 0 ? "false" : chosen == choosable ? "true" : "mixed";
+
+    private string GroupState(IReadOnlyList<ScanCandidate> files) =>
+        StateOf(files.Count(Included), files.Count(f => !f.TooLarge));
+
+    private string AllState => StateOf(Candidates.Count(Included), Candidates.Count(f => !f.TooLarge));
+
+    private void Set(ScanCandidate file, bool include, ImportTarget target)
+    {
+        if (include == file.Include && target == file.Suggested)
+        {
+            // Back to the scan's own default: nothing to remember.
+            Page.Draft.Import.Remove(file.Path);
+        }
+        else
+        {
+            Page.Draft.Import[file.Path] = new ImportOverride(include, target.Name);
+        }
+    }
+
+    private void ToggleFile(ScanCandidate file)
+    {
+        if (file.TooLarge)
+        {
+            return;
+        }
+
+        Set(file, !Included(file), TargetOf(file));
+        Changed();
+    }
+
+    private void ToggleGroup(IReadOnlyList<ScanCandidate> files)
+    {
+        var choosable = files.Where(f => !f.TooLarge).ToList();
+        var include = choosable.Any(f => !Included(f));
+        foreach (var file in choosable)
+        {
+            Set(file, include, TargetOf(file));
+        }
+
+        Changed();
+    }
+
+    private void ToggleAll() => ToggleGroup(Candidates);
+
+    private void ChangeTarget(ScanCandidate file, string? name)
+    {
+        if (ImportTarget.Parse(name) is not { } target)
+        {
+            return;
+        }
+
+        Set(file, Included(file), target);
+        if (target.IsWorkItems && !file.Suggested.IsWorkItems)
+        {
+            _ = Page.Scan?.WorkItemsFor(file.Path);
+        }
+
+        Changed();
+    }
+
+    private void ToggleCollapsed(string folder)
+    {
+        if (!_collapsed.Remove(folder))
+        {
+            _collapsed.Add(folder);
+        }
+
+        Rebuild();
+    }
+
+    private void Changed()
+    {
+        Page.Draft.MarkSkipped(SetupSteps.Import, false);
+        Page.Changed();
+        Rebuild();
+    }
+
+    private void Retry()
+    {
+        Page.Scan?.Restart(Page.WorkspaceId, Page.FolderName);
+        Rebuild();
+    }
+
+    /// <summary>The flattened rows: each folder's header, then its files unless it is collapsed.</summary>
+    private void Rebuild()
+    {
+        var groups = Candidates
+            .GroupBy(c => c.Path.LastIndexOf('/') is var slash and >= 0 ? c.Path[..slash] : string.Empty, StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal)
+            .ToList();
+
+        // Once the scan is done, a folder with nothing chosen in it starts folded (a monorepo's package READMEs, a tool's
+        // one-file skill folders), so the table opens on what will actually be imported. A one-file folder folds too: its
+        // header says "0 of 1 chosen" in the row its file would have taken (the v0.9.100 check showed them open among
+        // folded ones, which read as a rule not kept).
+        if (!_collapseDecided && Page.Scan?.Result is not null)
+        {
+            _collapseDecided = true;
+            foreach (var group in groups.Where(g => !g.Any(Included)))
+            {
+                _collapsed.Add(group.Key);
+            }
+        }
+
+        var rows = new List<ImportRow>();
+        foreach (var group in groups)
+        {
+            var files = group.OrderBy(c => c.Path, StringComparer.Ordinal).ToList();
+            rows.Add(new ImportRow(group.Key, null, files));
+            if (!_collapsed.Contains(group.Key))
+            {
+                rows.AddRange(files.Select(f => new ImportRow(group.Key, f, files)));
+            }
+        }
+
+        _rows = rows;
+    }
+
+    protected override void OnInitialized()
+    {
+        Page.Refreshed += OnRefreshed;
+        if (Page.JoinedWithWork() is null)
+        {
+            Page.StartScan();
+        }
+
+        Rebuild();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await SetupFocus.HeadingAsync(_heading);
+        }
+    }
+
+    private void OnRefreshed() => _ = InvokeAsync(() =>
+    {
+        Rebuild();
+        StateHasChanged();
+    });
+
+    public void Dispose()
+    {
+        Page.Refreshed -= OnRefreshed;
+
+        // Section 3.5: leaving the step cancels a scan still running.
+        if (Page.Scan is { IsRunning: true } scan)
+        {
+            scan.Cancel();
+        }
+    }
+}

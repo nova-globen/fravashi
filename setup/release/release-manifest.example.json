@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "product": "fravashi",
+  "version": "1.0.0",
+  "releasedAt": "2026-11-01T12:00:00.000Z",
+  "releaseNotesUrl": "https://github.com/nova-globen/fravashi/releases/tag/v1.0.0",
+  "critical": false,
+  "variants": [
+    {
+      "name": "full",
+      "displayName": "Nova Globen Fravashi",
+      "images": [
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "asset": "fravashi-image-amd64.tar.gz",
+          "sizeBytes": 701234567,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "imageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "assetUrl": "https://github.com/nova-globen/fravashi/releases/download/v1.0.0/fravashi-image-amd64.tar.gz"
+        }
+      ],
+      "launchers": [
+        {
+          "rid": "win-x64",
+          "asset": "fravashi-win-x64.tar.gz",
+          "assetUrl": "https://github.com/nova-globen/fravashi/releases/download/v1.0.0/fravashi-win-x64.tar.gz",
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        }
+      ]
+    }
+  ]
+}

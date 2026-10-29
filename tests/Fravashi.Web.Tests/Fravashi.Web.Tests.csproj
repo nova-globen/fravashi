@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Fravashi.Web.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="bunit" />
+    <!-- Backlog 313's live tier: the Autopilot card's own bUnit-rendered markup, measured in a real headless
+         Chromium against the real studio.css, the same browser every other live tier in this repository
+         drives (Microsoft.Playwright, MIT, already pinned for backlog 159 in Directory.Packages.props). -->
+    <PackageReference Include="Microsoft.Playwright" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Fravashi.Web\Fravashi.Web.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Backlog 194: the preview is tested on the agent-authored trees #50 stored, linked rather than copied so
+         there is one set of them. -->
+    <None Include="..\Fravashi.Application.Tests\Mockups\Fixtures\*.json" LinkBase="Mockups\Fixtures" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Backlog 234: the sign-in gate's grace is tested on slice A's faked network. -->
+    <Compile Include="..\Shared\Network\*.cs" LinkBase="Shared\Network" />
+  </ItemGroup>
+
+</Project>

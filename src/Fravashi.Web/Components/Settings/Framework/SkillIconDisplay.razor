@@ -1,0 +1,50 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Domain.Framework
+@using Fravashi.Web.Services
+@inject FluentIconCatalog Icons
+
+@* Renders a SkillIcon (a picked FluentUI icon or an uploaded image) at a fixed box size, tinted with the
+   brand colour when it is a vector icon. Reused by the list cards, the view page, and the form preview. *@
+
+<span class="skill-icon-box" style="@BoxStyle" data-testid="@TestId">
+    @if (Icon.IsUpload)
+    {
+        <img class="skill-icon-img" src="@($"/api/framework/resources/{Icon.ResourceId}")" alt="" />
+    }
+    else if (Icon.FluentIconName is { Length: > 0 } name && Icons.TryGetSvg(name, out var svg))
+    {
+        <span class="skill-icon-svg">@((MarkupString)svg)</span>
+    }
+    else
+    {
+        @* Honest placeholder when no icon is set - the first letter of the display name. *@
+        <span class="skill-icon-placeholder">@Placeholder</span>
+    }
+</span>
+
+@code {
+    [Parameter, EditorRequired] public SkillIcon Icon { get; set; } = SkillIcon.None;
+
+    /// <summary>The brand colour used to tint a vector icon and the placeholder.</summary>
+    [Parameter] public string? BrandColor { get; set; }
+
+    /// <summary>Box side in pixels.</summary>
+    [Parameter] public int Size { get; set; } = 40;
+
+    /// <summary>A letter shown when no icon is set.</summary>
+    [Parameter] public string? Fallback { get; set; }
+
+    [Parameter] public string? TestId { get; set; }
+
+    private string Placeholder =>
+        string.IsNullOrWhiteSpace(Fallback) ? "?" : Fallback!.Trim()[..1].ToUpperInvariant();
+
+    private string BoxStyle
+    {
+        get
+        {
+            var color = string.IsNullOrWhiteSpace(BrandColor) ? "var(--accent, #7C4DFF)" : BrandColor;
+            return $"width:{Size}px;height:{Size}px;color:{color};";
+        }
+    }
+}

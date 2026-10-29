@@ -1,0 +1,39 @@
+@namespace Fravashi.Web.Components.Shell
+
+@* The 48 px strip at the top of a page's content area: a required Title plus an optional
+   page-specific nav as ChildContent (e.g. Settings' tab bar). Notifications and the theme toggle live
+   in the activity rail's bottom group, NOT here, so pages that need every pixel (the Code page) can
+   omit this bar entirely. The title is the page's one level-one heading (backlog 291), styled exactly
+   as the span it replaced; a page that omits the bar draws its own. Actions (work item #367, the Git page's Sync,
+   New branch and Stash) sit at the right, OUTSIDE the scrolling part, so a menu opened from one is not clipped. *@
+<div class="studio-page-bar @CssClass">
+    <div class="studio-page-bar-scroll">
+        <h1 class="studio-page-bar-title">@Title</h1>
+        @if (ChildContent is not null)
+        {
+            @ChildContent
+        }
+    </div>
+    @if (Actions is not null)
+    {
+        <div class="studio-page-bar-spacer"></div>
+        <div class="studio-page-bar-actions">
+            @Actions
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+
+    /// <summary>Page actions at the right of the bar, outside its horizontal scroll (work item #367).</summary>
+    [Parameter]
+    public RenderFragment? Actions { get; set; }
+
+    [Parameter]
+    public string? CssClass { get; set; }
+}

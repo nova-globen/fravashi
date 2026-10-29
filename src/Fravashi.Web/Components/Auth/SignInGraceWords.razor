@@ -1,0 +1,19 @@
+@namespace Fravashi.Web.Components.Auth
+@using Fravashi.Infrastructure.Onboarding.Auth
+@using Fravashi.Web.Components.Shell
+
+@* Backlog 234: the one sentence the strip, the sign-in page and Settings all say about the sign-in grace. The
+   instants are carried, never formatted here (LocalTime.razor). The reason is a host and plain words, never a token. *@
+@if (Grace.Lapsed)
+{
+    <span data-testid="signin-grace-words">Signed out: could not refresh since <LocalTime At="Grace.Since" TestId="signin-grace-since" /> (@Grace.Reason); the hour's grace ended at <LocalTime At="Grace.LocksAt" TestId="signin-grace-locks" />.</span>
+}
+else
+{
+    <span data-testid="signin-grace-words">Signed in; could not refresh since <LocalTime At="Grace.Since" TestId="signin-grace-since" /> (@Grace.Reason); locks at <LocalTime At="Grace.LocksAt" TestId="signin-grace-locks" />.</span>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public IdpGraceView Grace { get; set; } = default!;
+}

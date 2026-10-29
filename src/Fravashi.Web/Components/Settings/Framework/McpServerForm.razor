@@ -1,0 +1,300 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject ISecretStore Secrets
+@inject NavigationManager Nav
+
+@* Create / edit an MCP server (UI11). Transport picks the field set: stdio (command/args/env) or http
+   (url/headers). Env/header values flagged secret are written to the secret store, not the payload - the
+   serialized .mcp.json shows an env-expansion placeholder for them. *@
+
+<div class="skill-form" data-testid="mcp-form">
+    <div class="skill-form-header">
+        <h2>@(IsEdit ? "Edit MCP server" : "New MCP server")</h2>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/mcp-servers" data-testid="mcp-form-cancel">Cancel</a>
+    </div>
+
+    @if (_saveError is not null)
+    {
+        <div class="studio-error" data-testid="mcp-form-error">@_saveError</div>
+    }
+
+    <div class="skill-form-grid">
+        <label class="skill-field">
+            <span class="skill-field-label">Name (kebab-case, unique)</span>
+            <input class="studio-input" @bind="_name" @bind:event="oninput" placeholder="airtable"
+                   data-testid="mcp-name" disabled="@IsEdit" />
+            @FieldError("name")
+        </label>
+
+        <label class="skill-field">
+            <span class="skill-field-label">Transport</span>
+            <select class="studio-input" @bind="_transport" data-testid="mcp-transport">
+                <option value="@McpTransport.Stdio">stdio (local process)</option>
+                <option value="@McpTransport.Http">http (remote endpoint)</option>
+            </select>
+        </label>
+
+        @if (_transport == McpTransport.Stdio)
+        {
+            <label class="skill-field">
+                <span class="skill-field-label">Command</span>
+                <input class="studio-input" @bind="_command" @bind:event="oninput" placeholder="npx"
+                       data-testid="mcp-command" />
+                @FieldError("command")
+            </label>
+
+            <label class="skill-field">
+                <span class="skill-field-label">Arguments (optional, one per line or comma-separated)</span>
+                <input class="studio-input" @bind="_argsText" @bind:event="oninput"
+                       placeholder="-y, @@some/mcp-server" data-testid="mcp-args" />
+            </label>
+
+            <div class="skill-field skill-field-wide">
+                <span class="skill-field-label">Environment variables</span>
+                @FieldError("env")
+                @RenderEntryRows(_env, "env")
+                <button type="button" class="studio-btn studio-btn-alt skill-resource-add"
+                        @onclick="() => _env.Add(new EntryRow())" data-testid="mcp-env-add">Add variable</button>
+            </div>
+        }
+        else
+        {
+            <label class="skill-field skill-field-wide">
+                <span class="skill-field-label">URL</span>
+                <input class="studio-input" @bind="_url" @bind:event="oninput"
+                       placeholder="https://mcp.example.com/mcp" data-testid="mcp-url" />
+                @FieldError("url")
+            </label>
+
+            <div class="skill-field skill-field-wide">
+                <span class="skill-field-label">Headers</span>
+                @FieldError("headers")
+                @RenderEntryRows(_headers, "header")
+                <button type="button" class="studio-btn studio-btn-alt skill-resource-add"
+                        @onclick="() => _headers.Add(new EntryRow())" data-testid="mcp-header-add">Add header</button>
+            </div>
+        }
+    </div>
+
+    <div class="skill-form-actions">
+        <button class="studio-btn" @onclick="Save" disabled="@_saving" data-testid="mcp-save">
+            @(_saving ? "Saving…" : IsEdit ? "Save changes" : "Create MCP server")
+        </button>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private bool IsEdit => !string.IsNullOrWhiteSpace(Id);
+
+    private sealed class EntryRow
+    {
+        public string Key { get; set; } = string.Empty;
+        public string Value { get; set; } = string.Empty;
+        public bool IsSecret { get; set; }
+        public string? ExistingSecretRef { get; set; }
+        public bool HasStoredSecret => !string.IsNullOrWhiteSpace(ExistingSecretRef);
+    }
+
+    private string _name = string.Empty;
+    private McpTransport _transport = McpTransport.Stdio;
+    private string _command = string.Empty;
+    private string _argsText = string.Empty;
+    private string _url = string.Empty;
+    private readonly List<EntryRow> _env = [];
+    private readonly List<EntryRow> _headers = [];
+
+    private IReadOnlyList<SkillValidationError> _errors = [];
+    private string? _saveError;
+    private bool _saving;
+
+    protected override void OnInitialized()
+    {
+        if (IsEdit && Store.Get(Id!) is { } artifact)
+        {
+            var server = FrameworkPayload<McpServerDefinition>.From(artifact);
+            _name = server.Name;
+            _transport = server.Transport;
+            _command = server.Command;
+            _argsText = string.Join(", ", server.Args);
+            _url = server.Url;
+            _env.AddRange(server.Env.Select(ToRow));
+            _headers.AddRange(server.Headers.Select(ToRow));
+        }
+    }
+
+    private static EntryRow ToRow(McpEnvEntry e) => new()
+    {
+        Key = e.Key,
+        Value = e.IsSecret ? string.Empty : e.Value ?? string.Empty,
+        IsSecret = e.IsSecret,
+        ExistingSecretRef = e.SecretRef,
+    };
+
+    private RenderFragment RenderEntryRows(List<EntryRow> rows, string kind) => builder =>
+    {
+        var seq = 0;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            builder.OpenElement(seq++, "div");
+            builder.AddAttribute(seq++, "class", "mcp-entry-row");
+            builder.AddAttribute(seq++, "data-testid", $"mcp-{kind}-row");
+
+            builder.OpenElement(seq++, "input");
+            builder.AddAttribute(seq++, "class", "studio-input");
+            builder.AddAttribute(seq++, "placeholder", "KEY");
+            builder.AddAttribute(seq++, "data-testid", $"mcp-{kind}-key");
+            builder.AddAttribute(seq++, "value", row.Key);
+            builder.AddAttribute(seq++, "oninput",
+                EventCallback.Factory.Create<ChangeEventArgs>(this, e => row.Key = e.Value?.ToString() ?? string.Empty));
+            builder.CloseElement();
+
+            builder.OpenElement(seq++, "input");
+            builder.AddAttribute(seq++, "class", "studio-input");
+            builder.AddAttribute(seq++, "placeholder",
+                row.IsSecret && row.HasStoredSecret ? "•••• stored - leave blank to keep" : "value");
+            builder.AddAttribute(seq++, "type", row.IsSecret ? "password" : "text");
+            builder.AddAttribute(seq++, "data-testid", $"mcp-{kind}-value");
+            builder.AddAttribute(seq++, "value", row.Value);
+            builder.AddAttribute(seq++, "oninput",
+                EventCallback.Factory.Create<ChangeEventArgs>(this, e => row.Value = e.Value?.ToString() ?? string.Empty));
+            builder.CloseElement();
+
+            builder.OpenElement(seq++, "label");
+            builder.AddAttribute(seq++, "class", "mcp-entry-secret");
+            builder.OpenElement(seq++, "input");
+            builder.AddAttribute(seq++, "type", "checkbox");
+            builder.AddAttribute(seq++, "checked", row.IsSecret);
+            builder.AddAttribute(seq++, "data-testid", $"mcp-{kind}-secret");
+            builder.AddAttribute(seq++, "onchange",
+                EventCallback.Factory.Create<ChangeEventArgs>(this, e => row.IsSecret = (bool)(e.Value ?? false)));
+            builder.CloseElement();
+            builder.OpenElement(seq++, "span");
+            builder.AddContent(seq++, "secret");
+            builder.CloseElement();
+            builder.CloseElement();
+
+            builder.OpenElement(seq++, "button");
+            builder.AddAttribute(seq++, "type", "button");
+            builder.AddAttribute(seq++, "class", "icon-picker-clear");
+            builder.AddAttribute(seq++, "data-testid", $"mcp-{kind}-remove");
+            builder.AddAttribute(seq++, "onclick",
+                EventCallback.Factory.Create(this, () => rows.Remove(row)));
+            builder.AddContent(seq++, "Remove");
+            builder.CloseElement();
+
+            builder.CloseElement();
+        }
+    };
+
+    private void Save()
+    {
+        _saveError = null;
+        var artifactId = IsEdit && Store.Get(Id!) is { } cur ? cur.Id : Guid.NewGuid().ToString("N");
+
+        var env = _transport == McpTransport.Stdio ? BuildEntries(_env, artifactId) : [];
+        var headers = _transport == McpTransport.Http ? BuildEntries(_headers, artifactId) : [];
+
+        var definition = new McpServerDefinition
+        {
+            Name = _name.Trim(),
+            Transport = _transport,
+            Command = _command.Trim(),
+            Args = _argsText.Split([',', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            Env = env,
+            Url = _url.Trim(),
+            Headers = headers,
+        };
+
+        _errors = McpServerValidation.Validate(definition);
+        var clash = Store.GetByName(FrameworkArtifactKind.McpServer, definition.Name);
+        if (clash is not null && clash.Id != Id)
+        {
+            _errors = [.. _errors, new SkillValidationError("name", $"An MCP server named '{definition.Name}' already exists.")];
+        }
+
+        if (_errors.Count > 0)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            var payload = FrameworkPayload<McpServerDefinition>.Serialize(definition);
+
+            if (IsEdit && Store.Get(Id!) is { } existing)
+            {
+                Store.Update(existing with { Name = definition.Name, PayloadJson = payload, UpdatedUtc = now });
+            }
+            else
+            {
+                Store.Add(new FrameworkArtifact(
+                    artifactId, FrameworkArtifactKind.McpServer, definition.Name, payload, now, now));
+            }
+
+            Nav.NavigateTo($"/settings/framework/mcp-servers/view/{artifactId}");
+        }
+        catch (DuplicateArtifactNameException ex)
+        {
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    // Builds the persisted entries. Secret values are written to the secret store; the payload keeps only a ref.
+    private List<McpEnvEntry> BuildEntries(List<EntryRow> rows, string artifactId)
+    {
+        var result = new List<McpEnvEntry>();
+        foreach (var row in rows.Where(r => !string.IsNullOrWhiteSpace(r.Key)))
+        {
+            if (!row.IsSecret)
+            {
+                result.Add(McpEnvEntry.Plain(row.Key.Trim(), row.Value));
+                continue;
+            }
+
+            var reference = row.ExistingSecretRef ?? $"mcp/{artifactId}/{Guid.NewGuid():N}";
+            if (!string.IsNullOrEmpty(row.Value))
+            {
+                Secrets.Set(reference, row.Value);
+            }
+            else if (!row.HasStoredSecret)
+            {
+                // Marked secret but no value supplied yet - store an empty secret so the ref is valid.
+                Secrets.Set(reference, string.Empty);
+            }
+
+            result.Add(new McpEnvEntry(row.Key.Trim(), null, true, reference));
+        }
+
+        return result;
+    }
+
+    private RenderFragment? FieldError(string field)
+    {
+        var error = _errors.FirstOrDefault(e => e.Field == field);
+        if (error is null)
+        {
+            return null;
+        }
+
+        return builder =>
+        {
+            builder.OpenElement(0, "span");
+            builder.AddAttribute(1, "class", "skill-field-error");
+            builder.AddAttribute(2, "data-testid", $"mcp-error-{field}");
+            builder.AddContent(3, error.Message);
+            builder.CloseElement();
+        };
+    }
+}

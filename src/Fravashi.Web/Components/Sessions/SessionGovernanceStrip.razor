@@ -1,0 +1,168 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Application.Wiki
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.Projects
+@inject IWorkspaceStore Workspaces
+@inject ISessionWorkItems Work
+@inject ISessionPlans Plans
+@inject ITrackerResolver Trackers
+@inject IWikiDocuments Wiki
+@inject ISessionGovernance Governance
+@implements IDisposable
+
+@* What this conversation is bound to, under the title (backlog 18, approved mockup 2026-08-06).
+
+   The mockup draws this strip with a work item and a plan in it. When the strip was built NEITHER EXISTED
+   (binding is backlog 44, plans are 45), so its last chip said the binding was absent and its tooltip said
+   nothing governed the session. Both landed and the chip was never revisited, which turned an honest
+   sentence into a false one: seen in the studio window on the installed 0.9.24, a real agent was refused an
+   Edit by the gate, created and linked a work item and a plan, and was then allowed to edit, while this
+   chip read "No work item or plan" throughout (and after a reload) over a tooltip promising "there is no
+   gate to satisfy". So the last chip is LIVE now, and it asks the same sources the gate asks.
+
+   Still three chips and not four or five: at the Code page panel's narrowest real width (280px) a fourth
+   wrapped the strip onto a second row. So the item and the plan share one chip by NUMBER, their titles
+   live in its tooltip, and the Sessions page's SessionWorkStrip remains the place to read and change
+   them in full. Pending means changes are held, and the tooltip is the gate's own sentence rather than a
+   second wording of it, so what the reader sees and what the agent was told are the same thing. *@
+<div class="session-gov" data-testid="session-governance">
+    <span class="session-gov-chip session-gov-chip-ok" data-testid="gov-workspace" title="@WorkspaceTitle">
+        <span class="session-gov-chip-mark" aria-hidden="true">&#9679;</span>
+        <b>@WorkspaceLabel</b>
+    </span>
+    <span class="session-gov-chip session-gov-chip-ok" data-testid="gov-copy"
+          title="The agent works on this workspace's contained copy, never on your folder, and your Git history is not part of it.">
+        Contained copy
+    </span>
+    @if (_items.Count == 0 && _plans.Count == 0)
+    {
+        <span class="session-gov-chip session-gov-chip-pending" data-testid="gov-unbound" title="@UnboundTitle">
+            No work item or plan
+        </span>
+    }
+    else
+    {
+        <span class="session-gov-chip @(_mayChange ? "session-gov-chip-ok" : "session-gov-chip-pending")"
+              data-testid="gov-bound" title="@BoundTitle">
+            <b>@BoundLabel</b>
+        </span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string WorkspaceId { get; set; } = string.Empty;
+
+    /// <summary>The conversation this strip is about, or null before one has been started.</summary>
+    [Parameter]
+    public AgentSessionId? Session { get; set; }
+
+    private readonly List<(int Number, string Title)> _items = [];
+    private readonly List<(int Number, string Title)> _plans = [];
+    private bool _mayChange;
+    private string? _missing;
+
+    private WorkspaceRecord? Record =>
+        string.IsNullOrWhiteSpace(WorkspaceId) ? null : Workspaces.Get(WorkspaceId);
+
+    /// <summary>
+    /// The folder the conversation belongs to. Falls back to the workspace id rather than to a friendly
+    /// invention: an id nobody recognises is still true, and "this workspace" would be a label that
+    /// cannot be checked against anything.
+    /// </summary>
+    private string WorkspaceLabel => Record?.Name is { Length: > 0 } name ? name : WorkspaceId;
+
+    private string WorkspaceTitle => Record?.RootPath is { Length: > 0 } path
+        ? $"This conversation belongs to {path}"
+        : "The workspace this conversation belongs to";
+
+    private string BoundLabel =>
+        (_items.Count == 0 ? "no item yet" : string.Join(" ", _items.Select(i => "#" + i.Number)))
+        + " · "
+        + (_plans.Count == 0 ? "no plan yet" : "plan " + string.Join(" ", _plans.Select(p => "@" + p.Number)));
+
+    private string BoundTitle => string.Join(
+        " ",
+        new[]
+        {
+            _items.Count == 0 ? null : "Working on " + string.Join(", ", _items.Select(i => $"#{i.Number} {i.Title}")) + ".",
+            _plans.Count == 0 ? null : "Under plan " + string.Join(", ", _plans.Select(p => $"@{p.Number} {p.Title}")) + ".",
+            _mayChange ? "Changes to the workspace are allowed; each one asks you first unless this folder trusts edits (ADR 0028)." : _missing,
+        }.Where(part => part is { Length: > 0 }));
+
+    private string UnboundTitle => Session is null
+        ? "A change to the workspace needs a work item and a plan to belong to. Ask for the change and the agent "
+          + "creates and links them, each with your approval. Reading, searching and discussing need neither."
+        : (_missing ?? "This conversation is not linked to a work item or a plan yet.")
+          + " The Sessions page lets you link them yourself.";
+
+    protected override void OnInitialized()
+    {
+        Work.Changed += OnChanged;
+        Plans.Changed += OnChanged;
+    }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    /// <inheritdoc />
+    public void Dispose()
+    {
+        Work.Changed -= OnChanged;
+        Plans.Changed -= OnChanged;
+    }
+
+    private void OnChanged(AgentSessionId session)
+    {
+        // The agent binds itself when it clears a gate, so this follows changes nobody made in this UI.
+        if (session != Session)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+    }
+
+    private async Task LoadAsync()
+    {
+        _items.Clear();
+        _plans.Clear();
+        _mayChange = false;
+        _missing = null;
+        if (Session is not { } session)
+        {
+            return;
+        }
+
+        foreach (var entry in Work.For(session))
+        {
+            // Read from the project the link was made in (backlog 121).
+            if (await Trackers.For(entry.Project).GetAsync(entry.Item) is { } item)
+            {
+                _items.Add((item.Number, item.Title));
+            }
+        }
+
+        foreach (var entry in Plans.For(session))
+        {
+            if (await Wiki.GetAsync(entry.WikiItemId) is { } plan)
+            {
+                _plans.Add((plan.Number, plan.Title));
+            }
+        }
+
+        // The same question SessionWorkStrip asks, of the same gate, for the same reason: this chip and the
+        // refusal an agent receives must never disagree. Scope and change budget are about ONE change and
+        // there is none in hand, so they are set aside rather than guessed.
+        var facts = Governance.Facts(session, null) with { InDeclaredScope = true, WithinChangeBudget = true };
+        var verdict = AgentWorkGate.Check("Edit", readOnly: false, facts);
+        _mayChange = !verdict.Refuses();
+        _missing = verdict.SentenceFor();
+    }
+}

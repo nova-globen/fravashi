@@ -1,0 +1,204 @@
+{
+  "mockup": 1,
+  "title": "Team Directory App",
+  "viewports": [
+    {"name": "wide", "width": 1280},
+    {"name": "narrow", "width": 390}
+  ],
+  "data": {
+    "people": [
+      {"name": "Ada Lovelace", "role": "Engineer", "office": "London"},
+      {"name": "Grace Hopper", "role": "Admiral", "office": "Arlington"},
+      {"name": "Alan Turing", "role": "Researcher", "office": "Manchester"},
+      {"name": "Katherine Johnson", "role": "Mathematician", "office": "Hampton"}
+    ],
+    "activity": [
+      {"event": "Joined the team"},
+      {"event": "Updated office"}
+    ]
+  },
+  "screens": [
+    {
+      "type": "window",
+      "id": "directory",
+      "text": "Team directory",
+      "layout": "column",
+      "children": [
+        {
+          "type": "toolbar",
+          "layout": "row",
+          "at": {"narrow": {"layout": "column"}},
+          "children": [
+            {
+              "type": "field",
+              "id": "search",
+              "input": "search",
+              "placeholder": "Search by name"
+            },
+            {
+              "type": "button",
+              "id": "add-person",
+              "text": "Add person",
+              "on": {"click": {"open": "add-dialog"}}
+            },
+            {
+              "type": "button",
+              "id": "refresh",
+              "a11y": {"label": "Refresh"}
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "id": "people-table",
+          "data": "people",
+          "columns": [
+            {"key": "name", "text": "Name"},
+            {"key": "role", "text": "Role"},
+            {"key": "office", "text": "Office"}
+          ],
+          "states": {
+            "loading": {},
+            "empty": {"text": "Nobody matches that search."}
+          },
+          "on": {"select": {"go": "profile"}}
+        }
+      ]
+    },
+    {
+      "type": "dialog",
+      "id": "add-dialog",
+      "text": "Add a person",
+      "layout": "column",
+      "children": [
+        {
+          "type": "form",
+          "id": "add-form",
+          "layout": "column",
+          "on": {"submit": {"set": {"save-btn": "loading"}}},
+          "children": [
+            {
+              "type": "field",
+              "id": "name-field",
+              "text": "Name",
+              "input": "text",
+              "required": true
+            },
+            {
+              "type": "field",
+              "id": "role-field",
+              "text": "Role",
+              "input": "select",
+              "options": ["Engineer", "Researcher", "Manager"]
+            },
+            {
+              "type": "field",
+              "id": "office-field",
+              "text": "Office",
+              "input": "text"
+            },
+            {
+              "type": "field",
+              "id": "welcome-email",
+              "text": "Send a welcome email",
+              "input": "checkbox",
+              "value": true
+            },
+            {
+              "type": "container",
+              "layout": "row",
+              "children": [
+                {
+                  "type": "button",
+                  "id": "save-btn",
+                  "text": "Save",
+                  "states": {
+                    "loading": {"text": "Saving..."}
+                  }
+                },
+                {
+                  "type": "button",
+                  "id": "cancel-btn",
+                  "text": "Cancel",
+                  "on": {"click": {"close": "add-dialog"}}
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "id": "error-message",
+          "text": "Could not save this person.",
+          "a11y": {"live": "assertive"},
+          "state": "hidden",
+          "states": {
+            "hidden": {},
+            "visible": {}
+          }
+        }
+      ]
+    },
+    {
+      "type": "window",
+      "id": "profile",
+      "text": "Profile",
+      "layout": "column",
+      "children": [
+        {
+          "type": "image",
+          "id": "person-photo",
+          "a11y": {"label": "Portrait of the team member"}
+        },
+        {
+          "type": "text",
+          "id": "person-name",
+          "text": "Person Name",
+          "a11y": {"heading": 1}
+        },
+        {
+          "type": "tabs",
+          "id": "profile-tabs",
+          "children": [
+            {
+              "type": "panel",
+              "text": "Details",
+              "layout": "column",
+              "children": [
+                {
+                  "type": "text",
+                  "id": "role-text",
+                  "text": "Role: Engineer"
+                },
+                {
+                  "type": "text",
+                  "id": "office-text",
+                  "text": "Office: London"
+                }
+              ]
+            },
+            {
+              "type": "panel",
+              "text": "Activity",
+              "layout": "column",
+              "children": [
+                {
+                  "type": "list",
+                  "id": "activity-list",
+                  "data": "activity",
+                  "show": "event"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "button",
+          "id": "back-btn",
+          "text": "Back to directory",
+          "on": {"click": {"go": "directory"}}
+        }
+      ]
+    }
+  ]
+}

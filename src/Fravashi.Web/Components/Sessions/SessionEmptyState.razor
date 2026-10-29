@@ -1,0 +1,97 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@implements IDisposable
+
+@* A workspace with no conversation yet (backlog 22, approved mockup 2026-08-06 state 1).
+
+   The three lines are not decoration. They answer the trust question, which is the one a user actually
+   has when a program offers to let a language model into their repository, and they answer it before it
+   is asked. Every one of them is a fact about how this studio really runs an agent: it reads through a
+   contained copy, changes stop at an approval prompt, and .git never syncs in either direction.
+
+   Work item #369: "every change asks you first" stopped being a fact once a folder can trust edits in the
+   copy (ADR 0028), so the lede and the edits line follow the folder's level, read through the same scope the
+   Auto-approve picker and the approval broker use, and change when the picker does. *@
+<div class="session-empty" data-testid="session-empty" data-trust="@WorkspaceTrustLevels.Name(_trust)">
+    <h3 class="session-empty-title">Put an agent to work</h3>
+    <p class="session-empty-lede" data-testid="session-empty-lede">@Copy(_trust).Lede</p>
+    <ul class="session-empty-points">
+        <li>Reads and searches freely</li>
+        <li data-testid="session-empty-edits">@Copy(_trust).EditsLine</li>
+        <li>Your Git history stays untouched</li>
+    </ul>
+    <button type="button" class="studio-btn session-empty-start" data-testid="session-empty-start"
+            @onclick="() => Start.InvokeAsync()">
+        Start a conversation
+    </button>
+</div>
+
+@code {
+    /// <summary>Puts the cursor in the composer: the conversation starts when they say something.</summary>
+    [Parameter]
+    public EventCallback Start { get; set; }
+
+    /// <summary>The folder the conversation would run in: whose trust level decides what the copy promises.</summary>
+    [Parameter]
+    public string? WorkspaceId { get; set; }
+
+    private IWorkspaceTrust? _trustStore;
+    private IWorkspaceStore? _workspaces;
+    private WorkspaceTrust _trust = WorkspaceTrust.Ask;
+
+    /// <summary>
+    /// What the empty state promises at a trust level (#369). Ask: every change asks. Edits: edits inside the copy
+    /// run without asking, while commands and anything outside the copy still ask, the bound the broker enforces.
+    /// </summary>
+    public static (string Lede, string EditsLine) Copy(WorkspaceTrust trust) => trust == WorkspaceTrust.Edits
+        ? ("It works on a copy of this repository. Edits inside the copy run without asking; commands and anything outside the copy still ask you first.",
+           "Edits inside the copy without asking")
+        : ("It works on a copy of this repository, and every change it makes asks you first.",
+           "Edits only what you approve");
+
+    protected override void OnInitialized()
+    {
+        _trustStore = Services.GetService<IWorkspaceTrust>();
+        _workspaces = Services.GetService<IWorkspaceStore>();
+        if (_trustStore is not null)
+        {
+            _trustStore.Changed += OnTrustChanged;
+        }
+    }
+
+    protected override void OnParametersSet() => Load();
+
+    public void Dispose()
+    {
+        if (_trustStore is not null)
+        {
+            _trustStore.Changed -= OnTrustChanged;
+        }
+    }
+
+    private string? Scope() => WorkspaceTrustScope.For(_workspaces, WorkspaceId);
+
+    private void Load()
+    {
+        var scope = Scope();
+        _trust = scope is null || _trustStore is null ? WorkspaceTrust.Ask : _trustStore.For(scope);
+    }
+
+    private void OnTrustChanged(string workspaceId)
+    {
+        if (!string.Equals(workspaceId, Scope(), StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _ = InvokeAsync(() =>
+        {
+            Load();
+            StateHasChanged();
+        });
+    }
+}

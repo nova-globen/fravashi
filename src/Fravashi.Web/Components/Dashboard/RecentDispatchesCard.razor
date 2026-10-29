@@ -1,0 +1,220 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using System.Globalization
+@using Fravashi.Application.Autopilot
+@using Fravashi.Application.Projects
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.Autopilot
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Web.Services
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@inject ILogger<RecentDispatchesCard> Logger
+@implements IDisposable
+
+@* Work item #358: the autopilot's earlier dispatches for this window's project, listed the way Recent conversations
+   lists conversations (state, how many items, when it started and ended), replacing the retired autopilot page's History.
+   A row opens in place to what the History showed for a run (every stop it recorded, with its figure and reason)
+   plus what the run store already holds about it: each item with the stage it reached, what was spent, and where
+   the workspace was left. The run that is still open is listed too, marked Running; the Autopilot card is where it
+   is watched and stopped. *@
+
+@* Item #373: a project's card, drawn only for a folder that is set up (Home leads with the "not set up" state). *@
+@if (CurrentProject.IsSetUp())
+{
+<section class="dash-panel dash-panel-wide recent-dispatches" aria-label="Recent dispatches" data-testid="recent-dispatches">
+    <div class="dash-panel-head">
+        <span>Recent dispatches</span>
+        @if (_runs.Count > 0)
+        {
+            <span class="home-panel-count" data-testid="recent-dispatches-count">@_runs.Count</span>
+        }
+    </div>
+
+    @if (_runs.Count == 0)
+    {
+        <p class="studio-muted home-empty" data-testid="recent-dispatches-empty">
+            No dispatches yet. The Autopilot card dispatches the marked Ready items.
+        </p>
+    }
+    else
+    {
+        <ul class="recent-conversation-list home-scroll recent-dispatch-list">
+            @foreach (var run in _runs.Take(Shown))
+            {
+                var open = _open == run.Id;
+                <li class="recent-conversation-row recent-dispatch-row" data-testid="recent-dispatch-row" data-state="@run.State">
+                    <button type="button" class="recent-conversation recent-dispatch" data-testid="recent-dispatch"
+                            aria-expanded="@(open ? "true" : "false")" @onclick="() => ToggleAsync(run)">
+                        <span class="recent-conversation-title">@Plural(run.Queue.Count, "item")</span>
+                        <span class="recent-conversation-meta">
+                            <span class="recent-dispatch-state recent-dispatch-state-@run.State.ToString().ToLowerInvariant()"
+                                  data-testid="recent-dispatch-state">@run.State</span>
+                            <span class="recent-conversation-sep" aria-hidden="true">·</span>
+                            <span>Started <LocalTime At="run.StartedUtc" Style="LocalTimeStyle.Short" /></span>
+                            <span class="recent-conversation-sep" aria-hidden="true">·</span>
+                            @if (EndedUtc(run) is { } ended)
+                            {
+                                <span data-testid="recent-dispatch-ended">Ended <LocalTime At="ended" Style="LocalTimeStyle.Short" /></span>
+                            }
+                            else
+                            {
+                                <span data-testid="recent-dispatch-ended">Still running</span>
+                            }
+                        </span>
+                    </button>
+
+                    @if (open)
+                    {
+                        <div class="recent-dispatch-detail" data-testid="recent-dispatch-detail">
+                            <ul class="autopilot-list">
+                                @foreach (var item in run.Queue)
+                                {
+                                    <li data-testid="recent-dispatch-item">
+                                        @ItemLabel(item.Item): @item.Stage@(item.SpentUsd > 0 ? $", {SessionUsageFormat.Cost(item.SpentUsd)}" : string.Empty)@(item.ParkedReason is { Length: > 0 } parked ? $" ({parked})" : string.Empty)
+                                    </li>
+                                }
+                            </ul>
+                            <p class="studio-muted">Spent on this run: @SessionUsageFormat.Cost(run.SpentUsd) of @SessionUsageFormat.Cost(run.Settings.Limits.MoneyPerRunUsd).</p>
+                            @if (run.Stops.Count == 0)
+                            {
+                                <p class="studio-muted" data-testid="recent-dispatch-no-stop">No stop was recorded.</p>
+                            }
+                            else
+                            {
+                                <ul class="autopilot-list">
+                                    @foreach (var stop in run.Stops)
+                                    {
+                                        <li data-testid="recent-dispatch-stop">
+                                            @stop.LimitName: @stop.Figure@(stop.Reason is { Length: > 0 } reason ? $" ({reason})" : string.Empty)
+                                        </li>
+                                    }
+                                </ul>
+                            }
+                            @if (run.WorkspaceReturnNote is { Length: > 0 } note)
+                            {
+                                <p class="studio-muted" data-testid="recent-dispatch-workspace-note">Workspace: @note</p>
+                            }
+                        </div>
+                    }
+                </li>
+            }
+        </ul>
+    }
+</section>
+}
+
+@code {
+    /// <summary>How many runs the card lists, newest first.</summary>
+    private const int Shown = 20;
+
+    private IReadOnlyList<AutopilotRun> _runs = [];
+    private Guid? _open;
+    private readonly Dictionary<WorkItemId, WorkItem> _itemCache = [];
+    private readonly CancellationTokenSource _disposed = new();
+
+    private IAutopilotRunStore? Runs => Services.GetService<IAutopilotRunStore>();
+
+    private ICurrentProject CurrentProject => Services.GetService<ICurrentProject>() ?? SingleProject.Instance;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        if (Runs is not null)
+        {
+            _ = PollAsync(_disposed.Token);
+        }
+    }
+
+    public void Dispose()
+    {
+        _disposed.Cancel();
+        _disposed.Dispose();
+    }
+
+    private async Task LoadAsync()
+    {
+        // Item #373: a folder that is not set up reads no project at all.
+        if (CurrentProject.Id is not { } project)
+        {
+            return;
+        }
+
+        if (Runs is { } runs)
+        {
+            _runs = await runs.ForProjectAsync(project);
+        }
+    }
+
+    /// <summary>Re-reads on a slower timer than the Autopilot card: a run ending is all this card has to notice.</summary>
+    private async Task PollAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                await InvokeAsync(async () =>
+                {
+                    try
+                    {
+                        await LoadAsync();
+                        StateHasChanged();
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        Logger.LogWarning(ex, "The Recent dispatches card's reload failed; it will try again on the next tick.");
+                    }
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    /// <summary>Opens a run's detail (reading its items' titles once) or closes it.</summary>
+    private async Task ToggleAsync(AutopilotRun run)
+    {
+        if (_open == run.Id)
+        {
+            _open = null;
+            return;
+        }
+
+        _open = run.Id;
+        if (Services.GetService<ITrackerResolver>() is { } trackers)
+        {
+            var tracker = trackers.For(run.Project);
+            foreach (var queued in run.Queue)
+            {
+                if (!_itemCache.ContainsKey(queued.Item) && await tracker.GetAsync(queued.Item) is { } item)
+                {
+                    _itemCache[queued.Item] = item;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// When a run ended. The store keeps no end time of its own, so it is the last thing the run recorded: its latest
+    /// stop, or its last progress (the last item done) when it completed with none. Null while it is still running.
+    /// </summary>
+    internal static DateTimeOffset? EndedUtc(AutopilotRun run)
+    {
+        if (run.State == AutopilotRunState.Running)
+        {
+            return null;
+        }
+
+        var lastStop = run.Stops.Count == 0 ? (DateTimeOffset?)null : run.Stops.Max(s => s.AtUtc);
+        return lastStop is { } stop && stop > run.LastProgressUtc ? stop : run.LastProgressUtc;
+    }
+
+    private string ItemLabel(WorkItemId id) =>
+        _itemCache.TryGetValue(id, out var item)
+            ? $"#{item.Number.ToString(CultureInfo.InvariantCulture)} {item.Title}"
+            : id.Value;
+
+    private static string Plural(int count, string noun) =>
+        count.ToString(CultureInfo.InvariantCulture) + " " + noun + (count == 1 ? string.Empty : "s");
+}

@@ -1,0 +1,251 @@
+@namespace Fravashi.Web.Components.Onboarding
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Onboarding
+@using Fravashi.Application.Onboarding.Auth
+@using Fravashi.Application.Persistence
+@using Fravashi.Domain.AgentSessions
+@inject IProviderConnectionStore Connections
+@inject IConfigurationStore Config
+@inject IAgentRuntimeService Runtimes
+@inject IAgentRuntimeStatusReport Report
+
+@* S17 - one monitor/configure surface for onboarding: connection status per area (source/wiki/board) and the
+   agent-runtime status (installed/version/auth/update), each with a deep link back into the wizard in Settings
+   re-entry mode. Read-only status here; the sign-in configuration panel below it does the editing. *@
+
+<h3>Connections</h3>
+<div class="set-conn-grid" data-testid="settings-connections">
+    @foreach (var area in _areas)
+    {
+        var connection = Connections.Get(area.Key);
+        var provider = Config.Get($"Onboarding:{area.Title}:Provider");
+        var authMethod = Config.Get(AuthSettings.AuthMethodKey(area.Key));
+        var readiness = Readiness(area.Key, provider, connection, authMethod);
+        <div class="set-conn-row" data-testid="@($"settings-conn-{area.Key}")">
+            <div>
+                <div class="set-conn-area">@area.Title</div>
+                <div class="set-conn-detail">
+                    @(string.IsNullOrWhiteSpace(provider) ? "not configured" : provider)
+                    @if (!string.IsNullOrWhiteSpace(connection?.BaseUrl))
+                    {
+                        <span> · @connection!.BaseUrl</span>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(authMethod))
+                    {
+                        <span> · @authMethod</span>
+                    }
+                    @if (connection is not null)
+                    {
+                        <span> · updated <LocalTime At="connection.UpdatedUtc" Style="Fravashi.Web.Services.LocalTimeStyle.DateTime" /></span>
+                    }
+                    @if (readiness is not null)
+                    {
+                        <span class="set-conn-ready @(readiness.Ready ? "ok" : "warn")" data-testid="@($"settings-conn-ready-{area.Key}")">
+                            · @readiness.Label
+                        </span>
+                    }
+                </div>
+            </div>
+            <div>
+                <span class="set-conn-status @StatusClass(connection?.Status)" data-testid="@($"settings-conn-status-{area.Key}")">
+                    @(connection?.Status ?? "not set")
+                </span>
+                <a class="studio-button" href="@($"/onboarding/{area.Key}?mode=settings")" data-testid="@($"settings-conn-link-{area.Key}")">Edit</a>
+            </div>
+        </div>
+    }
+</div>
+
+<h3>Agent runtimes</h3>
+<div class="set-conn-grid" data-testid="settings-runtimes">
+    @foreach (var descriptor in AgentRuntimeCatalog.All)
+    {
+        var tool = descriptor.Tool;
+        var status = _statuses.GetValueOrDefault(tool);
+        var update = Report.Latest(tool);
+        var selected = AgentRuntimeSelection.IsSelected(Config, tool);
+        <div class="set-conn-row" data-testid="@($"settings-runtime-{tool}")">
+            <div>
+                <div class="set-conn-area">@descriptor.DisplayName @(selected ? "· selected" : string.Empty)</div>
+                <div class="set-conn-detail">
+                    @if (status is null)
+                    {
+                        <span>checking…</span>
+                    }
+                    else if (!status.Installed)
+                    {
+                        <span>not installed</span>
+                    }
+                    else
+                    {
+                        <span>v@(status.Version)</span>
+                        @if (update is not null)
+                        {
+                            <span> · @update.Outcome.ToString().ToLowerInvariant()</span>
+                        }
+                    }
+                </div>
+            </div>
+            <div>
+                <span class="set-conn-status @AuthClass(status)" data-testid="@($"settings-runtime-auth-{tool}")">@AuthText(status)</span>
+            </div>
+        </div>
+    }
+</div>
+<a class="studio-button" href="/onboarding/runtimes?mode=settings" data-testid="settings-runtimes-link">Manage agent runtimes</a>
+
+@code {
+    private readonly (string Key, string Title)[] _areas =
+    [
+        ("source", "Source"),
+        ("wiki", "Wiki"),
+        ("board", "Board"),
+    ];
+
+    private readonly Dictionary<AgentTool, AgentRuntimeStatus?> _statuses = [];
+
+    /// <summary>A truthful readiness verdict for a connection: <c>Ready</c> only when the token AND every
+    /// coordinate the adapter needs are present (so the coordinate bridge yields a fully-configured adapter).
+    /// Otherwise it names what is still missing - never a false "live".</summary>
+    private sealed record ReadyState(bool Ready, string Label);
+
+    /// <summary>
+    /// Reports whether an external connection is actually usable - the same coordinates + credential the
+    /// coordinate/secret bridges project into the adapter - rather than merely "Verified". Reads the committed
+    /// stores (the connection row + Onboarding:{area}:* settings), so it reflects the record that will be wired
+    /// into the adapter. Returns null for a Local/None/unconfigured area (there is no external adapter to be
+    /// "ready").
+    /// </summary>
+    private ReadyState? Readiness(string areaKey, string? provider, ProviderConnection? connection, string? authMethod)
+    {
+        if (connection is null || string.IsNullOrWhiteSpace(provider)
+            || string.Equals(provider, OnboardingProviders.None, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(provider, OnboardingProviders.Local, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var hasUrl = !string.IsNullOrWhiteSpace(connection.BaseUrl);
+        var hasToken = !string.IsNullOrWhiteSpace(connection.CredentialRef);
+
+        if (areaKey == "source")
+        {
+            if (!hasUrl) return new ReadyState(false, "needs a repository URL");
+            return hasToken ? new ReadyState(true, "ready to use") : new ReadyState(false, "needs a token");
+        }
+
+        if (areaKey == "board" && string.Equals(provider, OnboardingProviders.Jira, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!hasUrl) return new ReadyState(false, "needs a site URL");
+            if (IsThreeLegged(authMethod))
+            {
+                // A 3LO (SSO) Jira board authenticates with a Bearer token against the api.atlassian.com gateway,
+                // which the adapter can only address with the cloudId captured at sign-in - no account email is
+                // used. An older sign-in that never captured a cloudId is honestly "not ready" until re-signed.
+                if (!hasToken) return new ReadyState(false, "needs a token");
+                if (string.IsNullOrWhiteSpace(Config.Get("Onboarding:board:CloudId"))) return new ReadyState(false, "re-sign-in to finish");
+                if (string.IsNullOrWhiteSpace(Config.Get("Onboarding:Board:Project"))) return new ReadyState(false, "needs a project key");
+                return new ReadyState(true, "ready to use");
+            }
+
+            if (string.IsNullOrWhiteSpace(Config.Get("Onboarding:Board:Email"))) return new ReadyState(false, "needs an account email");
+            if (string.IsNullOrWhiteSpace(Config.Get("Onboarding:Board:Project"))) return new ReadyState(false, "needs a project key");
+            return hasToken ? new ReadyState(true, "ready to use") : new ReadyState(false, "needs a token");
+        }
+
+        if (areaKey == "board" && string.Equals(provider, OnboardingProviders.AzureDevOps, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!hasUrl) return new ReadyState(false, "needs an organization URL");
+            if (string.IsNullOrWhiteSpace(Config.Get("Onboarding:Board:Project"))) return new ReadyState(false, "needs a project");
+            return hasToken ? new ReadyState(true, "ready to use") : new ReadyState(false, "needs a token");
+        }
+
+        if (areaKey == "wiki" && string.Equals(provider, OnboardingProviders.Confluence, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!hasUrl) return new ReadyState(false, "needs a site URL");
+            if (IsThreeLegged(authMethod))
+            {
+                // A 3LO (SSO) Confluence connection routes through the gateway with a Bearer token + cloudId; no
+                // account email is used. Missing cloudId means the sign-in predates cloudId capture - re-sign-in.
+                if (!hasToken) return new ReadyState(false, "needs a token");
+                return string.IsNullOrWhiteSpace(Config.Get("Onboarding:wiki:CloudId"))
+                    ? new ReadyState(false, "re-sign-in to finish")
+                    : new ReadyState(true, "ready to use");
+            }
+
+            if (!ConfluenceEmailPresent()) return new ReadyState(false, "needs an account email");
+            return hasToken ? new ReadyState(true, "ready to use") : new ReadyState(false, "needs a token");
+        }
+
+        if (areaKey == "wiki" && string.Equals(provider, OnboardingProviders.GitHubWiki, StringComparison.OrdinalIgnoreCase))
+        {
+            if (!hasUrl) return new ReadyState(false, "needs a wiki repository URL");
+            return hasToken ? new ReadyState(true, "ready to use") : new ReadyState(false, "needs a token");
+        }
+
+        if (areaKey == "wiki" && string.Equals(provider, OnboardingProviders.AzureDevOpsWiki, StringComparison.OrdinalIgnoreCase))
+        {
+            // Honest: ADO wiki read-sync has no adapter yet (backlog), so it is never "live" regardless of creds.
+            return new ReadyState(false, "read-sync not supported yet");
+        }
+
+        return null;
+    }
+
+    // A 3LO / SSO sign-in (authorization-code) authenticates with a Bearer token against the Atlassian gateway;
+    // a PAT authenticates with Basic against the site. The readiness needs (cloudId vs email) differ by method.
+    private static bool IsThreeLegged(string? authMethod) =>
+        string.Equals(authMethod, AuthMethods.AuthCode, StringComparison.OrdinalIgnoreCase);
+
+    // Confluence shares the Atlassian account email; a Jira board's email fills it when the wiki step left it
+    // blank, mirroring the coordinate bridge's board-then-wiki fill order.
+    private bool ConfluenceEmailPresent()
+    {
+        if (!string.IsNullOrWhiteSpace(Config.Get("Onboarding:Wiki:Email")))
+        {
+            return true;
+        }
+
+        return string.Equals(Config.Get("Onboarding:Board:Provider"), OnboardingProviders.Jira, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(Config.Get("Onboarding:Board:Email"));
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        foreach (var tool in AgentRuntimeCatalog.Tools)
+        {
+            _statuses[tool] = await Runtimes.GetStatusAsync(tool);
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static string StatusClass(string? status) => status switch
+    {
+        "Verified" => "ok",
+        "Failed" => "warn",
+        null => "muted",
+        _ => "muted",
+    };
+
+    private static string AuthClass(AgentRuntimeStatus? status) => status?.AuthState switch
+    {
+        AgentRuntimeAuthState.Authenticated => "ok",
+        AgentRuntimeAuthState.SignedOut => "warn",
+        AgentRuntimeAuthState.NotInstalled => "warn",
+        _ => "muted",
+    };
+
+    private static string AuthText(AgentRuntimeStatus? status) => status?.AuthState switch
+    {
+        AgentRuntimeAuthState.Authenticated => "authenticated",
+        AgentRuntimeAuthState.SignedOut => "not signed in",
+        AgentRuntimeAuthState.NotInstalled => "not installed",
+        null => "checking…",
+        _ => "auth unknown",
+    };
+}

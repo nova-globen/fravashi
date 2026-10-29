@@ -1,0 +1,512 @@
+@namespace Fravashi.Web.Components.Updates
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Updates
+@using Fravashi.Domain.AgentSessions
+@using Microsoft.Extensions.DependencyInjection
+@inject IToolUpdateService Updates
+@inject IServiceProvider Services
+@inject ILogger<UpdatesCard> Logger
+@implements IDisposable
+
+@* Work item #358: ONE card for every kind of update the studio knows about. Today that is two kinds:
+   1. Fravashi itself: what the signed update channel offers, read the way `fravashi update` and the studio_version tool
+      read it (fravashi.exe's upgrade operation, IStudioUpgrades, backlog 157). Install starts exactly the upgrade
+      studio_upgrade schedules (IStudioUpgrades.ApplyAsync with the version the channel offers), which replaces the
+      studio's container image; fravashi.exe itself is not replaced. A studio started without that operation (a console
+      start, an older fravashi.exe) still says what the launcher recorded (IProductUpdateStatus) and that `fravashi update`
+      installs it, with no button, because there is nothing for a button to call.
+   2. The agent CLI: the content of the old "Coding-agent CLI updates" card, unchanged in meaning. The CLI is PINNED
+      (ADR 0023): an installed CLI that drifted off the pin can be put back on it ("Install the pinned version", the
+      runtime service's own safe repair), and a newer published release is reported and never offered, because
+      promoting the pin is a product change.
+   Every offer has Ignore, which hides THAT version until a newer one is offered (UpdateOfferIgnores, the settings
+   table). The product-update banner Home used to show above the conversation box is folded in here, its channel
+   warnings included, so the page says each update once. *@
+
+<section class="dash-panel tool-updates updates-card" aria-label="Updates" data-testid="updates-card">
+    <div class="dash-panel-head">
+        <span>Updates</span>
+        <button type="button" class="studio-link-btn" disabled="@(Updates.IsChecking || _studioChecking)" @onclick="CheckNow">
+            @(Updates.IsChecking || _studioChecking ? "Checking…" : "Check now")
+        </button>
+    </div>
+
+    <h3 class="updates-kind">@(ProductName.Short)</h3>
+    @if (_studioOffer is { } offer && !StudioIgnored)
+    {
+        <ul class="tool-updates-list">
+            <li class="tool-update-row update-offer" data-testid="update-offer-studio">
+                <span class="tool-update-name">@(ProductName.Short) @offer.Offered</span>
+                <span class="tool-update-versions">
+                    @if (offer.Installed is { Length: > 0 } installed)
+                    {
+                        <span class="tool-update-from">installed @installed</span>
+                        <span class="tool-update-arrow" aria-hidden="true">→</span>
+                    }
+                    @(" ")<span class="tool-update-to">offered @offer.Offered</span>
+                    @if (offer.Critical)
+                    {
+                        <span class="update-offer-required" data-testid="update-offer-studio-required"> (required)</span>
+                    }
+                </span>
+
+                @if (offer.CanInstall)
+                {
+                    <span class="studio-muted tool-update-note">
+                        Installing replaces the studio's container image with this release; @(ProductName.Executable) stays as it is. Open
+                        conversations are cut off while it restarts and are resumed when the studio is back.
+                    </span>
+                }
+                else
+                {
+                    <span class="studio-muted tool-update-note" data-testid="update-offer-studio-console">
+                        This studio was started without @(ProductName.Executable)'s upgrade operation, so it cannot install this itself.
+                        Run <code>@(ProductName.Command) update</code> to install it.
+                    </span>
+                }
+
+                @if (offer.ReleaseNotesUrl is { Length: > 0 } notes)
+                {
+                    <a class="update-offer-notes" href="@notes" target="_blank" rel="noopener noreferrer">Release notes</a>
+                }
+
+                <div class="update-offer-actions">
+                    @if (offer.CanInstall && !_confirmStudio)
+                    {
+                        <button type="button" class="studio-btn tool-update-btn" data-testid="update-studio-install"
+                                disabled="@_studioInstalling" @onclick="() => _confirmStudio = true">
+                            Install
+                        </button>
+                    }
+                    @if (!_confirmStudio)
+                    {
+                        <button type="button" class="studio-link-btn" data-testid="update-studio-ignore"
+                                disabled="@_studioInstalling" @onclick="IgnoreStudio"
+                                title="Hides @(ProductName.Short) @offer.Offered until a newer release is offered">
+                            Ignore
+                        </button>
+                    }
+                </div>
+
+                @if (_confirmStudio)
+                {
+                    <div class="update-offer-confirm" role="alertdialog" data-testid="update-studio-confirm">
+                        <p>
+                            Install @(ProductName.Short) @offer.Offered now? @(ProductName.Executable) replaces this studio's image and starts it
+                            again; the window reconnects when the new build is up.
+                        </p>
+                        <div class="update-offer-actions">
+                            <button type="button" class="studio-btn" data-testid="update-studio-install-confirm"
+                                    disabled="@_studioInstalling" @onclick="InstallStudioAsync">
+                                @(_studioInstalling ? "Starting…" : "Install now")
+                            </button>
+                            <button type="button" class="studio-link-btn" data-testid="update-studio-install-cancel"
+                                    disabled="@_studioInstalling" @onclick="() => _confirmStudio = false">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                }
+            </li>
+        </ul>
+    }
+    else
+    {
+        <p class="studio-muted tool-updates-empty" data-testid="update-studio-none">@StudioNothingText</p>
+    }
+
+    @if (_studioMessage is { Length: > 0 } said)
+    {
+        <p class="update-offer-message" role="status" data-testid="update-studio-message">@said</p>
+    }
+
+    @if (Status?.Current is { } recorded)
+    {
+        @if (recorded.ManifestRefused is { } refused)
+        {
+            <p class="studio-muted update-channel-warning" data-testid="product-update-unsigned">
+                The update channel's manifest is not signed by this product's release key, so nothing from it is used
+                (@ProductUpdateBanner.Why(refused)).
+            </p>
+        }
+        else if (recorded.ChannelUnreachableSince is { } since)
+        {
+            <p class="studio-muted update-channel-warning" data-testid="product-update-unreachable">
+                The update channel could not be checked since <LocalTime At="since" TestId="update-card-since" />
+                (@(recorded.ChannelUnreachableReason ?? "no reason was recorded")).
+            </p>
+        }
+    }
+
+    <h3 class="updates-kind">Agent CLI</h3>
+    @if (_available.Count == 0)
+    {
+        <p class="studio-muted tool-updates-empty">
+            @(Updates.LastCheckedUtc is null
+                ? "No update check has run yet."
+                : "All coding-agent CLIs are at their pinned versions.")
+        </p>
+    }
+    else
+    {
+        <ul class="tool-updates-list">
+            @foreach (var info in _available)
+            {
+                var progress = Updates.ProgressFor(info.Tool);
+                var running = progress?.Phase == ToolUpdatePhase.Running;
+                <li class="tool-update-row" data-tool="@info.Tool" data-testid="@($"update-offer-cli-{info.Tool}")">
+                    @if (info.OffPin)
+                    {
+                        <label class="tool-update-select">
+                            <input type="checkbox"
+                                   checked="@_selected.Contains(info.Tool)"
+                                   disabled="@running"
+                                   @onchange="e => ToggleSelect(info.Tool, e)" />
+                            <span class="tool-update-name">@info.DisplayName</span>
+                        </label>
+                    }
+                    else
+                    {
+                        <span class="tool-update-name">@info.DisplayName</span>
+                    }
+                    <span class="tool-update-versions">
+                        @* Work item #363: the spaces are written out. Razor drops the whitespace beside an @if block,
+                           so the versions ran together ("Pinned 2.1.280published 2.1.309"). *@
+                        <span class="tool-update-pinned">Pinned @info.PinnedVersion</span>
+                        @if (info.OffPin)
+                        {
+                            @(" ")<span class="tool-update-arrow" aria-hidden="true">←</span>
+                            <span class="tool-update-from">installed @info.InstalledVersion</span>
+                        }
+                        @if (info.NewerPublished)
+                        {
+                            @(" ")<span class="tool-update-to">published @info.LatestVersion</span>
+                        }
+                    </span>
+
+                    @if (info.OffPin)
+                    {
+                        <button type="button"
+                                class="studio-btn tool-update-btn"
+                                disabled="@running"
+                                @onclick="() => UpdateOne(info.Tool)">
+                            @(running ? "Installing…" : "Install the pinned version")
+                        </button>
+                    }
+                    else if (info.NewerPublished)
+                    {
+                        <span class="studio-muted tool-update-note" data-testid="@($"tool-update-pinned-{info.Tool}")">
+                            A newer release exists. Promoting it is a product change, not a click.
+                        </span>
+                    }
+
+                    @if (OfferedBy(info) is { } offeredVersion && !running)
+                    {
+                        <button type="button" class="studio-link-btn" data-testid="@($"update-cli-ignore-{info.Tool}")"
+                                @onclick="() => IgnoreCli(info.Tool, offeredVersion)"
+                                title="Hides this until a newer version is offered">
+                            Ignore
+                        </button>
+                    }
+
+                    @if (progress is not null && progress.Phase != ToolUpdatePhase.Idle)
+                    {
+                        <div class="tool-update-progress tool-update-@progress.Phase.ToString().ToLowerInvariant()">
+                            @foreach (var line in progress.Log)
+                            {
+                                <div class="tool-update-log-line">@line</div>
+                            }
+                        </div>
+                    }
+                </li>
+            }
+        </ul>
+
+        @if (_selected.Count > 1)
+        {
+            <div class="tool-updates-actions">
+                <button type="button" class="studio-btn" @onclick="UpdateSelected">
+                    Repair @_selected.Count selected
+                </button>
+            </div>
+        }
+    }
+
+    @if (IgnoredCount > 0)
+    {
+        <p class="studio-muted update-ignored" data-testid="update-ignored">
+            @IgnoredCount ignored offer@(IgnoredCount == 1 ? string.Empty : "s") hidden.
+            <button type="button" class="studio-link-btn" data-testid="update-show-ignored" @onclick="ShowIgnored">Show again</button>
+        </p>
+    }
+
+    @if (Updates.LastCheckedUtc is { } checkedAt)
+    {
+        <p class="tool-updates-checked studio-muted">
+            Last checked <LocalTime At="checkedAt" Style="Fravashi.Web.Services.LocalTimeStyle.DateTime" TestId="tool-updates-checked-at" />.
+        </p>
+    }
+    @if (Services.GetService<Fravashi.Application.Projects.ICurrentProject>() is not { } current || current.IsSetUp())
+    {
+        <p class="updates-releases">
+            @* Work item #368: this project's own releases, beside the updates to Fravashi itself. Item #373: a folder in no
+               project has none, so the link is not offered there (it would open the not-set-up state). *@
+            <a href="/releases" data-testid="updates-releases-link">This project's releases</a>
+        </p>
+    }
+</section>
+
+@code {
+    /// <summary>Fravashi's own offer, from whichever source answered.</summary>
+    /// <param name="CanInstall">True when fravashi.exe's upgrade operation is there to install it.</param>
+    internal sealed record StudioOffer(string? Installed, string Offered, bool Critical, bool CanInstall, string? ReleaseNotesUrl);
+
+    /// <summary>How long the update channel gets to answer before the card says it could not be asked.</summary>
+    private static readonly TimeSpan ChannelWait = TimeSpan.FromSeconds(15);
+
+    private IReadOnlyList<ToolUpdateInfo> _available = [];
+    private readonly HashSet<AgentTool> _selected = [];
+    private readonly CancellationTokenSource _disposed = new();
+
+    private StudioOffer? _studioOffer;
+    private string? _studioSaid;
+    private string? _studioMessage;
+    private bool _studioChecking;
+    private bool _studioInstalling;
+    private bool _confirmStudio;
+
+    private IStudioUpgrades? Upgrades => Services.GetService<IStudioUpgrades>();
+
+    private IProductUpdateStatus? Status => Services.GetService<IProductUpdateStatus>();
+
+    private IConfigurationStore? Settings => Services.GetService<IConfigurationStore>();
+
+    private string? InstalledVersion => Services.GetService<IProductInfo>()?.Version;
+
+    private bool StudioIgnored =>
+        _studioOffer is { } offer && UpdateOfferIgnores.Hides(UpdateOfferIgnores.Ignored(Settings, UpdateOfferIgnores.Studio), offer.Offered);
+
+    private string StudioNothingText => _studioChecking && _studioSaid is null
+        ? "Asking the update channel ..."
+        : _studioSaid ?? (InstalledVersion is { Length: > 0 } version
+            ? $"{ProductName.Short} {version}: no newer release is known."
+            : $"No newer {ProductName.Short} release is known.");
+
+    /// <summary>How many offers are hidden right now because a person ignored them.</summary>
+    private int IgnoredCount =>
+        (StudioIgnored ? 1 : 0) + _allCli.Count(i => OfferedBy(i) is { } v
+            && UpdateOfferIgnores.Hides(UpdateOfferIgnores.Ignored(Settings, UpdateOfferIgnores.Cli(i.Tool.ToString())), v));
+
+    private IReadOnlyList<ToolUpdateInfo> _allCli = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        Updates.Changed += OnChanged;
+        Refresh();
+        await CheckStudioAsync(_disposed.Token);
+    }
+
+    /// <summary>
+    /// The version a CLI row offers, which is what Ignore records: the pinned version for a drifted install (the
+    /// repair), the published one for a newer release (reported only). Null for a row with nothing on offer.
+    /// </summary>
+    private static string? OfferedBy(ToolUpdateInfo info) =>
+        info.OffPin ? info.PinnedVersion : info.NewerPublished ? info.LatestVersion : null;
+
+    // Show a row when the installed CLI drifted off the pin (a real repair), when the registry has published
+    // past the pin (reported, never offered), or when a tool has in-progress/just-finished progress, so a
+    // "Succeeded"/"Failed" result stays visible after the row has nothing left to do. An offer a person ignored is
+    // left out until a newer version is offered (work item #358), unless it is mid-install.
+    private void Refresh()
+    {
+        _allCli = Updates.Available;
+        _available = _allCli
+            .Where(i => i.OffPin || i.NewerPublished || Updates.ProgressFor(i.Tool) is { Phase: not ToolUpdatePhase.Idle })
+            .Where(i => Updates.ProgressFor(i.Tool) is { Phase: not ToolUpdatePhase.Idle }
+                || !UpdateOfferIgnores.Hides(UpdateOfferIgnores.Ignored(Settings, UpdateOfferIgnores.Cli(i.Tool.ToString())), OfferedBy(i)))
+            .ToList();
+    }
+
+    /// <summary>
+    /// What the update channel offers Fravashi: fravashi.exe's upgrade operation when this studio has one (the same
+    /// question studio_version asks), otherwise what the launcher last recorded.
+    /// </summary>
+    private async Task CheckStudioAsync(CancellationToken ct)
+    {
+        _studioSaid = null;
+        if (Upgrades is { Available: true } upgrades)
+        {
+            _studioChecking = true;
+            try
+            {
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                wait.CancelAfter(ChannelWait);
+                var answer = await upgrades.CheckAsync(wait.Token);
+                if (answer is null)
+                {
+                    _studioOffer = null;
+                    _studioSaid = $"{ProductName.Executable}'s upgrade operation could not be asked what the update channel offers just now.";
+                }
+                else if (answer.Offered is { Length: > 0 } offered)
+                {
+                    _studioOffer = new StudioOffer(answer.Installed, offered, answer.Critical, CanInstall: true, NotesFor(offered));
+                }
+                else
+                {
+                    _studioOffer = null;
+                    _studioSaid = answer.Said ?? $"{ProductName.Short} {answer.Installed} is the newest the update channel offers.";
+                }
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _studioOffer = null;
+                _studioSaid = "The update channel did not answer in time.";
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            finally
+            {
+                _studioChecking = false;
+            }
+
+            return;
+        }
+
+        var recorded = Status?.Current;
+        _studioOffer = recorded is { Severity: not ProductUpdateSeverity.None, TargetVersion: { Length: > 0 } target }
+            ? new StudioOffer(recorded.CurrentVersion, target, recorded.IsLocked, CanInstall: false, recorded.ReleaseNotesUrl)
+            : null;
+    }
+
+    private string? NotesFor(string offered) =>
+        Status?.Current is { TargetVersion: { } target, ReleaseNotesUrl: { Length: > 0 } url }
+        && string.Equals(target, offered, StringComparison.Ordinal)
+            ? url
+            : null;
+
+    /// <summary>
+    /// Installs Fravashi through the operation studio_upgrade uses. The channel is asked again first, so what is
+    /// installed is the version the person read on the card or nothing: fravashi.exe refuses any other version anyway.
+    /// </summary>
+    private async Task InstallStudioAsync()
+    {
+        if (_studioOffer is not { CanInstall: true } offer || Upgrades is not { Available: true } upgrades)
+        {
+            return;
+        }
+
+        _studioInstalling = true;
+        _studioMessage = null;
+        try
+        {
+            var now = await upgrades.CheckAsync(_disposed.Token);
+            if (now?.Offered is not { Length: > 0 } offered)
+            {
+                _studioMessage = now?.Said ?? $"{ProductName.Executable}'s upgrade operation could not be asked what the update channel offers, so nothing was installed.";
+                return;
+            }
+
+            if (!string.Equals(offered, offer.Offered, StringComparison.Ordinal))
+            {
+                _studioOffer = offer with { Offered = offered, Critical = now.Critical };
+                _studioMessage = $"The update channel now offers {offered}, not {offer.Offered}. Nothing was installed; read the offer again and install it if that is the one.";
+                return;
+            }
+
+            if (await upgrades.ApplyAsync(offered, _disposed.Token) is { } refusal)
+            {
+                _studioMessage = "Not installed: " + refusal;
+                return;
+            }
+
+            _studioMessage = $"Installing {ProductName.Short} {offered}: {ProductName.Executable} is replacing the studio's image. The window reconnects when the new build is up.";
+        }
+        catch (OperationCanceledException)
+        {
+            // The circuit went away; fravashi.exe either started the upgrade or did not, and the next start says which.
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
+        {
+            Logger.LogWarning(ex, "Installing a product update from the Updates card failed.");
+            _studioMessage = "The upgrade could not be started: " + ex.Message;
+        }
+        finally
+        {
+            _studioInstalling = false;
+            _confirmStudio = false;
+        }
+    }
+
+    private void IgnoreStudio()
+    {
+        if (_studioOffer is { } offer)
+        {
+            UpdateOfferIgnores.Ignore(Settings, UpdateOfferIgnores.Studio, offer.Offered);
+            _confirmStudio = false;
+            _studioMessage = null;
+        }
+    }
+
+    private void IgnoreCli(AgentTool tool, string version)
+    {
+        _selected.Remove(tool);
+        UpdateOfferIgnores.Ignore(Settings, UpdateOfferIgnores.Cli(tool.ToString()), version);
+        Refresh();
+    }
+
+    private void ShowIgnored()
+    {
+        UpdateOfferIgnores.ShowAll(Settings, [UpdateOfferIgnores.Studio, .. _allCli.Select(i => UpdateOfferIgnores.Cli(i.Tool.ToString()))]);
+        Refresh();
+    }
+
+    private void ToggleSelect(AgentTool tool, ChangeEventArgs e)
+    {
+        if (e.Value is true)
+        {
+            _selected.Add(tool);
+        }
+        else
+        {
+            _selected.Remove(tool);
+        }
+    }
+
+    private async Task CheckNow()
+    {
+        var cli = Updates.CheckNowAsync();
+        await CheckStudioAsync(_disposed.Token);
+        await cli;
+    }
+
+    private async Task UpdateOne(AgentTool tool)
+    {
+        _selected.Remove(tool);
+        await Updates.UpdateAsync(tool);
+    }
+
+    private async Task UpdateSelected()
+    {
+        foreach (var tool in _selected.ToList())
+        {
+            _selected.Remove(tool);
+            await Updates.UpdateAsync(tool);
+        }
+    }
+
+    private void OnChanged() => InvokeAsync(() =>
+    {
+        Refresh();
+        StateHasChanged();
+    });
+
+    public void Dispose()
+    {
+        Updates.Changed -= OnChanged;
+        _disposed.Cancel();
+        _disposed.Dispose();
+    }
+}

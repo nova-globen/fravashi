@@ -1,0 +1,120 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Application
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Setup
+@using Fravashi.Web.Components.Settings
+
+@* Done (item #373, section 3.7): what the setup did, each line a link to where it lives, and the three ways on. When
+   the import stopped part way the folder IS set up (the project and the binding came first), so the heading says it is,
+   "with one problem", and the import's line says what happened in the report's own words. *@
+@if (Page.Draft.Outcome is { } outcome)
+{
+    <section class="setup-card setup-card-narrow setup-done" aria-labelledby="setup-done-heading" data-testid="setup-done">
+        <div class="setup-card-body">
+            <div class="setup-done-badge @(outcome.Import.HasProblem ? "has-problem" : null)" aria-hidden="true">
+                <SetupGlyph Kind="@(outcome.Import.HasProblem ? "import" : "check")" />
+            </div>
+            <h2 class="setup-title" id="setup-done-heading" tabindex="-1" @ref="_heading">
+                @Page.FolderName is set up@(outcome.Import.HasProblem ? ", with one problem" : string.Empty)
+            </h2>
+
+            <ul class="setup-summary" data-testid="setup-done-summary">
+                <li>
+                    <a href="@SettingsSections.Path(SettingsSections.Project)" data-testid="setup-done-project">
+                        <span class="setup-summary-key">Project</span>
+                        <span class="setup-summary-value">@outcome.ProjectName (@(outcome.ProjectIsNew ? "new" : "joined"))</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="/board" data-testid="setup-done-board">
+                        <span class="setup-summary-key">Board</span>
+                        <span class="setup-summary-value">@Where(outcome.Board, board: true)@ItemsLine(outcome)</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="/wiki" data-testid="setup-done-wiki">
+                        <span class="setup-summary-key">Wiki</span>
+                        <span class="setup-summary-value">@Where(outcome.Wiki, board: false)@DocumentsLine(outcome)</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="@SettingsSections.Path(SettingsSections.Models)" data-testid="setup-done-agents">
+                        <span class="setup-summary-key">Agents</span>
+                        <span class="setup-summary-value">@AgentsLine(outcome)</span>
+                    </a>
+                </li>
+            </ul>
+
+            @if (outcome.Import.HasProblem)
+            {
+                <div class="setup-alert" role="alert" data-testid="setup-done-problem">
+                    @if (outcome.Import.Refusal is { } refusal)
+                    {
+                        <p>@refusal</p>
+                    }
+                    @if (outcome.Import.Problems.Count > 0)
+                    {
+                        <ul>
+                            @foreach (var problem in outcome.Import.Problems)
+                            {
+                                <li>@problem</li>
+                            }
+                        </ul>
+                    }
+                    <a class="studio-btn studio-btn-alt setup-btn-small" href="@SettingsSections.Path(SettingsSections.Project)" data-testid="setup-done-retry-import">Try the import again</a>
+                </div>
+            }
+
+            <div class="setup-actions setup-done-actions">
+                <a class="studio-btn setup-primary" href="/sessions" data-testid="setup-done-start" @ref="_start">Start a conversation</a>
+                <a class="studio-btn studio-btn-alt" href="/board" data-testid="setup-done-open-board">Open the board</a>
+                <a class="studio-link-btn setup-done-home" href="/" data-testid="setup-done-home">Back to Home</a>
+            </div>
+        </div>
+    </section>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public SetupPage Page { get; set; } = default!;
+
+    private ElementReference _heading;
+    private ElementReference _start;
+
+    private string Where(ProviderChoice choice, bool board)
+    {
+        var connection = board ? Page.Connections.Board : Page.Connections.Wiki;
+        return choice == ProviderChoice.Install && connection is not null
+            ? (board ? $"Follows {connection.Target}" : $"Publishes to {connection.Target}")
+            : $"Here in {ProductName.Short}";
+    }
+
+    private static string ItemsLine(SetupOutcome outcome) =>
+        outcome.Import is { Skipped: false, HasProblem: false, WorkItems: > 0 } import
+            ? $", {Plural(import.WorkItems, "work item")} imported"
+            : string.Empty;
+
+    private static string DocumentsLine(SetupOutcome outcome) =>
+        outcome.Import is { Skipped: false, HasProblem: false, Documents: > 0 } import
+            ? $", {Plural(import.Files, "document")} imported" + (import.Folders > 0 ? $" in {Plural(import.Folders, "folder")}" : string.Empty)
+            : string.Empty;
+
+    private static string AgentsLine(SetupOutcome outcome)
+    {
+        var defaults = outcome.Model is null && outcome.Effort is null
+            ? "The install's defaults"
+            : string.Join(", ", new[] { outcome.Model, outcome.Effort is { } e ? e + " effort" : null }.Where(p => p is not null));
+        return $"{defaults}, {(outcome.TrustEdits ? "edits in the copy run without asking" : "every change asks first")}";
+    }
+
+    private static string Plural(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n:N0} {noun}s";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            // Section 7: Done lands with "Start a conversation" focused, so Enter starts the first conversation.
+            await SetupFocus.HeadingAsync(_start);
+        }
+    }
+}

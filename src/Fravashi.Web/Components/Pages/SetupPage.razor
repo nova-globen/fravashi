@@ -1,0 +1,672 @@
+@page "/setup"
+@page "/setup/{Step}"
+@using Fravashi.Application
+@using Fravashi.Application.Git
+@using Fravashi.Application.Migration
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Setup
+@using Fravashi.Domain.Projects
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Web.Components.Setup
+@using Fravashi.Web.Services
+@using Microsoft.AspNetCore.WebUtilities
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@inject NavigationManager Nav
+@implements IDisposable
+
+<PageTitle>@(ProductName.Short) · Set up</PageTitle>
+
+@* Item #373 (docs/plans/first-open-setup.md, with the host's decisions of 2026-10-26): the first thing a person sees
+   when they open a folder for the first time. /setup is the RECOMMENDED SETUP: what was found and what will happen, in
+   plain lines, and one button that does it. "Choose step by step" opens the seven steps (/setup/{slug}) with the same
+   answers. Nothing is written until "Set up" is pressed (FolderSetup.ApplyAsync), and the answers are saved per folder
+   after every change, so Back, a refresh and a restart all come back to them. *@
+<div class="setup-page" data-testid="setup-page">
+    <PageBar Title="@Title">
+        <Actions>
+            @if (_phase is Phase.Recommended or Phase.Steps)
+            {
+                <button type="button" class="studio-link-btn setup-not-now" data-testid="setup-not-now" @onclick="NotNow">Not now</button>
+            }
+        </Actions>
+    </PageBar>
+
+    <div class="setup-canvas">
+    @switch (_phase)
+    {
+        case Phase.Loading:
+            break;
+
+        case Phase.NoFolder:
+            <section class="setup-card setup-card-narrow" data-testid="setup-no-folder">
+                <h2 class="setup-title">No folder is open</h2>
+                <p class="setup-helper">Open a folder from the start dialog, and it is set up here.</p>
+            </section>
+            break;
+
+        case Phase.AlreadySetUp:
+            <section class="setup-card setup-card-narrow" aria-labelledby="setup-already-heading" data-testid="setup-already">
+                <h2 class="setup-title" id="setup-already-heading">@FolderName is already set up</h2>
+                <p class="setup-helper">
+                    It is in @(_currentProjectName ?? "a project"). Its board, wiki and agents follow that project, and
+                    Settings, Project is where that is changed.
+                </p>
+                <div class="setup-actions">
+                    <a class="studio-btn" href="/board" data-testid="setup-open-board">Open the board</a>
+                    <a class="studio-btn studio-btn-alt" href="@SettingsSections.Path(SettingsSections.Project)" data-testid="setup-open-settings">Open Settings, Project</a>
+                </div>
+            </section>
+            break;
+
+        case Phase.Done:
+            <SetupDone Page="this" />
+            break;
+
+        case Phase.Recommended:
+            <SetupRecommended Page="this" />
+            break;
+
+        case Phase.Steps:
+            <div class="setup-frame" data-testid="setup-frame">
+                <nav class="setup-stepper" aria-label="Setup steps">
+                    <ol>
+                        @foreach (var (slug, label) in SetupSteps.All)
+                        {
+                            var state = StepState(slug);
+                            <li class="setup-stepper-item is-@state" data-testid="@($"setup-step-{slug}")">
+                                @if (CanGoTo(slug) && slug != CurrentStep)
+                                {
+                                    <a href="@($"/setup/{slug}")" class="setup-stepper-link" @onclick="() => GoAsync(slug)" @onclick:preventDefault="true">
+                                        <span class="setup-stepper-marker" aria-hidden="true">@Marker(slug, state)</span>
+                                        <span class="setup-stepper-text">
+                                            <span class="setup-stepper-label">@label</span>
+                                            @if (state == "skipped")
+                                            {
+                                                <span class="setup-stepper-note">Skipped</span>
+                                            }
+                                            else if (state == "done")
+                                            {
+                                                <span class="fv-visually-hidden"> (done)</span>
+                                            }
+                                        </span>
+                                    </a>
+                                }
+                                else
+                                {
+                                    <span class="setup-stepper-link" aria-current="@(slug == CurrentStep ? "step" : null)" aria-disabled="@(slug == CurrentStep ? null : "true")">
+                                        <span class="setup-stepper-marker" aria-hidden="true">@Marker(slug, state)</span>
+                                        <span class="setup-stepper-text">
+                                            <span class="setup-stepper-label">@label</span>
+                                            @if (state == "skipped")
+                                            {
+                                                <span class="setup-stepper-note">Skipped</span>
+                                            }
+                                        </span>
+                                    </span>
+                                }
+                            </li>
+                        }
+                    </ol>
+                </nav>
+
+                <section class="setup-card" data-testid="setup-card" data-step="@CurrentStep">
+                    <div class="setup-card-body">
+                        @switch (CurrentStep)
+                        {
+                            case SetupSteps.Project:
+                                <SetupProjectStep @key="CurrentStep" Page="this" />
+                                break;
+                            case SetupSteps.Source:
+                                <SetupSourceStep @key="CurrentStep" Page="this" />
+                                break;
+                            case SetupSteps.Board:
+                                <SetupProviderStep @key="CurrentStep" Page="this" IsBoard="true" />
+                                break;
+                            case SetupSteps.Wiki:
+                                <SetupProviderStep @key="CurrentStep" Page="this" IsBoard="false" />
+                                break;
+                            case SetupSteps.Import:
+                                <SetupImportStep @key="CurrentStep" Page="this" />
+                                break;
+                            case SetupSteps.Agents:
+                                <SetupAgentsStep @key="CurrentStep" Page="this" />
+                                break;
+                        }
+                    </div>
+                    <footer class="setup-card-footer">
+                        @if (CurrentStep != SetupSteps.Project)
+                        {
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="setup-back" disabled="@Busy" @onclick="BackAsync">Back</button>
+                        }
+                        <span class="setup-footer-spacer"></span>
+                        @if (SkipCaption(CurrentStep) is { } caption)
+                        {
+                            <span class="setup-skip-caption" id="setup-skip-caption">@caption</span>
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="setup-skip" disabled="@Busy"
+                                    aria-describedby="setup-skip-caption" @onclick="SkipAsync">Skip</button>
+                        }
+                        <button type="button" class="studio-btn setup-primary" data-testid="setup-next" disabled="@Busy" @onclick="NextAsync">
+                            @if (CurrentStep == SetupSteps.Agents)
+                            {
+                                @(Busy ? "Setting up ..." : $"Set up {FolderName}")
+                            }
+                            else
+                            {
+                                <span>Next</span>
+                            }
+                        </button>
+                    </footer>
+                    @if (ApplyRefusal is { Length: > 0 } refusal && CurrentStep == SetupSteps.Agents)
+                    {
+                        <p class="setup-alert setup-card-alert" role="alert" data-testid="setup-apply-refusal">@refusal</p>
+                    }
+                </section>
+            </div>
+            break;
+    }
+    </div>
+</div>
+
+@code {
+    private enum Phase { Loading, NoFolder, AlreadySetUp, Recommended, Steps, Done }
+
+    /// <summary>The step's slug; none is the recommended setup.</summary>
+    [Parameter]
+    public string? Step { get; set; }
+
+    private Phase _phase = Phase.Loading;
+    private string? _currentProjectName;
+    private string? _from;
+    private CancellationTokenSource? _sourceRead;
+
+    /// <summary>This window's folder.</summary>
+    public WorkspaceRecord? Folder { get; private set; }
+
+    /// <summary>The folder's id.</summary>
+    public string WorkspaceId => Folder?.Id ?? string.Empty;
+
+    /// <summary>The folder's name as the copy says it.</summary>
+    public string FolderName => Folder?.Name is { Length: > 0 } name ? name : "this folder";
+
+    /// <summary>The answers so far.</summary>
+    public SetupDraft Draft { get; private set; } = new();
+
+    /// <summary>The install's provider connections.</summary>
+    public SetupConnections Connections { get; private set; } = new(null, null);
+
+    /// <summary>What the folder's git says; read once, off the render path.</summary>
+    public SetupSource Source { get; private set; } = SetupSource.Reading;
+
+    /// <summary>The import scan for this window.</summary>
+    public SetupScan? Scan { get; private set; }
+
+    /// <summary>The setup itself.</summary>
+    public FolderSetup? Setup { get; private set; }
+
+    /// <summary>The projects there are, for Join and for name collisions.</summary>
+    public IReadOnlyList<ProjectRecord> Projects { get; private set; } = [];
+
+    /// <summary>True while "Set up" runs.</summary>
+    public bool Busy { get; private set; }
+
+    /// <summary>Why the last "Set up" was refused, or null.</summary>
+    public string? ApplyRefusal { get; private set; }
+
+    /// <summary>The field the refusal is about, or null.</summary>
+    public string? ApplyField { get; private set; }
+
+    /// <summary>The step on screen.</summary>
+    public string CurrentStep => Step is { Length: > 0 } s && SetupSteps.IndexOf(s) >= 0 ? s : SetupSteps.Project;
+
+    /// <summary>The validation the Project step shows under its fields, if any.</summary>
+    public string? ProjectError { get; set; }
+
+    /// <summary>Raised when the page wants its steps to re-render (a scan or the git read moved).</summary>
+    public event Action? Refreshed;
+
+    private string Title => Folder is null ? "Set up this folder" : $"Set up {FolderName}";
+
+    protected override void OnInitialized()
+    {
+        Setup = Services.GetService<FolderSetup>();
+        Scan = Services.GetService<SetupScan>();
+        if (Scan is not null)
+        {
+            Scan.Changed += OnScanChanged;
+        }
+
+        _from = ReadFrom();
+    }
+
+    protected override void OnParametersSet()
+    {
+        var workspaces = Services.GetService<IWorkspaceStore>();
+        var id = Services.GetService<BridgeWorkspaceContext>()?.ActiveWorkspaceId;
+        Folder = id is { Length: > 0 } && workspaces?.Get(id) is { } record ? record : null;
+        if (Folder is null || workspaces is null || Setup is null)
+        {
+            _phase = Phase.NoFolder;
+            return;
+        }
+
+        var store = Services.GetRequiredService<ISetupDraftStore>();
+        var settings = Services.GetService<IConfigurationStore>();
+        var connections = Services.GetService<IProviderConnectionStore>();
+        Connections = settings is not null && connections is not null ? SetupConnections.Read(settings, connections) : new(null, null);
+        Projects = Services.GetService<IProjectStore>()?.List() ?? [];
+
+        var current = WorkspaceProjects.Of(Folder);
+        var draft = store.Get(Folder.Id);
+        if (current is not null)
+        {
+            // Set up: Done reads the outcome this setup recorded; any other draft was overtaken (Settings set the folder
+            // up some other way) and is discarded on sight.
+            if (draft?.Outcome is { } outcome && outcome.ProjectId == current.Value)
+            {
+                Draft = draft;
+                _phase = Phase.Done;
+                return;
+            }
+
+            if (draft is not null)
+            {
+                store.Remove(Folder.Id);
+            }
+
+            _currentProjectName = Projects.FirstOrDefault(p => p.Id == current)?.Name;
+            _phase = Phase.AlreadySetUp;
+            return;
+        }
+
+        if (draft?.Outcome is not null)
+        {
+            // An outcome for a folder that is no longer in that project: it is history, and the setup starts again.
+            store.Remove(Folder.Id);
+            draft = null;
+        }
+
+        Draft = draft ?? NewDraft();
+        if (Step is null)
+        {
+            if (Draft.StepByStep && SetupSteps.IndexOf(Draft.Step) >= 0 && Draft.Step != SetupSteps.Done)
+            {
+                // Resume where the person was.
+                Nav.NavigateTo($"/setup/{Draft.Step}", replace: true);
+                _phase = Phase.Loading;
+                return;
+            }
+
+            _phase = Phase.Recommended;
+        }
+        else if (CurrentStep == SetupSteps.Done || !CanGoTo(CurrentStep))
+        {
+            // Done comes from pressing "Set up", and a step ahead is not reachable until the ones before it were seen.
+            Nav.NavigateTo($"/setup/{(Draft.StepByStep ? Draft.Step : SetupSteps.Project)}", replace: true);
+            _phase = Phase.Loading;
+            return;
+        }
+        else
+        {
+            Draft.StepByStep = true;
+            Draft.Step = CurrentStep;
+            Draft.See(CurrentStep);
+            Save();
+            _phase = Phase.Steps;
+        }
+
+        ReadSource();
+    }
+
+    /// <summary>
+    /// The draft a folder starts from: the plan's defaults. A new project's board and wiki are HERE, whatever the install
+    /// is connected to: an install's connection was made for one external project, and a new folder following it would
+    /// send its work into someone else's board (plan section 10). The steps offer the connection; nothing picks it.
+    /// </summary>
+    private SetupDraft NewDraft() => new()
+    {
+        NewName = Setup!.SuggestName(FolderName),
+        Board = ProviderChoice.None,
+        Wiki = ProviderChoice.None,
+    };
+
+    /// <summary>Saves the answers. Every step calls it after every change.</summary>
+    public void Save()
+    {
+        if (Folder is not null)
+        {
+            Services.GetRequiredService<ISetupDraftStore>().Save(Folder.Id, Draft);
+        }
+    }
+
+    /// <summary>Saves and repaints.</summary>
+    public void Changed()
+    {
+        Save();
+        StateHasChanged();
+    }
+
+    /// <summary>True when the folder used to be in the shared Default project (schema step 48 unbound it).</summary>
+    public bool WasInDefault => DefaultProject.Is(Folder?.FormerProjectId);
+
+    /// <summary>The shared Default project's record, when it still exists.</summary>
+    public ProjectRecord? DefaultRecord => Projects.FirstOrDefault(p => DefaultProject.Is(p.Id.Value));
+
+    /// <summary>The selection the import would make now: the scan's defaults with the person's changes.</summary>
+    public ImportSelection CurrentSelection() =>
+        Scan?.Result is { } result ? ImportSelection.From(result.Candidates, Draft.Import) : ImportSelection.None;
+
+    /// <summary>What joining the chosen project means for the import: null, or the project that already holds work.</summary>
+    public (string Name, ProjectContents Contents)? JoinedWithWork()
+    {
+        if (Draft.ProjectMode != SetupProjectMode.Join || Draft.JoinProjectId is not { Length: > 0 } join)
+        {
+            return null;
+        }
+
+        var record = Projects.FirstOrDefault(p => p.Id.Value == join);
+        var contents = Services.GetService<IProjectContents>()?.Of(new ProjectId(join)) ?? ProjectContents.Empty;
+        return record is not null && !contents.IsEmpty ? (record.Name, contents) : null;
+    }
+
+    /// <summary>Starts the scan for this folder (the screen that shows it calls this).</summary>
+    public void StartScan()
+    {
+        if (Folder is not null)
+        {
+            Scan?.Start(Folder.Id, FolderName);
+        }
+    }
+
+    /// <summary>Goes to a step, saving where the person is.</summary>
+    public async Task GoAsync(string slug)
+    {
+        await Task.CompletedTask;
+        Draft.StepByStep = true;
+        Draft.Step = slug;
+        Save();
+        Nav.NavigateTo($"/setup/{slug}");
+    }
+
+    /// <summary>"Choose step by step" from the recommended setup, optionally on Join.</summary>
+    public Task ChooseStepByStepAsync(bool joinDefault = false)
+    {
+        if (joinDefault && DefaultRecord is { } shared)
+        {
+            Draft.ProjectMode = SetupProjectMode.Join;
+            Draft.JoinProjectId = shared.Id.Value;
+        }
+
+        return GoAsync(SetupSteps.Project);
+    }
+
+    private async Task NextAsync()
+    {
+        if (CurrentStep == SetupSteps.Project && !ValidateProject())
+        {
+            return;
+        }
+
+        // Pressing the primary button answers the step, so a Skip pressed on it earlier no longer holds.
+        Draft.MarkSkipped(CurrentStep, false);
+        if (CurrentStep == SetupSteps.Agents)
+        {
+            await ApplyAsync();
+            return;
+        }
+
+        await GoAsync(Next(CurrentStep));
+    }
+
+    private async Task SkipAsync()
+    {
+        Draft.MarkSkipped(CurrentStep, true);
+        if (CurrentStep == SetupSteps.Board)
+        {
+            Draft.Board = ProviderChoice.None;
+        }
+        else if (CurrentStep == SetupSteps.Wiki)
+        {
+            Draft.Wiki = ProviderChoice.None;
+        }
+
+        if (CurrentStep == SetupSteps.Agents)
+        {
+            await ApplyAsync();
+            return;
+        }
+
+        await GoAsync(Next(CurrentStep));
+    }
+
+    private Task BackAsync()
+    {
+        var index = SetupSteps.IndexOf(CurrentStep);
+        return index > 0 ? GoAsync(SetupSteps.All[index - 1].Slug) : Task.CompletedTask;
+    }
+
+    private static string Next(string step) => SetupSteps.All[Math.Min(SetupSteps.IndexOf(step) + 1, SetupSteps.All.Count - 1)].Slug;
+
+    /// <summary>Checks the Project step; shows its error and keeps the person there when something is missing.</summary>
+    public bool ValidateProject()
+    {
+        ProjectError = Draft.ProjectMode == SetupProjectMode.New
+            ? FolderSetup.NameProblem(Draft.NewName)
+            : Draft.JoinProjectId is { Length: > 0 } ? null : "Pick a project to join.";
+        StateHasChanged();
+        return ProjectError is null;
+    }
+
+    /// <summary>
+    /// Presses "Set up": waits for a running scan (the import is part of what was promised), then applies the draft with
+    /// the import's current selection, and lands on Done.
+    /// </summary>
+    public async Task ApplyAsync()
+    {
+        if (Busy || Setup is null || Folder is null)
+        {
+            return;
+        }
+
+        Busy = true;
+        ApplyRefusal = null;
+        ApplyField = null;
+        StateHasChanged();
+        try
+        {
+            // Following the install's connection means nothing until the install has one; recorded as "here" instead,
+            // so connecting a provider later never moves this project's board or wiki without being asked.
+            Draft.Board = Connections.Board is null ? ProviderChoice.None : Draft.Board;
+            Draft.Wiki = Connections.Wiki is null ? ProviderChoice.None : Draft.Wiki;
+            var importWanted = !Draft.IsSkipped(SetupSteps.Import) && JoinedWithWork() is null;
+            SetupImportSource? source = null;
+            if (importWanted && Scan is not null)
+            {
+                if (Scan.Result is null && !Scan.IsRunning)
+                {
+                    StartScan();
+                }
+
+                var result = await Scan.WaitAsync();
+                if (result is not null && Scan.Scanner is { } scanner)
+                {
+                    source = new SetupImportSource(
+                        ImportSelection.From(result.Candidates, Draft.Import),
+                        async (selection, ct) => await scanner.ReadAsync(selection, ct));
+                }
+            }
+
+            var applied = await Setup.ApplyAsync(Folder.Id, Draft, source);
+            if (applied.Outcome is null)
+            {
+                ApplyRefusal = applied.Refusal;
+                ApplyField = applied.Field;
+                if (applied.Field is "name" or "join")
+                {
+                    ProjectError = applied.Refusal;
+                    if (_phase == Phase.Steps)
+                    {
+                        Nav.NavigateTo($"/setup/{SetupSteps.Project}");
+                    }
+                }
+
+                return;
+            }
+
+            Nav.NavigateTo($"/setup/{SetupSteps.Done}");
+        }
+        finally
+        {
+            Busy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    /// <summary>"Start empty": a new project named after the folder, nothing imported, and Done.</summary>
+    public async Task StartEmptyAsync()
+    {
+        if (Busy || Setup is null || Folder is null)
+        {
+            return;
+        }
+
+        Busy = true;
+        ApplyRefusal = null;
+        try
+        {
+            var applied = await Setup.StartEmptyAsync(Folder.Id);
+            if (applied.Outcome is null)
+            {
+                ApplyRefusal = applied.Refusal;
+                return;
+            }
+
+            Nav.NavigateTo($"/setup/{SetupSteps.Done}");
+        }
+        finally
+        {
+            Busy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void NotNow()
+    {
+        Draft.NotNow = true;
+        Save();
+        Scan?.Cancel();
+        Nav.NavigateTo(_from ?? "/");
+    }
+
+    private string? ReadFrom()
+    {
+        var query = new Uri(Nav.Uri).Query;
+        if (string.IsNullOrEmpty(query) || !QueryHelpers.ParseQuery(query).TryGetValue("from", out var values))
+        {
+            return null;
+        }
+
+        // Only a path inside the studio, never another site, and never the setup itself.
+        var from = values.ToString();
+        return from.StartsWith('/') && !from.StartsWith("//", StringComparison.Ordinal)
+               && !from.StartsWith("/setup", StringComparison.OrdinalIgnoreCase)
+            ? from
+            : null;
+    }
+
+    private bool CanGoTo(string slug)
+    {
+        if (slug == SetupSteps.Done)
+        {
+            return false;
+        }
+
+        // A step is reachable once every step before it has been seen.
+        var index = SetupSteps.IndexOf(slug);
+        return index == 0 || SetupSteps.Questions.Take(index).All(s => Draft.Seen.Contains(s, StringComparer.Ordinal) || s == CurrentStep);
+    }
+
+    private string StepState(string slug) =>
+        slug == CurrentStep ? "current"
+        : Draft.IsSkipped(slug) ? "skipped"
+        : Draft.Seen.Contains(slug, StringComparer.Ordinal) && SetupSteps.IndexOf(slug) < SetupSteps.IndexOf(CurrentStep) ? "done"
+        : Draft.Seen.Contains(slug, StringComparer.Ordinal) ? "seen"
+        : "ahead";
+
+    private static string Marker(string slug, string state) => state switch
+    {
+        "done" => "✓",
+        // A minus sign (U+2212), named as a code point: a skipped step is passed over, not done.
+        "skipped" => ((char)0x2212).ToString(),
+        _ => (SetupSteps.IndexOf(slug) + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
+
+    /// <summary>What skipping a step means, shown beside its Skip; null for a step that has none.</summary>
+    public static string? SkipCaption(string step) => step switch
+    {
+        SetupSteps.Board => "Skipping keeps a local board.",
+        SetupSteps.Wiki => "Skipping keeps a local wiki.",
+        SetupSteps.Import => "Skipping imports nothing; you can import later from Settings, Project.",
+        SetupSteps.Agents => "Skipping keeps the install's defaults and asks before every change.",
+        _ => null,
+    };
+
+    private void ReadSource()
+    {
+        if (Source.State != SetupSourceState.Reading || _sourceRead is not null || Folder is null)
+        {
+            return;
+        }
+
+        _sourceRead = new CancellationTokenSource();
+        var token = _sourceRead.Token;
+        var workspaceId = Folder.Id;
+        _ = Task.Run(async () =>
+        {
+            var source = await SetupSource.ReadAsync(
+                Services.GetService<IWorkspaceGit>(), workspaceId,
+                Services.GetService<Func<Fravashi.Infrastructure.Git.GitHostAccess>>(), token);
+            if (!token.IsCancellationRequested)
+            {
+                Source = source;
+                await InvokeAsync(() =>
+                {
+                    StateHasChanged();
+                    Refreshed?.Invoke();
+                });
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>Reads git again, for the Source step's Retry.</summary>
+    public void RereadSource()
+    {
+        _sourceRead?.Cancel();
+        _sourceRead = null;
+        Source = SetupSource.Reading;
+        ReadSource();
+        StateHasChanged();
+    }
+
+    private void OnScanChanged() => _ = InvokeAsync(() =>
+    {
+        StateHasChanged();
+        Refreshed?.Invoke();
+    });
+
+    public void Dispose()
+    {
+        // Leaving the setup stops a scan nobody is waiting for any more.
+        if (Scan is { IsRunning: true } && !Busy)
+        {
+            Scan.Cancel();
+        }
+
+        _sourceRead?.Cancel();
+        _sourceRead?.Dispose();
+        if (Scan is not null)
+        {
+            Scan.Changed -= OnScanChanged;
+        }
+    }
+}

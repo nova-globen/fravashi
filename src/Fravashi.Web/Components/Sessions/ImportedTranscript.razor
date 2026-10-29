@@ -1,0 +1,72 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+
+@* Backlog 43. A conversation the user ran with the CLI outside Fravashi, rebuilt from the CLI's own
+   history file on the host. It is read the way a stored conversation is read, and it says, before the
+   first message, exactly what an import cannot give back, so a text-only transcript never passes for a
+   complete one. There is no Resume: the conversation lives in the host CLI's history, not in the
+   container an agent runs in, and import never writes anything back. *@
+<div class="session-history" data-testid="imported-conversation">
+    <div class="session-history-head">
+        <span class="session-history-title">@Conversation.Title</span>
+        <span class="session-card-imported" data-testid="imported-badge">Imported</span>
+        <span class="session-history-state"><LocalTime At="Conversation.StartedUtc" Style="Fravashi.Web.Services.LocalTimeStyle.Short" /></span>
+    </div>
+
+    <div class="session-imported-note" data-testid="imported-disclaimer">
+        Imported from the Claude CLI's own history for this folder, from a conversation run outside @(ProductName.Short).
+        Only the text of your messages and the agent's replies could be recovered. Tool calls, token counts
+        and cost are not recoverable, so this transcript is not the complete conversation, and it cannot be
+        resumed from here.
+    </div>
+
+    @switch (Conversation.Problem)
+    {
+        case ImportedConversationProblem.TooLarge:
+            <div class="session-imported-empty" data-testid="imported-too-large">
+                This conversation's file is too large to import (@SizeText), so none of it is shown.
+            </div>
+            break;
+
+        case ImportedConversationProblem.Missing:
+            <div class="session-imported-empty" data-testid="imported-missing">
+                This conversation's file was gone by the time it was read.
+            </div>
+            break;
+
+        default:
+            @if (Conversation.Messages.Count == 0)
+            {
+                <div class="session-imported-empty" data-testid="imported-no-text">
+                    No message text could be recovered from this conversation's file.
+                </div>
+            }
+            else
+            {
+                <div class="session-transcript" data-testid="imported-transcript"
+                     @oncontextmenu="e => OpenCopyMenuAsync(new TranscriptContextRequest(e.ClientX, e.ClientY, null))"
+                     @oncontextmenu:preventDefault="true">
+                    @foreach (var message in Conversation.Messages)
+                    {
+                        <ChatBubble Role="message.Role" Text="@message.Text" Timestamp="message.Timestamp"
+                                    OnContextMenu="OpenCopyMenuAsync" />
+                    }
+                </div>
+                <TranscriptCopyMenu @ref="_copyMenu" />
+            }
+            break;
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public ImportedConversation Conversation { get; set; } = null!;
+
+    private TranscriptCopyMenu? _copyMenu;
+
+    private Task OpenCopyMenuAsync(TranscriptContextRequest request) =>
+        _copyMenu?.OpenAsync(request) ?? Task.CompletedTask;
+
+    private string SizeText => (Conversation.Size / (1024d * 1024d)).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " MB";
+}

@@ -1,0 +1,35 @@
+@page "/Error"
+@layout Fravashi.Web.Components.Layout.MinimalWindowLayout
+@using Fravashi.Web.Components.Shell
+
+@* Backlog 281: the studio's own Error page. Reached only by StudioError.UseStudioError re-executing a thrown
+   page request here (Services/StudioError.cs): its guard sends a DIRECT request for this route home instead,
+   so the gate exemption below only ever reaches this page by way of a real thrown exception. Says only that
+   something went wrong on the studio's side; the exception itself is never shown here, only logged, under the
+   data directory's logs.
+   <para>
+   Deliberately NOT MainLayout (owner correction, 2026-10-10): this page is exempted from every redirecting gate
+   so it can render instead of looping back to the page that threw, and the app is one persistent interactive
+   circuit, so MainLayout's activity rail and sidebar would let a person navigate anywhere they link to on that
+   SAME circuit with no new HTTP request, which is the one thing a gate-exempt page must never offer. See
+   Components/Layout/MinimalWindowLayout.razor, including its own residual (the title bar's workspace and branch
+   switchers) and its ErrorBoundary around WindowTitleBar.
+   </para>
+   <para>
+   On "no circuit": a component reached through UseExceptionHandler's re-execution renders statically and never
+   starts an interactive circuit, because the request still carries IExceptionHandlerPathFeature when the
+   component endpoint decides how to render it. A statically rendered component emits no event handler, so the
+   Home link below is a plain anchor. <c>data-enhance-nav="false"</c> keeps blazor.web.js from fetch-and-patching
+   this already-at-a-500 page into the DOM on click; it does NOT change which middleware the click's request
+   runs through either way, since an enhanced navigation is an ordinary HTTP GET through the same pipeline
+   (gates included) as any other request. The attribute is about the browser doing a normal full navigation
+   instead of an in-place DOM patch, not about which gates run.
+   </para> *@
+
+<PageTitle>@(ProductName.Short) · Something went wrong</PageTitle>
+<PageBar Title="Something went wrong" />
+
+<div class="studio-page" data-testid="studio-error">
+    <p role="alert">Sorry, something went wrong on the studio's side. The details are in the studio log, under the data directory's logs.</p>
+    <p><a href="/" data-testid="studio-error-home" data-enhance-nav="false">Go to the start page</a></p>
+</div>

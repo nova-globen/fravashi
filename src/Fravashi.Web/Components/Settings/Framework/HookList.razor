@@ -1,0 +1,55 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+
+@* The Hooks list (UI11): a card per hook showing its name and the event it fires on. *@
+
+<div class="skill-list" data-testid="hook-list">
+    <div class="skill-list-header">
+        <h2>Hooks</h2>
+        <a class="studio-btn" href="/settings/framework/hooks/new" data-testid="hook-new">New hook</a>
+    </div>
+
+    @if (_hooks.Count == 0)
+    {
+        <div class="page-body-empty" data-testid="hook-list-empty">
+            <p class="studio-muted">No hooks yet. Create one to get started.</p>
+        </div>
+    }
+    else
+    {
+        <div class="skill-cards">
+            @foreach (var item in _hooks)
+            {
+                var hook = item.Definition;
+                <a class="skill-card" href="@($"/settings/framework/hooks/view/{item.Id}")"
+                   data-testid="@($"hook-card-{hook.Name}")">
+                    <SkillIconDisplay Icon="Icon" Size="44" Fallback="@hook.Name"
+                                      TestId="@($"hook-card-icon-{hook.Name}")" />
+                    <div class="skill-card-text">
+                        <div class="skill-card-title">@hook.Name</div>
+                        <div class="skill-card-subtitle">@hook.Event</div>
+                        @if (!string.IsNullOrWhiteSpace(hook.Matcher))
+                        {
+                            <div class="skill-card-name">matcher: @hook.Matcher</div>
+                        }
+                    </div>
+                </a>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly SkillIcon Icon = new("PlugConnected", null);
+
+    private sealed record Item(string Id, HookDefinition Definition);
+
+    private IReadOnlyList<Item> _hooks = [];
+
+    protected override void OnInitialized() =>
+        _hooks = Store.List(FrameworkArtifactKind.Hook)
+            .Select(a => new Item(a.Id, FrameworkPayload<HookDefinition>.From(a)))
+            .ToList();
+}

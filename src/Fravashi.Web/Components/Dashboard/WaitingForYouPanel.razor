@@ -1,0 +1,417 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Autopilot
+@using Fravashi.Application.Sessions.Tools
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Web.Services
+@inject IWaitingForPersonList Waiting
+@inject IWorkspaceStore Workspaces
+@inject BridgeWorkspaceContext BridgeContext
+@inject BridgeClient Bridge
+@inject NavigationManager Nav
+@inject ILogger<WaitingForYouPanel> Logger
+@implements IDisposable
+
+@* Backlog 304 (ADR 0031 decision 12): every approval, every agent question and every parked autopilot item,
+   in one place, at the top of the home page. Renders nothing while nothing waits, the same way
+   ProductUpdateBanner renders nothing with no update. *@
+
+@if (_entries.Count > 0)
+{
+    <section class="dash-panel waiting-for-you" aria-label="@HeadingLabel" data-testid="@PanelTestId">
+        <div class="dash-panel-head">
+            <span>@HeadingLabel</span>
+            <span class="home-panel-count" data-testid="@(PanelTestId + "-count")">@_entries.Count</span>
+        </div>
+        <ul class="waiting-for-you-list">
+            @foreach (var entry in _entries)
+            {
+                <li class="waiting-for-you-row" data-testid="waiting-for-you-row" data-kind="@KindAttribute(entry.Kind)">
+                    <button type="button" class="waiting-for-you-open" data-testid="waiting-for-you-open"
+                            disabled="@_busy" @onclick="() => ClickAsync(entry)"
+                            aria-expanded="@(entry.Kind == WaitingForPersonKind.Parked ? (_explaining == entry.Key ? "true" : "false") : null)">
+                        @* Item #373: this list spans every project, so each row says whose it is. *@
+                        <span class="waiting-for-you-what">@if (OwnerOf(entry) is { } owner)
+                            {<span class="waiting-for-you-project" data-testid="waiting-for-you-project">@owner</span><span class="waiting-for-you-sep" aria-hidden="true"> · </span>}@StudioToolDescriptions.Humanize(entry.What)</span>
+                        <span class="waiting-for-you-since">Since <LocalTime At="entry.SinceUtc" /></span>
+                    </button>
+                    @* Work item #356: a parked autopilot item explains itself here instead of sending the person to the
+                       autopilot page's dispatch form with no word on what to do there. Work item #358 retired that page, so
+                       the action below goes to the Autopilot card on Home. *@
+                    @if (entry.Kind == WaitingForPersonKind.Parked && _explaining == entry.Key)
+                    {
+                        <div class="waiting-for-you-explain" data-testid="waiting-for-you-explain">
+                            @foreach (var line in ParkedExplanation.Lines(entry))
+                            {
+                                <p>@line</p>
+                            }
+                            <div class="waiting-for-you-actions">
+                                @if (CanDispatchAgain(entry))
+                                {
+                                    <button type="button" class="studio-btn" data-testid="waiting-for-you-dispatch"
+                                            disabled="@_busy" @onclick="() => DispatchAgainAsync(entry)"
+                                            title="Starts a new autopilot run for this project with the settings the last run used">
+                                        Dispatch again
+                                    </button>
+                                }
+                                @if (entry.ItemNumber is { } number)
+                                {
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="waiting-for-you-open-item"
+                                            disabled="@_busy" @onclick="() => OpenAsync(entry, ItemRoute(number))">
+                                        Open #@number
+                                    </button>
+                                }
+                                @if (ParkedExplanation.NeedsPush(entry))
+                                {
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="waiting-for-you-open-git"
+                                            disabled="@_busy" @onclick="() => OpenAsync(entry, GitRoute)">
+                                        Open the Git page
+                                    </button>
+                                }
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="waiting-for-you-open-autopilot"
+                                        disabled="@_busy" @onclick="() => OpenAsync(entry, AutopilotRoute)">
+                                    Open the Autopilot card
+                                </button>
+                                @if (entry.Run is not null && entry.Item is not null && Dismissals is not null)
+                                {
+                                    <button type="button" class="studio-link-btn" data-testid="waiting-for-you-dismiss"
+                                            disabled="@_busy" @onclick="() => DismissAsync(entry)"
+                                            title="Stops showing this notice; the item stays marked for the autopilot">
+                                        Dismiss
+                                    </button>
+                                }
+                            </div>
+                            @if (_explainMessage is { Length: > 0 } said)
+                            {
+                                <p class="waiting-for-you-said" role="status" data-testid="waiting-for-you-said">@said</p>
+                            }
+                        </div>
+                    }
+                    @if (_messageFor == entry.Key && _message is not null)
+                    {
+                        <p class="waiting-for-you-message" role="alert" data-testid="waiting-for-you-message">@_message</p>
+                    }
+                    @if (_messageFor == entry.Key && _sessionsInstead is not null)
+                    {
+                        <button type="button" class="studio-link-btn" data-testid="waiting-for-you-sessions-instead"
+                                @onclick="() => OpenWorkspaceSessions(_sessionsInstead)">
+                            Open that folder's sessions
+                        </button>
+                    }
+                </li>
+            }
+        </ul>
+    </section>
+}
+
+@code {
+    /// <summary>Restricts the list to one kind (backlog 307's approvals inbox); null shows every kind, the Home page's default.</summary>
+    [Parameter]
+    public WaitingForPersonKind? KindFilter { get; set; }
+
+    /// <summary>The panel's own heading, shown above the count.</summary>
+    [Parameter]
+    public string HeadingLabel { get; set; } = "Waiting for you";
+
+    /// <summary>
+    /// The section's and its count's own test id (backlog 307): lets a page that is not Home render this
+    /// filtered to one kind without colliding, in a test, with Home's own "waiting-for-you" id. Row-level test
+    /// ids are untouched: the two panels never render on the same page at once.
+    /// </summary>
+    [Parameter]
+    public string PanelTestId { get; set; } = "waiting-for-you";
+
+    private IReadOnlyList<WaitingForPersonEntry> _entries = [];
+    private bool _busy;
+    private string? _messageFor;
+    private string? _message;
+    private string? _sessionsInstead;
+    private readonly CancellationTokenSource _stopPolling = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync(_stopPolling.Token);
+        _ = PollAsync(_stopPolling.Token);
+    }
+
+    public void Dispose()
+    {
+        _stopPolling.Cancel();
+        _stopPolling.Dispose();
+    }
+
+    private async Task PollAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                await LoadAsync(ct);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task LoadAsync(CancellationToken ct)
+    {
+        try
+        {
+            var current = await Waiting.CurrentAsync(ct);
+            var scoped = KindFilter is { } kind ? current.Where(e => e.Kind == kind) : current;
+            var ordered = WaitingForPersonOrdering.Order(scoped);
+            await InvokeAsync(() =>
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                _entries = ordered;
+                StateHasChanged();
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Could not read what is waiting on a person for the home page.");
+        }
+    }
+
+    /// <summary>
+    /// Whose an entry is (item #373): a parked item's project, or the project of the folder a session runs in, so a row of
+    /// another project is never read as this folder's. Null only when the entry names neither.
+    /// </summary>
+    private string? OwnerOf(WaitingForPersonEntry entry)
+    {
+        var projects = Services.GetService<Fravashi.Application.Projects.IProjectStore>();
+        if (entry.Project is { } project)
+        {
+            return ProjectLabels.NameOf(projects, project);
+        }
+
+        return string.IsNullOrEmpty(entry.WorkspaceId) ? null : ProjectLabels.ForFolder(Workspaces, projects, entry.WorkspaceId);
+    }
+
+    private static string KindAttribute(WaitingForPersonKind kind) => kind switch
+    {
+        WaitingForPersonKind.Approval => "approval",
+        WaitingForPersonKind.Question => "question",
+        _ => "parked",
+    };
+
+    /// <summary>
+    /// Opens the place an entry is answered: a session's route for Approval/Question, the Autopilot card for Parked. In
+    /// THIS window's workspace it is a plain navigation; in another one it re-registers through
+    /// RecentWorkspaceReopen.PrepareAsync first, the same shape LiveSessionsCard/RecentConversationsCard
+    /// already use, then forceLoads carrying ?ws= so the window adopts it. A session entry whose folder
+    /// re-registers under a DIFFERENT id (LiveSessionsCard's own caveat) is never navigated to that id: the
+    /// session belongs to the OLD id, so the person is told why and offered that folder's sessions area
+    /// instead. A Parked entry has no such caveat: the Autopilot card reads the CURRENT project's open run, so landing on
+    /// the adopted id is exactly right even when it differs from the id the run was dispatched under.
+    /// </summary>
+    private async Task OpenAsync(WaitingForPersonEntry entry, string? to = null)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        Clear();
+
+        var route = to ?? (entry.SessionId is { } sessionId ? $"/sessions/{sessionId.Value:D}" : AutopilotRoute);
+
+        if (string.IsNullOrEmpty(entry.WorkspaceId)
+            || string.Equals(BridgeContext.ActiveWorkspaceId, entry.WorkspaceId, StringComparison.Ordinal))
+        {
+            Nav.NavigateTo(route);
+            return;
+        }
+
+        if (Workspaces.Get(entry.WorkspaceId) is not { } workspace)
+        {
+            Nav.NavigateTo(WithWorkspace(route, entry.WorkspaceId), forceLoad: true);
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var reopen = await RecentWorkspaceReopen.PrepareAsync(
+                BridgeContext, Bridge, Workspaces, workspace, CancellationToken.None);
+            if (reopen.Outcome == RecentReopenOutcome.Unreachable)
+            {
+                Say(entry, $"{workspace.RootPath} could not be reached just now. If it is on a network drive "
+                    + "or a removable disk, connect it and try again.");
+                return;
+            }
+
+            if (reopen.Outcome == RecentReopenOutcome.Missing || reopen.WorkspaceId is not { Length: > 0 } adopted)
+            {
+                Say(entry, $"{workspace.RootPath} was not found on this machine. It may have been moved or renamed.");
+                return;
+            }
+
+            if (entry.SessionId is not null && !string.Equals(adopted, entry.WorkspaceId, StringComparison.Ordinal))
+            {
+                Say(entry, $"{workspace.RootPath} is now known to {ProductName.Short} under a different id, so this "
+                    + "conversation cannot be opened directly in it.");
+                _sessionsInstead = adopted;
+                return;
+            }
+
+            Nav.NavigateTo(WithWorkspace(route, adopted), forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Switching to the workspace {WorkspaceId} to open a waiting entry failed.", entry.WorkspaceId);
+            Say(entry, "The studio window could not be reached, so that could not be opened.");
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    /// <summary>Home's Autopilot card (work item #358), which replaced the retired autopilot page.</summary>
+    private const string AutopilotRoute = AutopilotCard.Route;
+
+    /// <summary>A route with the workspace a window should adopt, put before any fragment so the fragment still scrolls.</summary>
+    internal static string WithWorkspace(string route, string workspaceId)
+    {
+        var hash = route.IndexOf('#', StringComparison.Ordinal);
+        var path = hash < 0 ? route : route[..hash];
+        var fragment = hash < 0 ? string.Empty : route[hash..];
+        return $"{path}?ws={Uri.EscapeDataString(workspaceId)}{fragment}";
+    }
+    private const string GitRoute = "/git";
+
+    private static string ItemRoute(int number) =>
+        "/workitems/" + number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The parked entry whose explanation is open (work item #356), by its key.</summary>
+    private string? _explaining;
+
+    /// <summary>What the last action in the open explanation said (dispatched, refused, dismissed).</summary>
+    private string? _explainMessage;
+
+    private IParkedNoticeDismissals? Dismissals => Services.GetService<IParkedNoticeDismissals>();
+
+    /// <summary>
+    /// A session entry opens its session as before; a parked one opens (or closes) its explanation in place, because
+    /// the retired autopilot page alone did not say what to do (work item #356; the page itself is retired, #358).
+    /// </summary>
+    private Task ClickAsync(WaitingForPersonEntry entry)
+    {
+        if (entry.Kind != WaitingForPersonKind.Parked)
+        {
+            return OpenAsync(entry);
+        }
+
+        Clear();
+        _explainMessage = null;
+        _explaining = _explaining == entry.Key ? null : entry.Key;
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Only an ENDED run can be dispatched again: while it runs, the project already has an open run.</summary>
+    private bool CanDispatchAgain(WaitingForPersonEntry entry) =>
+        entry.RunEnded && entry.Run is not null && entry.Project is not null
+        && Services.GetService<AutopilotDispatcher>() is not null
+        && Services.GetService<IAutopilotRunStore>() is not null;
+
+    /// <summary>
+    /// Dispatches the project again with the settings its last run used (work item #356): the same call the Autopilot
+    /// card's dispatch form makes, so every check it makes (an open run, a dirty folder, delivery readiness) still refuses in
+    /// its own words, shown here.
+    /// </summary>
+    private async Task DispatchAgainAsync(WaitingForPersonEntry entry)
+    {
+        if (_busy || entry.Run is not { } runId || entry.Project is not { } project
+            || Services.GetService<AutopilotDispatcher>() is not { } dispatcher
+            || Services.GetService<IAutopilotRunStore>() is not { } runs)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var last = await runs.GetAsync(runId);
+            if (last is null)
+            {
+                _explainMessage = "The last run could not be found, so its settings cannot be reused. Dispatch from the Autopilot card instead.";
+                return;
+            }
+
+            var outcome = await dispatcher.DispatchAsync(project, last.Settings);
+            if (outcome.Run is { } run)
+            {
+                _explainMessage = run.Queue.Count == 1
+                    ? "Dispatched: a new run started with 1 item. The Autopilot card shows its progress."
+                    : $"Dispatched: a new run started with {run.Queue.Count} items. The Autopilot card shows its progress.";
+                await LoadAsync(_stopPolling.Token);
+            }
+            else
+            {
+                _explainMessage = "Not dispatched: " + (outcome.Refusal ?? "the dispatch was refused without a reason.");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Dispatching the project again from Home failed.");
+            _explainMessage = "The dispatch failed: " + ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task DismissAsync(WaitingForPersonEntry entry)
+    {
+        if (entry.Run is not { } run || entry.Item is not { } item || Dismissals is not { } dismissals)
+        {
+            return;
+        }
+
+        try
+        {
+            dismissals.Dismiss(run, item);
+            _explaining = null;
+            _explainMessage = null;
+            _entries = _entries.Where(e => e.Key != entry.Key).ToList();
+            await LoadAsync(_stopPolling.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            Logger.LogWarning(ex, "Dismissing a parked notice failed.");
+            _explainMessage = "The notice could not be dismissed: " + ex.Message;
+        }
+    }
+
+    private void OpenWorkspaceSessions(string workspaceId) =>
+        Nav.NavigateTo($"/sessions?ws={Uri.EscapeDataString(workspaceId)}", forceLoad: true);
+
+    private void Say(WaitingForPersonEntry entry, string message)
+    {
+        _messageFor = entry.Key;
+        _message = message;
+    }
+
+    private void Clear()
+    {
+        _messageFor = null;
+        _message = null;
+        _sessionsInstead = null;
+    }
+}

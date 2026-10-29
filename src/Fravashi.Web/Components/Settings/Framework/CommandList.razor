@@ -1,0 +1,55 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+
+@* The Commands list (UI11): a card per slash command showing its invocation name and description. *@
+
+<div class="skill-list" data-testid="command-list">
+    <div class="skill-list-header">
+        <h2>Commands</h2>
+        <a class="studio-btn" href="/settings/framework/commands/new" data-testid="command-new">New command</a>
+    </div>
+
+    @if (_commands.Count == 0)
+    {
+        <div class="page-body-empty" data-testid="command-list-empty">
+            <p class="studio-muted">No commands yet. Create one to get started.</p>
+        </div>
+    }
+    else
+    {
+        <div class="skill-cards">
+            @foreach (var item in _commands)
+            {
+                var command = item.Definition;
+                <a class="skill-card" href="@($"/settings/framework/commands/view/{item.Id}")"
+                   data-testid="@($"command-card-{command.Name}")">
+                    <SkillIconDisplay Icon="Icon" Size="44" Fallback="@command.Name"
+                                      TestId="@($"command-card-icon-{command.Name}")" />
+                    <div class="skill-card-text">
+                        <div class="skill-card-title">/@command.Name</div>
+                        <div class="skill-card-subtitle">@command.Description</div>
+                        @if (!string.IsNullOrWhiteSpace(command.ArgumentHint))
+                        {
+                            <div class="skill-card-name">@command.ArgumentHint</div>
+                        }
+                    </div>
+                </a>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly SkillIcon Icon = new("Wand", null);
+
+    private sealed record Item(string Id, CommandDefinition Definition);
+
+    private IReadOnlyList<Item> _commands = [];
+
+    protected override void OnInitialized() =>
+        _commands = Store.List(FrameworkArtifactKind.Command)
+            .Select(a => new Item(a.Id, FrameworkPayload<CommandDefinition>.From(a)))
+            .ToList();
+}

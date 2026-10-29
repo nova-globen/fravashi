@@ -1,0 +1,83 @@
+@namespace Fravashi.Web.Components.Shell
+
+@* A collapsible sidebar section (stacked accordion in the reference editor's style) for use inside a PageSplit sidebar:
+   Open Editors / Search / Code Tree on the Code page, Branches / Tags / Stashes / Pull requests on the Git page.
+   HeaderActions renders right-aligned icon buttons on the header row (VS-Code-style explorer actions
+   like refresh / collapse-all); clicks there must stopPropagation to avoid toggling the section.
+   Pure UI state; nothing is persisted. *@
+<div class="page-sidebar-section @(_collapsed ? "collapsed" : string.Empty)" data-testid="@TestId">
+    <div class="page-sidebar-section-header-row">
+        <button type="button" class="page-sidebar-section-header" @onclick="Toggle"
+                aria-expanded="@(!_collapsed ? "true" : "false")">
+            <svg class="page-sidebar-section-chevron @(_collapsed ? string.Empty : "expanded")"
+                 viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m6 4 4.5 4L6 12" />
+            </svg>
+            <span class="page-sidebar-section-title">@Title</span>
+        </button>
+        @if (!_collapsed && HeaderActions is not null)
+        {
+            <div class="page-sidebar-section-actions">
+                @HeaderActions
+            </div>
+        }
+    </div>
+    @if (!_collapsed)
+    {
+        <div class="page-sidebar-section-body">
+            @ChildContent
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+
+    [Parameter]
+    public RenderFragment? HeaderActions { get; set; }
+
+    [Parameter]
+    public string? TestId { get; set; }
+
+    [Parameter]
+    public bool InitiallyCollapsed { get; set; }
+
+    private bool _collapsed;
+    private bool _initialized;
+
+    protected override void OnInitialized()
+    {
+        if (!_initialized)
+        {
+            _collapsed = InitiallyCollapsed;
+            _initialized = true;
+        }
+    }
+
+    private void Toggle() => _collapsed = !_collapsed;
+
+    /// <summary>Expand from outside (hotkeys like Ctrl+Shift+F targeting the Search section via @ref).</summary>
+    public void Expand()
+    {
+        if (_collapsed)
+        {
+            _collapsed = false;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>Collapse from outside (the Search section's header close button).</summary>
+    public void Collapse()
+    {
+        if (!_collapsed)
+        {
+            _collapsed = true;
+            StateHasChanged();
+        }
+    }
+}

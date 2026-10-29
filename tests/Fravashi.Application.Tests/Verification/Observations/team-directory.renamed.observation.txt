@@ -1,0 +1,85 @@
+@screen 0
+@phase at rest
+@viewport wide 1280
+- main [ref=e2]:
+  - heading "Team directory" [level=1] [ref=e3]
+  - generic [ref=e4]:
+    - searchbox "Search by name" [ref=e5]
+    - button "New person" [ref=e6]
+    - button "Refresh" [ref=e7]: ↻
+  - table [ref=e8]:
+    - rowgroup [ref=e9]:
+      - row [ref=e10]:
+        - columnheader "Name" [ref=e11]
+        - columnheader "Role" [ref=e12]
+        - columnheader "Office" [ref=e13]
+    - rowgroup [ref=e14]:
+      - row [ref=e15]:
+        - cell "Rosalind Franklin" [ref=e16]
+        - cell "Chemist" [ref=e17]
+        - cell "Cambridge" [ref=e18]
+      - row [ref=e19]:
+        - cell "Edsger Dijkstra" [ref=e20]
+        - cell "Professor" [ref=e21]
+        - cell "Austin" [ref=e22]
+      - row [ref=e23]:
+        - cell "Barbara Liskov" [ref=e24]
+        - cell "Professor" [ref=e25]
+        - cell "Boston" [ref=e26]
+@box e2 0 0 1280 294
+@box e3 32 24 1216 34
+@box e5 32 76 260 36
+@box e6 302 76 108.88 36
+@box e7 420.88 76 45 36
+@box e8 32 130 1216 140
+@box e11 32 130 535.78 34.5
+@box e12 567.78 130 318.97 34.5
+@box e13 886.75 130 361.25 34.5
+@contrast e3 14.23
+@contrast e6 7.48
+@contrast e7 7.48
+@phase add-dialog opened by Add person
+@viewport wide 1280
+@not-reached button "Add person" (add-person) was not found
+@phase at rest
+@viewport narrow 390
+- main [ref=e2]:
+  - heading "Team directory" [level=1] [ref=e3]
+  - generic [ref=e4]:
+    - searchbox "Search by name" [ref=e5]
+    - button "New person" [ref=e6]
+    - button "Refresh" [ref=e7]: ↻
+  - table [ref=e8]:
+    - rowgroup [ref=e9]:
+      - row [ref=e10]:
+        - columnheader "Name" [ref=e11]
+        - columnheader "Role" [ref=e12]
+        - columnheader "Office" [ref=e13]
+    - rowgroup [ref=e14]:
+      - row [ref=e15]:
+        - cell "Rosalind Franklin" [ref=e16]
+        - cell "Chemist" [ref=e17]
+        - cell "Cambridge" [ref=e18]
+      - row [ref=e19]:
+        - cell "Edsger Dijkstra" [ref=e20]
+        - cell "Professor" [ref=e21]
+        - cell "Austin" [ref=e22]
+      - row [ref=e23]:
+        - cell "Barbara Liskov" [ref=e24]
+        - cell "Professor" [ref=e25]
+        - cell "Boston" [ref=e26]
+@box e2 0 0 390 386
+@box e3 32 24 326 34
+@box e5 32 76 326 36
+@box e6 32 122 326 36
+@box e7 32 168 326 36
+@box e8 32 222 326 140
+@box e11 32 222 143.63 34.5
+@box e12 175.63 222 85.52 34.5
+@box e13 261.14 222 96.86 34.5
+@contrast e3 14.23
+@contrast e6 7.48
+@contrast e7 7.48
+@phase add-dialog opened by Add person
+@viewport narrow 390
+@not-reached button "Add person" (add-person) was not found

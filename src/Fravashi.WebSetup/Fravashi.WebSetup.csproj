@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    FravashiSetup.exe, the web installer (named after the former product until the rename to Nova Globen Fravashi; backlog 296; it replaced the Inno Setup wizard on the owner's
+    decision of 2026-10-11). A small WinForms WinExe: a wizard, or /quiet for automation, around the engine
+    setup/webinstall/webinstall.ps1, which Fravashi.WebSetup.Core embeds and runs. Only the window and the
+    entry point live here; every decision is in the Core library, which is what the tests drive.
+
+    Published for win-x64 by setup/release/build-release-local.ps1 with every release, exactly as
+    fravashi.exe is, self-contained and single file so it runs on a machine with no .NET at all.
+
+    The version continues from 2.1.0, which was never published under the old name (decided
+    2026-10-26: the web setup ships as FravashiSetup and 2.1.0 under the old name is skipped).
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Fravashi.WebSetup</RootNamespace>
+    <AssemblyName>FravashiSetup</AssemblyName>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>..\Fravashi.Launcher\fravashi.ico</ApplicationIcon>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- asInvoker, said explicitly: Windows' installer detection elevates an unmanifested EXE whose name holds
+         "Setup", and the install must run as the person (the Inno wizard ran with the lowest privileges, and an
+         elevated wslc caller gets a separate session with its own images). -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version Condition="'$(Version)' == ''">2.1.0</Version>
+    <Product>Nova Globen Fravashi setup</Product>
+    <Company>Nova Globen</Company>
+    <AssemblyTitle>Nova Globen Fravashi setup</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Fravashi.WebSetup.Core\Fravashi.WebSetup.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The brand icon, embedded so the window icon survives a single-file publish (as fravashi.exe does). -->
+    <EmbeddedResource Include="..\Fravashi.Launcher\fravashi.ico" LogicalName="Fravashi.WebSetup.icon.ico" />
+  </ItemGroup>
+
+  <!-- The CI job zips the published EXE with MSBuild's own ZipDirectory task, so the runner needs no zip tool:
+       dotnet publish ... -p:WebSetupZip=<path to the zip>. -->
+  <Target Name="ZipWebSetup" AfterTargets="Publish" Condition="'$(WebSetupZip)' != ''">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(WebSetupZip)'))" />
+    <ZipDirectory SourceDirectory="$(PublishDir)" DestinationFile="$(WebSetupZip)" Overwrite="true" />
+  </Target>
+
+</Project>

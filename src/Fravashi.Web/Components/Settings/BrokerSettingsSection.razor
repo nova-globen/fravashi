@@ -1,0 +1,14 @@
+@namespace Fravashi.Web.Components.Settings
+
+@* Settings > Connections > Credential broker (work item #357; it was a block of the Environment overview). The card
+   itself is unchanged: it holds every broker setting there is (enable, endpoint, mint, revoke). *@
+<div class="page-body-content" data-testid="broker-settings">
+    <h2>Credential broker</h2>
+    <p class="studio-muted">
+        The corporate / untrusted-client credential tier (ADR 0010). When enabled, @(ProductName.Short) signs you in through
+        your identity provider and mints a short-lived, per-user token from a remote broker - the organization's
+        shared key stays on the broker and never reaches this device. Revoke here to cut this device off
+        immediately. This is off in the single-user default.
+    </p>
+    <BrokerConnectionCard />
+</div>

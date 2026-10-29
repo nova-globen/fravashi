@@ -1,0 +1,106 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Setup
+@using Fravashi.Infrastructure.Bridge
+@using Fravashi.Web.Services
+@using Microsoft.Extensions.DependencyInjection
+@using Microsoft.JSInterop
+@inject NavigationManager Nav
+@inject IServiceProvider Services
+@inject IJSRuntime JS
+
+@* Item #373 (docs/plans/first-open-setup.md section 5, question 1 settled as recommended): a folder that is not set up
+   OPENS on the setup, whatever page the window was loaded on. Most people open a folder they opened before, so the
+   window's first page is usually a restored one (/code/<file>, /, /workitems), not the bare /code?ws= the host builds.
+
+   The layout's body is drawn INSIDE this component, and for such a folder it is held back until the decision is made:
+   the page underneath is never created when the window lands on the setup. That is the fix for the v0.9.100 check
+  : the decision used to be made beside a Code page that had already
+   started restoring its tabs, and that page's restore, finishing after the move to /setup, navigated the window back to
+   its file.
+
+   Only the first load of a window, or the start dialog's "open this folder" (/code?ws=), lands; a link followed inside a
+   window that is already open (a reload, a session row on Home that switches folders) goes where it was asked to. The
+   window's own memory of what it has loaded is its sessionStorage, which a new studio window starts without and a reload
+   keeps. "Not now" on the setup is remembered for the folder, so it is not asked again. *@
+
+@if (!_holding)
+{
+    @ChildContent
+}
+
+@code {
+    /// <summary>The page the layout would draw; held back while the window may still land on the setup.</summary>
+    [Parameter]
+    public RenderFragment? ChildContent { get; set; }
+
+    private bool _holding;
+    private bool _landing;
+    private string? _folderId;
+
+    protected override void OnInitialized()
+    {
+        _folderId = Services.GetService<BridgeWorkspaceContext>()?.ActiveWorkspaceId;
+        _holding = _folderId is { Length: > 0 } id
+                   && !FirstOpenLandingRule.IsSetupPath(PathOf(Nav.Uri))
+                   && Services.GetService<IWorkspaceStore>() is { } workspaces
+                   && WorkspaceProjects.IsNotSetUp(workspaces, id)
+                   && Services.GetService<ISetupDraftStore>()?.Get(id) is not { NotNow: true };
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        var path = PathOf(Nav.Uri);
+        IReadOnlyCollection<string>? visited;
+        try
+        {
+            visited = FirstOpenLandingRule.Parse(await JS.InvokeAsync<string?>("sessionStorage.getItem", FirstOpenLandingRule.StorageKey));
+            await JS.InvokeVoidAsync("sessionStorage.setItem", FirstOpenLandingRule.StorageKey,
+                FirstOpenLandingRule.Remember(visited, _folderId));
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or InvalidOperationException or TaskCanceledException)
+        {
+            // The window's memory cannot be read: the page it asked for is shown, never a setup it cannot leave.
+            Release();
+            return;
+        }
+
+        if (_holding && _folderId is { Length: > 0 } id && FirstOpenLandingRule.ShouldLand(visited, id, path))
+        {
+            _landing = true;
+            Nav.NavigateTo(FirstOpenLandingRule.SetupTarget(Nav.ToBaseRelativePath(Nav.Uri)), replace: true);
+            return;
+        }
+
+        Release();
+    }
+
+    private void Release()
+    {
+        if (_holding)
+        {
+            _holding = false;
+            StateHasChanged();
+        }
+    }
+
+    protected override void OnParametersSet()
+    {
+        // The router has moved to the setup and the layout hands down ITS page: from here on the body is drawn as on any
+        // other page. Released here, with the new page, and never on the navigation event, which could draw the page the
+        // window was loaded on for one render.
+        if (_landing && FirstOpenLandingRule.IsSetupPath(PathOf(Nav.Uri)))
+        {
+            _landing = false;
+            _holding = false;
+        }
+    }
+
+    private string PathOf(string uri) => "/" + Nav.ToBaseRelativePath(uri).Split('?', '#')[0];
+}

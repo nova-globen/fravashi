@@ -1,0 +1,12 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-09-01T09:59:59.000Z","sessionId":"11111111-2222-3333-4444-555555555555"}
+{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"C:/example/widgets","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.0.0-synthetic","gitBranch":"main","type":"user","message":{"role":"user","content":"How do I list the widgets?"},"uuid":"u1","timestamp":"2026-09-01T10:00:00.000Z"}
+{"parentUuid":"u1","isSidechain":false,"userType":"external","cwd":"C:/example/widgets","sessionId":"11111111-2222-3333-4444-555555555555","version":"0.0.0-synthetic","type":"user","isMeta":true,"message":{"role":"user","content":"<system-reminder>injected context the user never typed</system-reminder>"},"uuid":"u1m","timestamp":"2026-09-01T10:00:00.500Z"}
+{"parentUuid":"u1","isSidechain":false,"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"thinking","thinking":"private reasoning that is not shown"}]},"uuid":"a0","timestamp":"2026-09-01T10:00:01.000Z"}
+{"parentUuid":"a0","isSidechain":false,"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"text","text":"Run the list command."}]},"uuid":"a1","timestamp":"2026-09-01T10:00:02.000Z"}
+{"parentUuid":"a1","isSidechain":false,"type":"assistant","message":{"id":"msg_a","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"widgets list"}}]},"uuid":"a2","timestamp":"2026-09-01T10:00:03.000Z"}
+{"parentUuid":"a2","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"widget-1"}]},"uuid":"u2","timestamp":"2026-09-01T10:00:04.000Z"}
+{"parentUuid":"u2","isSidechain":true,"type":"assistant","message":{"id":"msg_side","role":"assistant","content":[{"type":"text","text":"A subagent talking to itself."}]},"uuid":"s1","timestamp":"2026-09-01T10:00:05.000Z"}
+{"parentUuid":"u2","isSidechain":false,"type":"assistant","message":{"id":"msg_b","role":"assistant","content":[{"type":"text","text":"There is one widget."},{"type":"text","text":"It is called widget-1."}],"usage":{"input_tokens":10,"output_tokens":5}},"uuid":"a3","timestamp":"2026-09-01T10:00:06.000Z"}
+this line is not json, like the tail of a file still being written
+{"type":"ai-title","aiTitle":"Listing widgets","sessionId":"11111111-2222-3333-4444-555555555555"}
+{"type":"last-prompt","lastPrompt":"How do I list the widgets?","sessionId":"11111111-2222-3333-4444-555555555555"}

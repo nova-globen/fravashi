@@ -1,0 +1,123 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Web.Components.Sessions
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@inject IConfigurationStore ConfigStore
+@inject INotificationHistory Notifications
+
+@* Settings > Agents > Default models and effort (work item #357). What three kinds of agent start on when nothing
+   more specific says otherwise. Each choice is Default (no flag at all, so the agent CLI uses its own) or one of the
+   closed sets the session's own menus offer: the model menu's ids and the effort levels. A person's pick in a
+   session wins, and a work item's suggested model and effort win over these for that item. The commit reviewer is
+   shown read-only: its model is fixed in its own section (decided 2026-10-10) and none of this moves it. *@
+<div class="ob-step" data-testid="default-models-settings">
+    <h2>Default models and effort</h2>
+    <p class="studio-muted">
+        What an agent starts on when nothing more specific says otherwise. A pick you make in a conversation always
+        wins, and a work item's suggested model and effort win over these for that item. Default passes nothing, so
+        the agent CLI uses its own default, exactly as before.
+    </p>
+
+    @foreach (var role in Roles)
+    {
+        var current = role.Get(this);
+        <fieldset class="default-models-role" data-testid="@($"default-models-{role.Slug}")">
+            <legend>@role.Label</legend>
+            <p class="studio-muted">@role.Note</p>
+            <label class="studio-modal-field">
+                <span>Model</span>
+                <select class="studio-input" data-testid="@($"default-models-{role.Slug}-model")"
+                        value="@(current.Model ?? string.Empty)"
+                        @onchange="e => role.Set(this, current with { Model = AgentDefaultsSetting.ValidModel(e.Value?.ToString()) })">
+                    @foreach (var option in ModelOptions)
+                    {
+                        <option value="@option.Value" disabled="@option.Unavailable">@option.Label@(option.Unavailable ? $" ({option.UnavailableWhy ?? "unavailable"})" : string.Empty)</option>
+                    }
+                </select>
+            </label>
+            <label class="studio-modal-field">
+                <span>Effort</span>
+                <select class="studio-input" data-testid="@($"default-models-{role.Slug}-effort")"
+                        value="@SessionEffortOptions.ValueOf(current.Effort)"
+                        @onchange="e => role.Set(this, current with { Effort = SessionEffortOptions.Parse(e.Value?.ToString()) })">
+                    <option value="@SessionEffortOptions.CliDefaultValue">Default</option>
+                    @foreach (var effort in AgentEfforts.All)
+                    {
+                        <option value="@effort.CliValue()">@effort.CliValue()</option>
+                    }
+                </select>
+            </label>
+        </fieldset>
+    }
+
+    <fieldset class="default-models-role" data-testid="default-models-reviewer">
+        <legend>Commit reviewer</legend>
+        <p>
+            <code data-testid="default-models-reviewer-model">@_reviewer.Filler</code>
+            <span class="studio-muted" data-testid="default-models-reviewer-note">
+                Fixed: the reviewer keeps its own model (decided 2026-10-10). Neither these defaults nor a work
+                item's suggestion change it; it is chosen under <a href="/settings/reviewer">Commit reviewer</a>.
+            </span>
+        </p>
+    </fieldset>
+
+    <div class="studio-form-actions">
+        <button type="button" class="studio-btn" data-testid="default-models-save" disabled="@(!Dirty)" @onclick="Save">Save</button>
+        <button type="button" class="studio-btn studio-btn-alt" data-testid="default-models-reset" @onclick="UseDefault">Use the default everywhere</button>
+    </div>
+</div>
+
+@code {
+    private AgentDefaults _current = AgentDefaults.None;
+    private AgentDefaults _saved = AgentDefaults.None;
+    private CommitReviewerRole _reviewer = CommitReviewerSetting.Default;
+
+    /// <summary>The model menu's own options (Default first), so this offers exactly what a session does.</summary>
+    private IReadOnlyList<Fravashi.Web.Components.Shared.StudioDropdownOption> ModelOptions =>
+        SessionModelOptions.For(AgentTool.Claude, Services.GetService<Fravashi.Application.AgentRuntimes.IAgentRuntimeCredentialStore>());
+
+    private sealed record Role(
+        string Slug, string Label, string Note,
+        Func<DefaultModelsSection, AgentDefault> Get,
+        Action<DefaultModelsSection, AgentDefault> Set);
+
+    private static readonly IReadOnlyList<Role> Roles =
+    [
+        new("new-conversation", "New conversation",
+            "A conversation you start in the Sessions area or from Home's box. Its pickers start on these.",
+            s => s._current.NewConversation,
+            (s, v) => s._current = s._current with { NewConversation = v }),
+        new("studio-assistant", $"{ProductName.Short} assistant",
+            "The assistant on Home. Stored now; nothing starts it yet.",
+            s => s._current.StudioAssistant,
+            (s, v) => s._current = s._current with { StudioAssistant = v }),
+        new("autopilot-builder", "Autopilot builder",
+            "The agent that builds each autopilot item. The dispatch form starts on this model, and an item's own "
+                + "suggestion wins for that item.",
+            s => s._current.AutopilotBuilder,
+            (s, v) => s._current = s._current with { AutopilotBuilder = v }),
+    ];
+
+    private bool Dirty => _current != _saved;
+
+    protected override void OnInitialized()
+    {
+        _saved = AgentDefaultsSetting.Read(ConfigStore);
+        _current = _saved;
+        _reviewer = CommitReviewerSetting.Read(ConfigStore);
+    }
+
+    private void UseDefault() => _current = AgentDefaults.None;
+
+    private void Save()
+    {
+        AgentDefaultsSetting.Write(ConfigStore, _current);
+        _saved = AgentDefaultsSetting.Read(ConfigStore);
+        _current = _saved;
+        Notifications.Add("Default models and effort saved.", NotificationSeverity.Success);
+    }
+}

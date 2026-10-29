@@ -1,0 +1,50 @@
+@namespace Fravashi.Web.Components.Shell
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@inject ThemeState Theme
+@inject IJSRuntime JS
+@implements IDisposable
+
+<footer class="studio-statusbar">
+    <div class="studio-status-left">
+        <span class="studio-brand">◆ @(ProductName.Short)</span>
+        <span class="studio-status-item" data-status="area">@AreaLabel</span>
+    </div>
+    <div class="studio-status-right">
+        <button type="button" class="studio-theme-toggle" @onclick="CycleTheme"
+                title="@($"Theme: {Theme.Mode} (click to change)")" aria-label="@($"Theme: {Theme.Mode}")">
+            <span aria-hidden="true">@ThemeGlyph</span> @Theme.Mode
+        </button>
+    </div>
+</footer>
+
+@code {
+    [Parameter]
+    public string AreaLabel { get; set; } = string.Empty;
+
+    private string ThemeGlyph => Theme.Mode switch
+    {
+        DesignThemeModes.Light => "☀",
+        DesignThemeModes.Dark => "☾",
+        _ => "◑",
+    };
+
+    private async Task CycleTheme()
+    {
+        var mode = Theme.Cycle();
+        await JS.InvokeVoidAsync("fravashiTheme.apply", mode.ToString());
+        StateHasChanged();
+    }
+
+    protected override void OnInitialized()
+    {
+        Theme.Changed += OnThemeChanged;
+    }
+
+    private void OnThemeChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Theme.Changed -= OnThemeChanged;
+    }
+}

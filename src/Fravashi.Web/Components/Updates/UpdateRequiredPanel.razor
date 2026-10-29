@@ -1,0 +1,71 @@
+@namespace Fravashi.Web.Components.Updates
+@using Fravashi.Application.Updates
+@inject IProductUpdateStatus Status
+@inject IProductInfo Product
+
+<div class="update-lock" role="alert" aria-live="assertive">
+    <div class="update-lock-card">
+        <div class="update-lock-icon" aria-hidden="true">⛔</div>
+        <h1 class="update-lock-title">A required update is available</h1>
+        <p class="update-lock-lead">
+            This version of @(ProductName.Short) can no longer run. A critical update must be installed before you can
+            continue. Your data is safe - it is kept on the mounted data volume and is migrated during the update.
+        </p>
+
+        <dl class="update-lock-versions">
+            <div>
+                <dt>Installed</dt>
+                <dd>@(State.CurrentVersion ?? Product.Version) (@Product.Variant)</dd>
+            </div>
+            @if (!string.IsNullOrWhiteSpace(State.TargetVersion))
+            {
+                <div>
+                    <dt>Required</dt>
+                    <dd>@State.TargetVersion</dd>
+                </div>
+            }
+        </dl>
+
+        @if (State.ManifestRefused is { } refused)
+        {
+            @* Backlog 242: a manifest refused for its signature neither raises nor lifts this lock. *@
+            <p class="studio-muted" data-testid="update-lock-unsigned">
+                The update channel's manifest is not signed by this product's release key, so nothing from it is used
+                (@ProductUpdateBanner.Why(refused)). The requirement the last verified check found still stands.
+            </p>
+        }
+        else if (State.ChannelUnreachableSince is { } since)
+        {
+            <p class="studio-muted" data-testid="update-lock-unreachable">
+                The update channel could not be checked since <LocalTime At="since" TestId="update-lock-since" />
+                (@(State.ChannelUnreachableReason ?? "no reason was recorded")). The requirement the last successful check
+                found still stands; <code>@(ProductName.Command) update</code> installs it once the channel answers.
+            </p>
+        }
+
+        <div class="update-lock-how">
+            <h2>How to update</h2>
+            <p>On the machine that runs @(ProductName.Short), open a terminal and run:</p>
+            <pre class="update-lock-cmd">@(ProductName.Command) update</pre>
+            <p class="studio-muted">
+                On an install from before the rename to @(ProductName.Short), run the earlier command with
+                <code>update</code> instead.
+            </p>
+            <p class="studio-muted">
+                The <code>@(ProductName.Command)</code> launcher pulls the new image, migrates the database, and restarts @(ProductName.Short)
+                on the same address. This page clears itself once the update completes.
+            </p>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(State.ReleaseNotesUrl))
+        {
+            <p class="update-lock-notes">
+                <a href="@State.ReleaseNotesUrl" target="_blank" rel="noopener noreferrer">Read the release notes →</a>
+            </p>
+        }
+    </div>
+</div>
+
+@code {
+    private ProductUpdateState State => Status.Current;
+}

@@ -1,0 +1,114 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Application.Setup
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Web.Components.Sessions
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+
+@* Step 6, Agents (item #373, section 3.6): the project's own default model and effort for a new conversation, laid over
+   the install's (the host settled question 3 that way), and how much agents may do in THIS folder without asking
+   (ADR 0028), the same store the session work strip and Settings use, so they never disagree. The primary button here
+   is "Set up {Folder}". *@
+<h2 class="setup-title" id="setup-step-heading" tabindex="-1" @ref="_heading">How should agents work in @Page.FolderName?</h2>
+<p class="setup-helper">What a new conversation starts on, and when an agent stops to ask you first.</p>
+
+<div class="setup-pickers">
+    <label class="setup-picker">
+        <span class="setup-field-label">Model</span>
+        <select class="studio-input setup-input" data-testid="setup-agents-model" value="@(Page.Draft.Model ?? string.Empty)" @onchange="ChooseModel">
+            <option value="">@InstallLabel(_install.Model)</option>
+            @foreach (var option in SessionModelOptions.For(AgentTool.Claude, Services.GetService<Fravashi.Application.AgentRuntimes.IAgentRuntimeCredentialStore>()).Where(o => o.Value.Length > 0))
+            {
+                <option value="@option.Value" disabled="@option.Unavailable">@option.Label@(option.Unavailable ? $" ({option.UnavailableWhy ?? "unavailable"})" : string.Empty)</option>
+            }
+        </select>
+    </label>
+    <label class="setup-picker">
+        <span class="setup-field-label">Effort</span>
+        <select class="studio-input setup-input" data-testid="setup-agents-effort" value="@(Page.Draft.Effort ?? string.Empty)" @onchange="ChooseEffort">
+            <option value="">@InstallLabel(_install.Effort?.CliValue())</option>
+            @foreach (var effort in AgentEfforts.All)
+            {
+                <option value="@effort.CliValue()">@effort.CliValue()</option>
+            }
+        </select>
+    </label>
+</div>
+<p class="setup-field-hint">A pick made in a conversation, or a work item's suggestion, still wins over these.</p>
+
+<fieldset class="setup-choices setup-choices-tight">
+    <legend class="setup-field-label">Changes in this folder</legend>
+    <div class="setup-choice @(!Page.Draft.TrustEdits ? "is-selected" : null)" data-testid="setup-trust-ask">
+        <label class="setup-choice-head">
+            <input type="radio" name="setup-trust" value="ask" checked="@(!Page.Draft.TrustEdits)" data-testid="setup-trust-ask-input"
+                   @onchange="() => ChooseTrust(false)" />
+            <span class="setup-choice-text">
+                <span class="setup-choice-title">Ask me before every change (recommended)</span>
+                <span class="setup-choice-sub">Every edit and every command waits for your yes in the conversation.</span>
+            </span>
+        </label>
+    </div>
+    <div class="setup-choice @(Page.Draft.TrustEdits ? "is-selected" : null)" data-testid="setup-trust-edits">
+        <label class="setup-choice-head">
+            <input type="radio" name="setup-trust" value="edits" checked="@Page.Draft.TrustEdits" data-testid="setup-trust-edits-input"
+                   @onchange="() => ChooseTrust(true)" />
+            <span class="setup-choice-text">
+                <span class="setup-choice-title">Let edits inside the copy run without asking</span>
+                <span class="setup-choice-sub">Once a conversation has a work item and a plan. Commands and hidden paths still ask.</span>
+            </span>
+        </label>
+    </div>
+</fieldset>
+
+@code {
+    [Parameter, EditorRequired]
+    public SetupPage Page { get; set; } = default!;
+
+    private ElementReference _heading;
+    private AgentDefault _install = AgentDefault.None;
+
+    /// <summary>"Install default (claude-opus-5-5)", or plain "Install default" when the install passes no flag.</summary>
+    private static string InstallLabel(string? value) => value is { Length: > 0 } ? $"Install default ({value})" : "Install default";
+
+    protected override void OnInitialized()
+    {
+        if (Services.GetService<IConfigurationStore>() is { } settings)
+        {
+            _install = AgentDefaultsSetting.Read(settings).NewConversation;
+        }
+    }
+
+    private void ChooseModel(ChangeEventArgs e)
+    {
+        Page.Draft.Model = AgentDefaultsSetting.ValidModel(e.Value?.ToString());
+        Touched();
+    }
+
+    private void ChooseEffort(ChangeEventArgs e)
+    {
+        Page.Draft.Effort = AgentEfforts.Parse(e.Value?.ToString())?.CliValue();
+        Touched();
+    }
+
+    private void ChooseTrust(bool edits)
+    {
+        Page.Draft.TrustEdits = edits;
+        Touched();
+    }
+
+    private void Touched()
+    {
+        Page.Draft.MarkSkipped(SetupSteps.Agents, false);
+        Page.Changed();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await SetupFocus.HeadingAsync(_heading);
+        }
+    }
+}

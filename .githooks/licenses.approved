@@ -1,0 +1,78 @@
+# SPDX license ids the pre-commit license gate accepts: permissive, free for unrestricted
+# enterprise/commercial use, and free for redistribution. One id per line.
+# See CLAUDE.md "Dependency license policy" before adding to this list.
+
+MIT
+Apache-2.0
+BSD-2-Clause
+BSD-3-Clause
+ISC
+0BSD
+MS-PL
+Unlicense
+
+# Owner-approved EXCEPTION (2026-07-26), not a general license class: the Microsoft Edge WebView2 SDK
+# ships under Microsoft's own free-but-proprietary license (free for commercial use and redistribution,
+# not OSI). Approved solely for the studio window shell (ADR 0014). Do not reuse this id for any
+# other package without a new decision.
+WebView2-Microsoft-License
+
+# Owner-approved EXCEPTIONS (2026-08-08, backlog 73), each specific to one vendor CLI, not a general
+# class: the studio image bakes the Claude Code CLI, which is a proprietary vendor tool ("SEE LICENSE
+# IN ..." in its npm package.json, verified 2026-08-08). These ids record ONE decision only: that
+# redistributing the binary inside the studio image is an accepted vendor arrangement, reviewed with
+# the vendor out of band. They say NOTHING about whether we may drive the CLI automatically -- that is
+# a service-terms/commercial question this gate cannot answer, tracked under CLASSES-NOT-GATED below.
+# Do not reuse these ids for any other dependency.
+#
+# GitHub-Copilot-Terms stays LISTED although the image no longer bakes that CLI (retired to v2, owner
+# decision 2026-09-22, docs/v2.md section 1). An approved-list entry is inert without a matching line in
+# licenses.allow, and removing an owner-approved exception is the owner's act, not a tidy-up.
+Anthropic-Claude-Code-Terms
+GitHub-Copilot-Terms
+
+# ---- CLASSES-NOT-GATED (policy, backlog 73) --------------------------------------------------------
+# The pre-commit license gate is mechanical: it can check the REDISTRIBUTION license of a dependency
+# whose identity is pinned in a file it parses (NuGet packages in the project files; the npm agent CLIs
+# in the Dockerfile). Some things this product ships, or is about to, are not covered by a license
+# check, either because a license check is the wrong instrument or because the dependency is not yet
+# pinned in a parseable place. Each is recorded here with why it is not commit-gated and how it is
+# reviewed instead. When a Phase B-E dependency lands, it either becomes a real gated line above (pin
+# it where the hook can parse it, record its verified license) or it is added to this list with its
+# out-of-band review named. It does not land unreviewed.
+#
+#   Agent-CLI SERVICE TERMS (automated use). The vendor CLIs (Claude Code, Codex, Copilot) carry terms
+#     about programmatic/automated use, rate, and org-key vs BYOD billing. That is a COMMERCIAL question,
+#     not a license question, and a license id cannot express it, so this gate does not pretend to.
+#     Reviewed out of band against each vendor's terms when a pin is promoted (ADR 0023's procedure is
+#     the checkpoint); the corp-broker tier (ADR 0010) exists partly to keep automated use inside a
+#     sanctioned billing arrangement.
+#   Browser distribution (backlog 56, then 159). LANDED 2026-09-27 for the agent browser: Chromium's
+#     headless shell, pinned through PLAYWRIGHT_VERSION in the Dockerfile (browsers.json fixes the
+#     revision), is a gated line in licenses.allow now (BSD-3-Clause), beside the playwright driver
+#     (Apache-2.0). Out-of-band review of terms: Chromium is an open-source build with no automated-use or
+#     branding terms of its own (the Chrome brand and Google's services are not in it). Any OTHER browser
+#     (a WebKit or Firefox build, a branded Chrome) starts in this block again until pinned the same way.
+#   Vector / full-text extension (backlog 40). DECIDED 2026-09-19: there will not be one. Embeddings
+#     are stored as BLOBs and scored in managed code, because at this product's scale (a few thousand
+#     documents) a linear scan is single-digit milliseconds and a native index would be a second
+#     native dependency to vendor and prove for no gain. sqlite-vec (Apache-2.0, verified) stays the
+#     upgrade path; if it is ever adopted it becomes a gated line above.
+#   Embedding / OCR model weights (backlog 40 and later). Model weights are DATA, not a library, and
+#     carry their own model licenses (often non-OSI, with field-of-use limits) that an SPDX id does not
+#     capture. Reviewed out of band per model before it ships; recorded here, never silently bundled.
+#     DECIDED 2026-09-19 for the wiki embedder: all-MiniLM-L6-v2 (Apache-2.0, verified against the
+#     Hugging Face model metadata), baked into the image because the container runs offline. Baking it
+#     makes it a redistribution question, so it does NOT stay in this block: pin the model id and its
+#     revision as Dockerfile ARGs the way CLAUDE_CODE_VERSION is pinned, and add the gated line above
+#     when the code lands. LANDED 2026-09-21: it is a gated line in licenses.allow now, pinned in the
+#     Dockerfile by revision and per-file SHA-256, and EmbeddingModelPinTests reads those lines. Any
+#     OTHER model (a second embedder, OCR) starts in this block again until it is pinned the same way.
+#   Inno Setup 6 (setup/webinstall). A BUILD TOOL, not a linked library, so it is pinned nowhere the
+#     hook can parse; its setup stub does ride inside the generated FravashiWebSetup.exe. License
+#     verified 2026-08-25 against jrsoftware/issrc license.txt: zlib-style, "use this software for any
+#     purpose, including commercial applications", redistribution permitted with notices retained
+#     (the generated stub retains them by default).
+#     RETIRED 2026-10-13 (backlog 296, decided 2026-10-11): replaced by a bootstrapper of our own.
+#     FravashiSetup.exe is now our own WinForms bootstrapper (src/Fravashi.WebSetup), built with
+#     nothing but the .NET SDK. This note stays as history.

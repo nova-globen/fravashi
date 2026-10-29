@@ -1,0 +1,577 @@
+@using Fravashi.Application.Git
+@using Fravashi.Application.Releases
+@using Fravashi.Domain.Git
+@using Fravashi.Domain.Releases
+@using Fravashi.Domain.WorkItems
+@using Microsoft.Extensions.DependencyInjection
+@inject ReleaseRecorder Recorder
+@inject IReleaseStores Releases
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+@inject IServiceProvider Services
+
+@* Work item #368: "New release", opened from the board's side panel and from the Releases page. A release takes the
+   ticked Done items (every Done item no release has taken, all ticked to start), drafts its notes from them, and names
+   a tag: one that already exists (a project whose CI builds from a pushed tag) or one created here on a chosen commit.
+   Creating the tag and pushing it are two separate acts, each behind its own confirmation, and an existing tag is never
+   moved or replaced. Saving stamps "Released in" on the items, which archives them off the board's Done column, and
+   writes the notes as a Release wiki document; publishing that document anywhere is the wiki page's own explicit act. *@
+<div class="start-dialog-backdrop" data-testid="release-dialog-backdrop">
+    <div class="start-dialog-scrim" @onclick="CloseAsync"></div>
+    <div class="start-dialog release-dialog" role="dialog" aria-modal="true" aria-labelledby="release-dialog-title"
+         data-testid="release-dialog" @onkeydown="OnKeyDown">
+        <header class="start-dialog-head">
+            <div class="start-dialog-titles">
+                <h2 class="start-dialog-brand" id="release-dialog-title">New release</h2>
+                <span class="start-dialog-subtitle">Tag a version, archive its Done items and keep its notes</span>
+            </div>
+            <button type="button" class="start-dialog-close" data-testid="release-dialog-close"
+                    title="Close (Esc)" aria-label="Close the release dialog" @onclick="CloseAsync">
+                <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true">
+                    <path d="m2 2 8 8M10 2l-8 8" />
+                </svg>
+            </button>
+        </header>
+
+        <div class="release-dialog-body">
+            @if (!_loaded)
+            {
+                <p class="studio-muted" data-testid="release-loading">Reading the board and the repository...</p>
+            }
+            else
+            {
+                <section class="release-section" aria-labelledby="release-version-heading">
+                    <h3 class="release-heading" id="release-version-heading">Version</h3>
+                    <div class="release-version-row">
+                        <input class="studio-input release-version-input" data-testid="release-version"
+                               aria-label="Version" value="@_version" @oninput="OnVersionInput" />
+                        @if (_latest is { } latest)
+                        {
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="release-next-patch"
+                                    @onclick="@(() => SetVersion(latest.NextPatch().Text))">Patch @latest.NextPatch().Text</button>
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="release-next-minor"
+                                    @onclick="@(() => SetVersion(latest.NextMinor().Text))">Minor @latest.NextMinor().Text</button>
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="release-next-major"
+                                    @onclick="@(() => SetVersion(latest.NextMajor().Text))">Major @latest.NextMajor().Text</button>
+                        }
+                    </div>
+                    @if (VersionProblem is { } versionProblem)
+                    {
+                        <p class="release-problem" data-testid="release-version-problem">@versionProblem</p>
+                    }
+                    else if (_latest is { } known)
+                    {
+                        <p class="studio-muted release-hint">The latest known version is @known.Text.</p>
+                    }
+                </section>
+
+                <section class="release-section" aria-labelledby="release-items-heading">
+                    <h3 class="release-heading" id="release-items-heading">
+                        Work items <span class="release-count" data-testid="release-item-count">@_ticked.Count of @_candidates.Count</span>
+                    </h3>
+                    @if (_candidates.Count == 0)
+                    {
+                        <p class="studio-muted" data-testid="release-no-items">
+                            Every Done item has already been released. Move work to Done first.
+                        </p>
+                    }
+                    else
+                    {
+                        <p class="studio-muted release-hint">Untick an item to leave it on the board for a later release.</p>
+                        <ul class="release-items" data-testid="release-items">
+                            @foreach (var item in _candidates)
+                            {
+                                <li>
+                                    <label class="release-item">
+                                        <input type="checkbox" data-testid="@($"release-item-{item.Number}")"
+                                               checked="@_ticked.Contains(item.Number)"
+                                               @onchange="@(e => Toggle(item.Number, e))" />
+                                        <span class="release-item-number">#@item.Number</span>
+                                        <span class="release-item-title">@item.Title</span>
+                                        <span class="release-item-group">@GroupLabel(ReleaseNotes.Classify(item))</span>
+                                    </label>
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+
+                <section class="release-section" aria-labelledby="release-notes-heading">
+                    <h3 class="release-heading" id="release-notes-heading">Notes</h3>
+                    <textarea class="studio-input release-notes" rows="10" data-testid="release-notes"
+                              aria-label="Release notes" value="@_notes" @oninput="OnNotesInput"></textarea>
+                    <div class="release-row">
+                        <button type="button" class="studio-btn studio-btn-alt" data-testid="release-redraft"
+                                @onclick="Redraft">Draft again from the ticked items</button>
+                        @if (_notesEdited)
+                        {
+                            <span class="studio-muted release-hint" data-testid="release-notes-edited">
+                                Edited by you: ticking items no longer redrafts.
+                            </span>
+                        }
+                    </div>
+                </section>
+
+                <section class="release-section" aria-labelledby="release-tag-heading">
+                    <h3 class="release-heading" id="release-tag-heading">Tag</h3>
+                    @if (_gitProblem is { } gitProblem)
+                    {
+                        <p class="studio-muted" data-testid="release-git-unavailable">@gitProblem</p>
+                    }
+                    <label class="board-filter-line">
+                        <input type="radio" name="release-tag-mode" data-testid="release-tag-existing"
+                               checked="@(_mode == TagMode.Existing)" @onchange="@(() => SetMode(TagMode.Existing))" />
+                        <span>The tag already exists</span>
+                    </label>
+                    <label class="board-filter-line">
+                        <input type="radio" name="release-tag-mode" data-testid="release-tag-create"
+                               checked="@(_mode == TagMode.Create)" @onchange="@(() => SetMode(TagMode.Create))"
+                               disabled="@(_tagger is null || !_gitAvailable)" />
+                        <span>Create the tag on a commit</span>
+                    </label>
+
+                    @if (_mode == TagMode.Existing)
+                    {
+                        @if (_tags.Count == 0)
+                        {
+                            <p class="studio-muted" data-testid="release-no-tags">This repository has no tags.</p>
+                        }
+                        else
+                        {
+                            <select class="studio-input" data-testid="release-existing-tag" aria-label="Existing tag"
+                                    value="@_existingTag" @onchange="OnExistingTag">
+                                <option value="">Choose a tag</option>
+                                @foreach (var tag in _tags)
+                                {
+                                    <option value="@tag.Name">@tag.Name (@Short(tag.Sha))</option>
+                                }
+                            </select>
+                        }
+                    }
+                    else
+                    {
+                        @if (_commits.Count == 0)
+                        {
+                            <p class="studio-muted" data-testid="release-no-commits">No commits could be read from @(_branch ?? "the default branch").</p>
+                        }
+                        else
+                        {
+                            <select class="studio-input" data-testid="release-commit" aria-label="Commit"
+                                    value="@_commit" @onchange="OnCommit" disabled="@_tagCreated">
+                                @foreach (var commit in _commits)
+                                {
+                                    <option value="@commit.Sha">@commit.ShortSha @commit.Subject</option>
+                                }
+                            </select>
+                            <p class="studio-muted release-hint" data-testid="release-commit-ci">
+                                @(_branch is null ? string.Empty : $"From {_branch}. ")@(_ciState is { } ci ? $"CI: {ci}." : "The forge reports no CI run for this commit.")
+                            </p>
+                        }
+
+                        @if (TagExists(_version))
+                        {
+                            <p class="release-problem" data-testid="release-tag-exists">
+                                A tag named @_version already exists, and a release never moves or replaces a tag.
+                                Choose "The tag already exists" to use it.
+                            </p>
+                        }
+
+                        @if (!_tagCreated)
+                        {
+                            @if (_confirmCreate)
+                            {
+                                <div class="board-ask" data-testid="release-create-confirm">
+                                    <p class="board-ask-text">
+                                        Create the annotated tag @_version on @Short(_commit ?? string.Empty), with the message
+                                        "@Release.TitleFor(_version)"? It is created in this repository only; pushing it is the next step.
+                                    </p>
+                                    <div class="board-ask-choices">
+                                        <button type="button" class="board-ask-choice" data-testid="release-create-yes"
+                                                disabled="@_busy" @onclick="CreateTagAsync">Create the tag</button>
+                                        <button type="button" class="board-ask-cancel" data-testid="release-create-no"
+                                                @onclick="@(() => _confirmCreate = false)">Cancel</button>
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="release-create-tag"
+                                        disabled="@(!CanCreateTag)" @onclick="@(() => _confirmCreate = true)">Create tag @_version</button>
+                            }
+                        }
+                        else if (!_tagPushed)
+                        {
+                            @if (_confirmPush)
+                            {
+                                <div class="board-ask" data-testid="release-push-confirm">
+                                    <p class="board-ask-text">
+                                        Push refs/tags/@_version to origin with this computer's git credentials? Only this one tag is pushed.
+                                        On a project whose CI builds from a pushed tag, this starts that build.
+                                    </p>
+                                    <div class="board-ask-choices">
+                                        <button type="button" class="board-ask-choice" data-testid="release-push-yes"
+                                                disabled="@_busy" @onclick="PushTagAsync">Push the tag</button>
+                                        <button type="button" class="board-ask-cancel" data-testid="release-push-no"
+                                                @onclick="@(() => _confirmPush = false)">Cancel</button>
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="release-push-tag"
+                                        disabled="@_busy" @onclick="@(() => _confirmPush = true)">Push tag @_version</button>
+                            }
+                        }
+                    }
+
+                    @if (_tagSaid is { Length: > 0 } tagSaid)
+                    {
+                        <p class="@(_tagFailed ? "release-problem" : "studio-muted release-hint")" role="status"
+                           data-testid="release-tag-said">@tagSaid</p>
+                    }
+                </section>
+
+                @if (_saveProblem is { Length: > 0 } saveProblem)
+                {
+                    <p class="release-problem" role="alert" data-testid="release-save-problem">@saveProblem</p>
+                }
+
+                <div class="release-actions">
+                    <button type="button" class="studio-btn" data-testid="release-save"
+                            disabled="@(!CanSave)" @onclick="SaveAsync">Save release @_version</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="release-cancel"
+                            @onclick="CloseAsync">Cancel</button>
+                    @if (SaveBlocker is { } blocker)
+                    {
+                        <span class="studio-muted release-hint" data-testid="release-save-blocker">@blocker</span>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    /// <summary>Closes the dialog without saving anything.</summary>
+    [Parameter]
+    public EventCallback Close { get; set; }
+
+    /// <summary>Raised once a release is saved, with the release and the wiki document's problem, if any.</summary>
+    [Parameter]
+    public EventCallback<ReleaseSaved> Saved { get; set; }
+
+    private enum TagMode
+    {
+        Existing,
+        Create,
+    }
+
+    private bool _loaded;
+    private IReadOnlyList<WorkItem> _candidates = [];
+    private readonly HashSet<int> _ticked = [];
+    private IReadOnlyList<GitTag> _tags = [];
+    private IReadOnlyList<GitCommit> _commits = [];
+    private IReadOnlyList<Release> _known = [];
+    private ReleaseVersion? _latest;
+    private string _version = string.Empty;
+    private string _notes = string.Empty;
+    private bool _notesEdited;
+    private TagMode _mode = TagMode.Existing;
+    private string? _existingTag;
+    private string? _commit;
+    private string? _branch;
+    private string? _ciState;
+    private bool _gitAvailable;
+    private string? _gitProblem;
+    private bool _confirmCreate;
+    private bool _confirmPush;
+    private bool _tagCreated;
+    private bool _tagPushed;
+    private string? _tagSaid;
+    private bool _tagFailed;
+    private bool _busy;
+    private string? _saveProblem;
+    private IGitService? _git;
+    private ReleaseTagger? _tagger;
+    private ICommitChecks? _checks;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _git = Services.GetService<IGitService>();
+        _tagger = Services.GetService<ReleaseTagger>();
+        _checks = Services.GetService<ICommitChecks>();
+        var project = CurrentProject.Require();
+
+        _candidates = await Recorder.CandidatesAsync(project);
+        foreach (var item in _candidates)
+        {
+            _ticked.Add(item.Number);
+        }
+
+        _known = await Releases.For(project).ListAsync();
+        await ReadGitAsync();
+
+        // The suggestion: when the newest release-shaped tag has no release recorded yet, the person most likely wants
+        // to record THAT tag (a project whose CI built it from a pushed tag); otherwise the next patch, on a new tag.
+        var tagLatest = ReleaseVersion.Latest(_tags.Select(t => t.Name));
+        _latest = ReleaseRecorder.Latest(_tags.Select(t => t.Name), _known);
+        if (tagLatest is { } newestTag && !_known.Any(r => string.Equals(r.Version, newestTag.Text, StringComparison.Ordinal)))
+        {
+            _version = newestTag.Text;
+            _existingTag = newestTag.Text;
+            _mode = TagMode.Existing;
+        }
+        else
+        {
+            _version = ReleaseRecorder.Suggest(_tags.Select(t => t.Name), _known).Text;
+            _mode = _gitAvailable && _tagger is not null ? TagMode.Create : TagMode.Existing;
+        }
+
+        _notes = ReleaseNotes.Draft(_version, Ticked());
+        _loaded = true;
+        await ReadCiAsync();
+    }
+
+    private async Task ReadGitAsync()
+    {
+        if (_git is null || !_git.IsAvailable)
+        {
+            _gitAvailable = false;
+            _gitProblem = _git?.UnavailableReason
+                ?? "There is no git repository open in this window, so tags can be neither listed nor created here.";
+            return;
+        }
+
+        _gitAvailable = true;
+        try
+        {
+            _tags = await _git.GetTagsAsync();
+            var branches = await _git.GetBranchesAsync();
+            _branch = branches.FirstOrDefault(b => b.Name == "main")?.Name
+                ?? branches.FirstOrDefault(b => b.Name == "master")?.Name
+                ?? branches.FirstOrDefault(b => b.IsCurrent)?.Name;
+            _commits = _branch is null ? [] : await _git.GetCommitsAsync(_branch, 15);
+            _commit = _commits.FirstOrDefault()?.Sha;
+        }
+        catch (InvalidOperationException ex)
+        {
+            _gitProblem = "The repository could not be read: " + ex.Message;
+        }
+    }
+
+    private async Task ReadCiAsync()
+    {
+        _ciState = null;
+        if (_checks is not null && _commit is { Length: > 0 } sha && _mode == TagMode.Create)
+        {
+            _ciState = await _checks.StateAsync(sha);
+        }
+    }
+
+    private IEnumerable<WorkItem> Ticked() => _candidates.Where(i => _ticked.Contains(i.Number));
+
+    private string? VersionProblem =>
+        ReleaseVersion.Parse(_version) is null
+            ? ReleaseVersion.Rule
+            : _known.Any(r => string.Equals(r.Version, _version, StringComparison.Ordinal))
+                ? $"This project already has a release {_version}."
+                : null;
+
+    private bool TagExists(string name) => _tags.Any(t => string.Equals(t.Name, name, StringComparison.Ordinal));
+
+    private bool CanCreateTag =>
+        !_busy && _tagger is not null && _gitAvailable && VersionProblem is null && !TagExists(_version) && _commit is { Length: > 0 };
+
+    private string? SaveBlocker =>
+        VersionProblem is not null ? "Fix the version first."
+        : _ticked.Count == 0 ? "Tick at least one item."
+        : _mode == TagMode.Existing && string.IsNullOrEmpty(_existingTag) ? "Choose the tag."
+        : _mode == TagMode.Create && !_tagCreated ? "Create the tag first."
+        : _mode == TagMode.Create && !_tagPushed ? "Push the tag first."
+        : null;
+
+    private bool CanSave => !_busy && SaveBlocker is null;
+
+    private void OnVersionInput(ChangeEventArgs e) => SetVersion(e.Value?.ToString() ?? string.Empty);
+
+    private void SetVersion(string version)
+    {
+        if (_tagCreated)
+        {
+            // The tag is made: the release is that tag's, and renaming it here would name a tag that does not exist.
+            return;
+        }
+
+        var previous = _version;
+        _version = version.Trim();
+        if (!_notesEdited)
+        {
+            _notes = ReleaseNotes.Draft(_version, Ticked());
+        }
+        else if (previous.Length > 0)
+        {
+            _notes = _notes.Replace("# Release " + previous, "# Release " + _version, StringComparison.Ordinal);
+        }
+    }
+
+    private void Toggle(int number, ChangeEventArgs e)
+    {
+        if (e.Value is true)
+        {
+            _ticked.Add(number);
+        }
+        else
+        {
+            _ticked.Remove(number);
+        }
+
+        if (!_notesEdited)
+        {
+            _notes = ReleaseNotes.Draft(_version, Ticked());
+        }
+    }
+
+    private void OnNotesInput(ChangeEventArgs e)
+    {
+        _notes = e.Value?.ToString() ?? string.Empty;
+        _notesEdited = true;
+    }
+
+    private void Redraft()
+    {
+        _notes = ReleaseNotes.Draft(_version, Ticked());
+        _notesEdited = false;
+    }
+
+    private async Task SetMode(TagMode mode)
+    {
+        if (_tagCreated)
+        {
+            return;
+        }
+
+        _mode = mode;
+        _confirmCreate = false;
+        _tagSaid = null;
+        await ReadCiAsync();
+    }
+
+    private void OnExistingTag(ChangeEventArgs e)
+    {
+        _existingTag = e.Value?.ToString();
+        if (_existingTag is { Length: > 0 } tag && ReleaseVersion.IsValid(tag))
+        {
+            SetVersion(tag);
+        }
+    }
+
+    private async Task OnCommit(ChangeEventArgs e)
+    {
+        _commit = e.Value?.ToString();
+        await ReadCiAsync();
+    }
+
+    private async Task CreateTagAsync()
+    {
+        if (_tagger is null || _commit is not { Length: > 0 } commit || !CanCreateTag)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var outcome = await _tagger.CreateAsync(_version, commit);
+            _tagCreated = outcome.Done;
+            _tagFailed = !outcome.Done;
+            _tagSaid = outcome.Message;
+            _confirmCreate = false;
+            if (outcome.Done && _git is not null)
+            {
+                _tags = await _git.GetTagsAsync();
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task PushTagAsync()
+    {
+        if (_tagger is null || !_tagCreated)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            var outcome = await _tagger.PushAsync(_version);
+            _tagPushed = outcome.Done;
+            _tagFailed = !outcome.Done;
+            _tagSaid = outcome.Message;
+            _confirmPush = false;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (!CanSave)
+        {
+            return;
+        }
+
+        _busy = true;
+        _saveProblem = null;
+        try
+        {
+            var tag = _mode == TagMode.Existing ? _existingTag! : _version;
+            var commit = _mode == TagMode.Existing ? _tags.FirstOrDefault(t => t.Name == tag)?.Sha : _commit;
+            var saved = await Recorder.SaveAsync(
+                CurrentProject.Require(),
+                new NewRelease
+                {
+                    Version = _version,
+                    Tag = tag,
+                    Commit = commit,
+                    TagCreated = _mode == TagMode.Create,
+                    Notes = _notes,
+                    Items = [.. Ticked().Select(i => i.Id)],
+                });
+            if (!saved.Result.Saved)
+            {
+                _saveProblem = saved.Result.Message ?? "The release was not saved.";
+                return;
+            }
+
+            await Saved.InvokeAsync(saved);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private Task CloseAsync() => Close.InvokeAsync();
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            await CloseAsync();
+        }
+    }
+
+    private static string GroupLabel(ReleaseNoteGroup group) => group switch
+    {
+        ReleaseNoteGroup.Feature => "feature",
+        ReleaseNoteGroup.Fix => "fix",
+        _ => "other",
+    };
+
+    private static string Short(string sha) => sha.Length > 7 ? sha[..7] : sha;
+}

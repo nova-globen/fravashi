@@ -1,0 +1,1648 @@
+@page "/git"
+@page "/git/{Tab}"
+@page "/git/history/{*HistoryPath}"
+@page "/git/commit/{CommitSha}"
+@page "/git/pr/{PrNumber:int}"
+@namespace Fravashi.Web.Components.Git
+@using Fravashi.Application.Git
+@using Fravashi.Application.Notifications
+@using Fravashi.Application.PullRequests
+@using Fravashi.Application.Repository
+@using Fravashi.Domain.Git
+@using Fravashi.Domain.PullRequests
+@using Fravashi.Web.Components.Code
+@using Fravashi.Web.Components.Shell
+@using Fravashi.Web.Services
+@inject IServiceProvider ServiceLookup
+@using Microsoft.JSInterop
+@inject TimeProvider Clock
+@inject IGitService Git
+@inject IGitWorkingTreeService WorkingTree
+@inject IGitRemoteService Remote
+@inject IPullRequestService PullRequests
+@inject IRepositoryChangeNotifier ChangeNotifier
+@inject INotificationHistory Notifications
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+@inject ILogger<GitPage> Logger
+@implements IAsyncDisposable
+
+<PageTitle>@(ProductName.Short) · Git</PageTitle>
+
+@* The Git page (work item #367, the shape most Git tools converge on). The page bar carries the current branch,
+   one labelled Sync menu (fetch, pull, push with their counts), New branch and Stash. The side panel holds
+   Branches (local, remote, remotes), Tags, Stashes and Pull requests as sections. The main area is the working
+   tree on top (one line when clean, the changed files and the commit box when not) and the history, always
+   visible, under it; selecting a commit, a change or a pull request opens the detail pane on the right with its
+   files and the diff, and closing it gives the space back to the history. Undoing working-tree changes goes
+   through a backup stash (owner batch 2026-07-26), never a plain discard. *@
+<div class="studio-workitems git-page">
+    <PageBar Title="Git">
+        <ChildContent>
+            @if (Git.IsAvailable)
+            {
+                <span class="git-statusline" data-testid="git-statusline">
+                    <span class="git-repo-name" data-testid="git-repo-current" title="Repository">@_repoName</span>
+                    <span class="git-branch-chip" title="Current branch">⎇ @_status.Branch</span>
+                    @if (_status.Upstream is { } upstream)
+                    {
+                        <span class="git-upstream" data-testid="git-upstream" title="@($"Tracks {upstream}")">
+                            → @upstream
+                        </span>
+                    }
+                    else
+                    {
+                        <span class="git-upstream" data-testid="git-upstream">not published</span>
+                    }
+                    <span>@_status.UnstagedEntries.Count change@(_status.UnstagedEntries.Count == 1 ? "" : "s")</span>
+                    <span>@_status.StagedEntries.Count staged</span>
+                    <span>@_status.Ahead ahead</span>
+                    <span>@_status.Behind behind</span>
+                </span>
+            }
+        </ChildContent>
+        <Actions>
+            @if (Git.IsAvailable)
+            {
+                <div class="git-sync">
+                    <button type="button" class="studio-btn studio-btn-alt git-bar-btn" data-testid="git-sync-menu"
+                            aria-haspopup="menu" aria-expanded="@(_syncMenuOpen ? "true" : "false")"
+                            disabled="@_syncBusy"
+                            title="@($"Sync with {(_status.Upstream ?? "origin")}: fetch, pull or push")"
+                            aria-label="@($"Sync: {_status.Ahead} to push, {_status.Behind} to pull")"
+                            @onclick="() => _syncMenuOpen = !_syncMenuOpen">
+                        <span>@(_syncBusy ? "Syncing…" : "Sync")</span>
+                        <span class="git-sync-count" title="@($"{_status.Ahead} commit{(_status.Ahead == 1 ? "" : "s")} to push")">
+                            <CodeIcon Kind="CodeIcon.IconKind.Push" />@_status.Ahead
+                        </span>
+                        <span class="git-sync-count" title="@($"{_status.Behind} commit{(_status.Behind == 1 ? "" : "s")} to pull")">
+                            <CodeIcon Kind="CodeIcon.IconKind.Pull" />@_status.Behind
+                        </span>
+                    </button>
+                    @if (_syncMenuOpen)
+                    {
+                        <div class="studio-dropdown-backdrop" @onclick="() => _syncMenuOpen = false"></div>
+                        <div class="studio-dropdown-panel git-sync-panel" role="menu" data-testid="git-sync-panel">
+                            <button type="button" class="studio-dropdown-option git-sync-option" role="menuitem" data-testid="git-fetch"
+                                    title="Download what origin has, without changing your branch" @onclick="FetchAsync">
+                                <CodeIcon Kind="CodeIcon.IconKind.Fetch" />
+                                <span class="git-sync-option-text"><span>Fetch</span><span class="git-sync-option-hint">See what origin has; changes nothing here</span></span>
+                            </button>
+                            <button type="button" class="studio-dropdown-option git-sync-option" role="menuitem" data-testid="git-pull"
+                                    title="Pull (fast-forward only)" @onclick="PullAsync">
+                                <CodeIcon Kind="CodeIcon.IconKind.Pull" />
+                                <span class="git-sync-option-text"><span>Pull @_status.Behind</span><span class="git-sync-option-hint">Fast-forward only</span></span>
+                            </button>
+                            <button type="button" class="studio-dropdown-option git-sync-option" role="menuitem" data-testid="git-push"
+                                    title="Push to origin" @onclick="PushAsync">
+                                <CodeIcon Kind="CodeIcon.IconKind.Push" />
+                                <span class="git-sync-option-text"><span>Push @_status.Ahead</span><span class="git-sync-option-hint">@(_status.Upstream is null ? "Publishes this branch" : $"To {_status.Upstream}")</span></span>
+                            </button>
+                        </div>
+                    }
+                </div>
+                <button type="button" class="studio-btn studio-btn-alt git-bar-btn" data-testid="git-new-branch"
+                        title="@($"Create a branch from {_status.Branch} and switch to it")" @onclick="() => _branchPrompt = true">
+                    <CodeIcon Kind="CodeIcon.IconKind.BranchPlus" /> New branch
+                </button>
+                <button type="button" class="studio-btn studio-btn-alt git-bar-btn" data-testid="git-stash-open"
+                        disabled="@(TotalChangeCount == 0 || _busy)"
+                        title="@(TotalChangeCount == 0 ? "Nothing to stash: the working tree is clean" : "Stash all changes (asks for a message)")"
+                        @onclick="OpenStashPrompt">Stash</button>
+            }
+        </Actions>
+    </PageBar>
+    <PageSplit SidebarLabel="Git sections" SidebarTestId="git-sidebar" BodyTestId="git-body"
+               SidebarCssClass="code-sidebar git-sidebar" BodyCssClass="code-body git-body-pane">
+        <Sidebar>
+            @if (!Git.IsAvailable)
+            {
+                @* Backlog 266: a host with no git says so, rather than pointing at a setup step that cannot help. *@
+                <p class="page-sidebar-empty" data-testid="git-unavailable">
+                    @if (Git.UnavailableReason is { Length: > 0 } reason)
+                    {
+                        @reason
+                    }
+                    else
+                    {
+                        <text>No git working copy is configured yet. Open a folder or clone a repository; its
+                        working copy appears here.</text>
+                    }
+                </p>
+            }
+            else
+            {
+                <PageSidebarSection Title="@($"Branches ({_branches.Count + _remoteBranches.Count})")" TestId="git-branches-section">
+                    <GitBranchList Branches="_branches" RemoteBranches="_remoteBranches" Remotes="_remotes" Busy="_busy"
+                                   OnCheckout="RequestCheckout" OnCheckoutRemote="CheckoutRemoteAsync" />
+                </PageSidebarSection>
+
+                <PageSidebarSection Title="@($"Tags ({_tags.Count})")" TestId="git-tags">
+                    @if (_tags.Count == 0)
+                    {
+                        <p class="git-side-empty" data-testid="git-tags-empty">No tags.</p>
+                    }
+                    @foreach (var tag in _tags)
+                    {
+                        <div class="code-row git-tag-row @(_commitDetail?.Commit.Sha == tag.Sha ? "active" : string.Empty)"
+                             data-testid="git-tag-row" title="@(tag.Subject.Length > 0 ? $"{tag.Name}: {tag.Subject}" : $"{tag.Name}: open its commit")"
+                             @onclick="() => SelectCommitAsync(tag.Sha)">
+                            <span class="git-tag-glyph" aria-hidden="true">◇</span>
+                            <span class="code-name">@tag.Name</span>
+                            <span class="git-side-meta">@Relative(tag.When)</span>
+                        </div>
+                    }
+                </PageSidebarSection>
+
+                <PageSidebarSection Title="@($"Stashes ({_stashes.Count})")" TestId="git-stashes">
+                    @if (_stashes.Count == 0)
+                    {
+                        <p class="git-side-empty" data-testid="git-stashes-empty">No stashes.</p>
+                    }
+                    @foreach (var stash in _stashes)
+                    {
+                        <div class="code-row git-stash-row" data-testid="git-stash-row">
+                            <span class="code-name" title="@($"stash@{{{stash.Index}}} on {stash.Branch}: {stash.Message}")">@stash.Message</span>
+                            <button type="button" class="code-section-action git-stash-op git-row-action" data-testid="git-stash-apply"
+                                    title="Apply (keep in the list)" disabled="@_busy"
+                                    @onclick="() => StashRestoreAsync(stash.Index, pop: false)">Apply</button>
+                            <button type="button" class="code-section-action git-stash-op git-row-action" data-testid="git-stash-pop"
+                                    title="Pop (apply and remove)" disabled="@_busy"
+                                    @onclick="() => StashRestoreAsync(stash.Index, pop: true)">Pop</button>
+                        </div>
+                    }
+                </PageSidebarSection>
+
+                <PageSidebarSection Title="Pull requests" TestId="git-prs">
+                    <HeaderActions>
+                        <button type="button" class="code-section-action" title="Refresh pull requests" aria-label="Refresh pull requests"
+                                data-testid="git-prs-refresh" @onclick="() => LoadPullRequestsAsync()">
+                            <CodeIcon Kind="CodeIcon.IconKind.Refresh" />
+                        </button>
+                    </HeaderActions>
+                    <ChildContent>
+                        @if (!_prConfigured)
+                        {
+                            <p class="git-side-empty" data-testid="git-prs-unconfigured">
+                                No pull-request provider is configured for the origin remote. GitHub and Azure
+                                DevOps are detected from the remote URL; a Forgejo host counts once it is added
+                                with the Forgejo provider in Settings › Connections › Git hosts.
+                            </p>
+                        }
+                        else
+                        {
+                            <div class="studio-segmented git-pr-states" role="tablist" aria-label="Pull request state">
+                                <button type="button" class="studio-segment @(_prState == PullRequestState.Open ? "active" : string.Empty)"
+                                        data-testid="git-prs-open" @onclick="() => LoadPullRequestsAsync(PullRequestState.Open)">Open</button>
+                                <button type="button" class="studio-segment @(_prState == PullRequestState.Closed ? "active" : string.Empty)"
+                                        data-testid="git-prs-closed" @onclick="() => LoadPullRequestsAsync(PullRequestState.Closed)">Closed</button>
+                            </div>
+                            @if (_prError is { } prError)
+                            {
+                                <p class="studio-error" data-testid="git-prs-error">@prError</p>
+                            }
+                            else if (_pullRequests.Count == 0)
+                            {
+                                <p class="git-side-empty" data-testid="git-prs-empty">No @(_prState.ToString().ToLowerInvariant()) pull requests.</p>
+                            }
+                            @foreach (var pr in _pullRequests)
+                            {
+                                <div class="git-commit-row @(_prDetail?.Summary.Number == pr.Number ? "active" : string.Empty)"
+                                     data-testid="git-pr-row" @onclick="() => SelectPullRequestAsync(pr.Number)">
+                                    <span class="git-commit-subject">!@pr.Number @pr.Title</span>
+                                    <span class="git-commit-meta">@pr.Author · @pr.SourceBranch → @pr.TargetBranch</span>
+                                </div>
+                            }
+                            <button type="button" class="studio-btn studio-btn-alt git-new-branch" data-testid="git-pr-create-open"
+                                    @onclick="OpenCreatePullRequest">Create pull request…</button>
+                        }
+                    </ChildContent>
+                </PageSidebarSection>
+            }
+        </Sidebar>
+        <Body>
+            @if (!Git.IsAvailable)
+            {
+                <div class="code-editor-empty" data-testid="git-diff-empty">
+                    @if (Git.UnavailableReason is { Length: > 0 } diffReason)
+                    {
+                        <p>@diffReason</p>
+                    }
+                    else
+                    {
+                        <p>No git working copy is configured yet.</p>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="git-main @(DetailOpen ? "has-detail" : string.Empty)" data-testid="git-main">
+                    <div class="git-main-column">
+                        @if (_syncNote is { } syncNote)
+                        {
+                            <div class="git-sync-note @(_syncNoteUnknown ? "git-sync-note-unknown" : string.Empty)"
+                                 data-testid="git-sync-note" role="status">
+                                <span>@syncNote</span>
+                                @if (_syncRetry is not null)
+                                {
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="git-sync-retry"
+                                            disabled="@_syncBusy" @onclick="RetrySyncAsync">Retry</button>
+                                }
+                                @if (_syncPending is not null)
+                                {
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="git-sync-check"
+                                            disabled="@_syncBusy" title="Ask origin whether the push arrived; pushes nothing"
+                                            @onclick="CheckPushAsync">Check origin</button>
+                                }
+                            </div>
+                        }
+                        <GitWorkingTree Status="_status" Selected="_selected" Busy="_busy"
+                                        OnSelect="SelectAsync" OnStage="StageAsync" OnUnstage="UnstageAsync"
+                                        OnUndo="RequestUndo" OnCommit="CommitAsync" OnRefresh="RefreshStatusAsync" />
+                        @if (HistoryPath is { } historyPath)
+                        {
+                            @* File history (phase 7): the file's commits, following renames; click one for its diff. *@
+                            <section class="git-history-panel" data-testid="git-history" aria-label="File history">
+                                <div class="git-history-head">
+                                    <span class="git-section-label">History of @historyPath</span>
+                                    <span class="git-commit-meta">@_history.Count commit@(_history.Count == 1 ? "" : "s") (follows renames)</span>
+                                    <a class="git-history-all" href="/git" data-testid="git-history-all">All history</a>
+                                </div>
+                                <div class="git-history-rows" role="list">
+                                    @if (_history.Count == 0)
+                                    {
+                                        <p class="git-history-note">No commits touch this file.</p>
+                                    }
+                                    @foreach (var commit in _history)
+                                    {
+                                        <div class="git-graph-row git-graph-row-flat @(_historySha == commit.Sha ? "active" : string.Empty)" role="listitem"
+                                             data-testid="git-history-row" @onclick="() => SelectHistoryCommitAsync(commit.Sha)">
+                                            <span class="git-graph-subject">@commit.Subject</span>
+                                            <span class="git-graph-meta">@commit.ShortSha · @commit.Author · @Relative(commit.When)</span>
+                                        </div>
+                                    }
+                                </div>
+                            </section>
+                        }
+                        else
+                        {
+                            <GitHistory Commits="_graph" CurrentBranch="@_status.Branch" RemoteNames="RemoteNames"
+                                        SelectedSha="@_commitDetail?.Commit.Sha" OnSelect="SelectCommitAsync" OnRefresh="LoadCommitsAsync" />
+                        }
+                    </div>
+                    @if (DetailOpen)
+                    {
+                        <aside class="git-detail" data-testid="git-detail" aria-label="Detail">
+                            <div class="git-detail-bar">
+                                <span class="git-section-label">@DetailLabel</span>
+                                @if (ShowDiff)
+                                {
+                                    <button type="button" class="studio-btn studio-btn-alt git-detail-mode" data-testid="git-diff-mode"
+                                            title="@(_diffInline ? "Show the diff side by side" : "Show the diff inline")"
+                                            @onclick="ToggleDiffModeAsync">@(_diffInline ? "Side by side" : "Inline")</button>
+                                }
+                                <button type="button" class="code-section-action" data-testid="git-detail-close"
+                                        title="Close (back to the history)" aria-label="Close the detail pane" @onclick="CloseDetailAsync">
+                                    <CodeIcon Kind="CodeIcon.IconKind.Close" />
+                                </button>
+                            </div>
+                            <div class="git-detail-info @(ShowDiff ? "with-diff" : string.Empty)">
+                                @if (_selected is { } selected)
+                                {
+                                    <div class="git-diff-header" data-testid="git-diff-header">
+                                        <span class="git-diff-path">@selected.Path</span>
+                                        <span class="git-diff-kind">@(selected.Staged ? "staged (HEAD ↔ index)" : "not staged (index ↔ working tree)")</span>
+                                    </div>
+                                }
+                                else if (_historySha is not null && HistoryPath is { } historyFile)
+                                {
+                                    <div class="git-diff-header" data-testid="git-history-diff-header">
+                                        <span class="git-diff-path">@historyFile</span>
+                                        <span class="git-diff-kind">at @(_history.FirstOrDefault(c => c.Sha == _historySha)?.ShortSha ?? _historySha[..Math.Min(7, _historySha.Length)])</span>
+                                    </div>
+                                }
+                                else if (_prDetail is { } prDetail)
+                                {
+                    <div class="git-commit-detail" data-testid="git-pr-detail">
+                        <div class="git-commit-detail-head">
+                            <span class="git-commit-subject">!@prDetail.Summary.Number @prDetail.Summary.Title</span>
+                            <span class="git-commit-meta">
+                                @prDetail.Summary.Author · @prDetail.Summary.SourceBranch → @prDetail.Summary.TargetBranch
+                                · @prDetail.Summary.State
+                                @if (prDetail.Summary.Url is { } prUrl)
+                                {
+                                    <a class="git-pr-link" href="@prUrl" target="_blank" rel="noopener">open on the host ↗</a>
+                                }
+                            </span>
+                        </div>
+                        @if (prDetail.Body.Length > 0)
+                        {
+                            <pre class="git-commit-body">@prDetail.Body</pre>
+                        }
+                        @if (_prReviews.Count > 0)
+                        {
+                            <div class="git-group-header"><span>Reviews</span><span class="code-search-count">@_prReviews.Count</span></div>
+                            <div class="git-pr-reviews">
+                                @foreach (var review in _prReviews)
+                                {
+                                    <div class="git-pr-review" data-testid="git-pr-review">
+                                        <span class="git-pr-review-state @ReviewStateClass(review.State)">@review.State.Replace('_', ' ').ToLowerInvariant()</span>
+                                        <span class="git-commit-meta">@review.Author@if (review.When is { } reviewedAt) { @(" · ")<LocalTime At="reviewedAt" Style="Fravashi.Web.Services.LocalTimeStyle.DateTime" /> }</span>
+                                        @if (review.Body.Length > 0)
+                                        {
+                                            <p class="git-pr-review-body">@review.Body</p>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                        @if (IsPrOpen(prDetail))
+                        {
+                            @* The review + completion actions: the PR lifecycle from this pane. *@
+                            <textarea class="studio-input git-pr-review-comment" rows="2" data-testid="git-pr-review-comment"
+                                      placeholder="Review comment (required to request changes)"
+                                      @bind="_reviewComment" @bind:event="oninput"></textarea>
+                            <div class="git-sync-row git-pr-actions">
+                                <button type="button" class="studio-btn" data-testid="git-pr-approve"
+                                        disabled="@_busy" @onclick="() => SubmitReviewAsync(ReviewVerdict.Approve)">Approve</button>
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="git-pr-request-changes"
+                                        disabled="@(_busy || string.IsNullOrWhiteSpace(_reviewComment))"
+                                        title="Reject the current state and ask for changes (comment required)"
+                                        @onclick="() => SubmitReviewAsync(ReviewVerdict.RequestChanges)">Request changes</button>
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="git-pr-comment-review"
+                                        disabled="@(_busy || string.IsNullOrWhiteSpace(_reviewComment))"
+                                        @onclick="() => SubmitReviewAsync(ReviewVerdict.Comment)">Comment</button>
+                            </div>
+                            <div class="git-sync-row git-pr-actions">
+                                <button type="button" class="studio-btn" data-testid="git-pr-merge"
+                                        disabled="@_busy" @onclick="() => MergePullRequestAsync(MergeMethod.Merge)">Merge</button>
+                                <button type="button" class="studio-btn studio-btn-alt" disabled="@_busy"
+                                        @onclick="() => MergePullRequestAsync(MergeMethod.Squash)">Squash</button>
+                                <button type="button" class="studio-btn studio-btn-alt" disabled="@_busy"
+                                        @onclick="() => MergePullRequestAsync(MergeMethod.Rebase)">Rebase</button>
+                                <button type="button" class="studio-btn studio-btn-alt git-pr-close-btn" data-testid="git-pr-close"
+                                        disabled="@_busy" title="Close without merging"
+                                        @onclick="() => _closePrConfirm = true">Close</button>
+                            </div>
+                        }
+                        @if (_reviewActionNote is { } reviewActionNote)
+                        {
+                            @* Review/merge/close outcomes land HERE, in the pane where the click
+                               happened, never only in the notification bell (owner report: a Forgejo
+                               self-approve refusal looked like "nothing happens"). *@
+                            <p class="git-pr-action-note @(_reviewActionFailed ? "git-pr-action-failed" : "git-pr-action-ok")"
+                               data-testid="git-pr-action-note" role="status">@reviewActionNote</p>
+                        }
+                        <div class="git-group-header">
+                            <span>Changed files</span>
+                            @if (_prFiles.Count > 0)
+                            {
+                                <span class="code-search-count">@_prFiles.Count</span>
+                            }
+                        </div>
+                        @if (_prFilesError is { } prFilesError)
+                        {
+                            <p class="studio-muted git-pr-files-hint" data-testid="git-pr-files-hint">
+                                @prFilesError
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="git-pr-files-fetch"
+                                        disabled="@_syncBusy" @onclick="FetchThenReloadPrFilesAsync">Fetch and retry</button>
+                            </p>
+                        }
+                        <div class="git-commit-files">
+                            @foreach (var file in _prFiles)
+                            {
+                                <div class="code-row git-change-row @(_prFile == file.Path ? "active" : string.Empty)"
+                                     data-testid="git-pr-file" @onclick="() => SelectPrFileAsync(file.Path)">
+                                    <span class="git-state git-state-@file.Kind.ToString().ToLowerInvariant()">@file.Kind.ToString()[..1]</span>
+                                    <span class="code-name">@file.Path</span>
+                                </div>
+                            }
+                        </div>
+                        @if (prDetail.Comments.Count > 0)
+                        {
+                            <div class="git-group-header"><span>Comments</span><span class="code-search-count">@prDetail.Comments.Count</span></div>
+                        }
+                        <div class="git-commit-files">
+                            @foreach (var comment in prDetail.Comments)
+                            {
+                                <div class="git-pr-comment" data-testid="git-pr-comment">
+                                    <span class="git-commit-meta">@comment.Author · <LocalTime At="comment.When" Style="Fravashi.Web.Services.LocalTimeStyle.DateTime" /></span>
+                                    <p>@comment.Body</p>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                                }
+                                else if (_commitDetail is { } detail)
+                                {
+                                    <div class="git-commit-detail" data-testid="git-commit-detail">
+                                        <div class="git-commit-detail-head">
+                                            <span class="git-commit-subject">@detail.Commit.Subject</span>
+                                            <span class="git-commit-meta">
+                                                @detail.Commit.ShortSha · @detail.Commit.Author · <LocalTime At="detail.Commit.When" Style="Fravashi.Web.Services.LocalTimeStyle.DateTime" />
+                                            </span>
+                                        </div>
+                                        @if (detail.Body.Length > 0)
+                                        {
+                                            <pre class="git-commit-body">@detail.Body</pre>
+                                        }
+                                        <div class="git-group-header">
+                                            <span>Changed files</span>
+                                            <span class="code-search-count">@detail.Files.Count</span>
+                                        </div>
+                                        <div class="git-commit-files">
+                                            @foreach (var file in detail.Files)
+                                            {
+                                                <div class="code-row git-change-row @(_commitFile == file.Path ? "active" : string.Empty)"
+                                                     data-testid="git-commit-file" title="@file.Path" @onclick="() => SelectCommitFileAsync(detail.Commit.Sha, file.Path)">
+                                                    <span class="git-state git-state-@file.Kind.ToString().ToLowerInvariant()">@file.Kind.ToString()[..1]</span>
+                                                    <span class="code-name">@file.Path</span>
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                            @* The diff host sits outside the branches above, so switching between a commit, a change and
+                               a pull request keeps the same element and the Monaco diff editor on it. *@
+                            <div class="git-detail-diff @(ShowDiff ? string.Empty : "git-detail-diff-hidden")">
+                                <div class="code-editor-host" @ref="_diffHost"></div>
+                            </div>
+                        </aside>
+                    }
+                </div>
+            }
+        </Body>
+    </PageSplit>
+</div>
+
+@if (_prCreateOpen)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _prCreateOpen = false">
+        <div class="studio-modal" data-testid="git-pr-create" @onclick:stopPropagation="true">
+            <h2>Create pull request</h2>
+            <label class="studio-modal-field">
+                <span>Title</span>
+                <input class="studio-input" @bind="_prTitle" @bind:event="oninput" data-testid="git-pr-title" />
+            </label>
+            <label class="studio-modal-field">
+                <span>Description</span>
+                <textarea class="studio-input" rows="4" @bind="_prBody" @bind:event="oninput"></textarea>
+            </label>
+            @* Local AND remote branch names: a branch pushed from elsewhere need not be checked out
+               locally to become a pull request's source (owner report 2026-07-27). *@
+            <label class="studio-modal-field">
+                <span>From (source branch)</span>
+                <select class="studio-input" @bind="_prSource" data-testid="git-pr-source">
+                    @foreach (var name in PrBranchOptions)
+                    {
+                        <option value="@name">@name</option>
+                    }
+                </select>
+            </label>
+            <label class="studio-modal-field">
+                <span>Into (target branch)</span>
+                <select class="studio-input" @bind="_prTarget" data-testid="git-pr-target">
+                    @foreach (var name in PrBranchOptions)
+                    {
+                        <option value="@name">@name</option>
+                    }
+                </select>
+            </label>
+            @if (_prCreateError is not null)
+            {
+                <p class="studio-error">@_prCreateError</p>
+            }
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _prCreateOpen = false">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="git-pr-create-go"
+                        disabled="@(string.IsNullOrWhiteSpace(_prTitle) || _prSource == _prTarget || _busy)"
+                        @onclick="CreatePullRequestAsync">Create</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_checkoutTarget is { } checkoutTarget)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _checkoutTarget = null">
+        <div class="studio-modal" data-testid="git-checkout-confirm" @onclick:stopPropagation="true">
+            <h2>Switch branch</h2>
+            <p class="studio-muted">
+                Switch from @_status.Branch to @checkoutTarget.Name?
+                @if (HasWorkingChanges)
+                {
+                    <span>
+                        The working tree has @TotalChangeCount uncommitted change@(TotalChangeCount == 1 ? "" : "s").
+                        Bring them along (they stay in the working tree), or stash them first so
+                        @_status.Branch keeps them for later.
+                    </span>
+                }
+            </p>
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _checkoutTarget = null">Cancel</button>
+                @if (HasWorkingChanges)
+                {
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="git-checkout-stash"
+                            @onclick="() => ConfirmCheckoutAsync(stashFirst: true)">Stash and switch</button>
+                    <button type="button" class="studio-btn" data-testid="git-checkout-bring"
+                            @onclick="() => ConfirmCheckoutAsync(stashFirst: false)">Bring changes</button>
+                }
+                else
+                {
+                    <button type="button" class="studio-btn" data-testid="git-checkout-go"
+                            @onclick="() => ConfirmCheckoutAsync(stashFirst: false)">Switch</button>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@if (_stashPrompt)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _stashPrompt = false">
+        <div class="studio-modal" data-testid="git-stash-prompt" @onclick:stopPropagation="true">
+            <h2>Stash changes</h2>
+            <label class="studio-modal-field">
+                <span>Message (identifies the stash in the list)</span>
+                <input class="studio-input" placeholder="@($"stash on {_status.Branch}")" @bind="_stashMessage"
+                       @bind:event="oninput" data-testid="git-stash-message" />
+            </label>
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _stashPrompt = false">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="git-stash-go" disabled="@_busy"
+                        @onclick="StashAllAsync">Stash</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_undoTarget is { } undoTarget)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _undoTarget = null">
+        <div class="studio-modal" data-testid="git-undo-confirm" @onclick:stopPropagation="true">
+            <h2>Undo changes</h2>
+            <p class="studio-muted">
+                Undo the changes to @undoTarget.Label? The working tree goes back to the last committed
+                state; the undone changes are kept as a stash named
+                "change backup: @undoTarget.Label" and can be restored from the stash list.
+            </p>
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _undoTarget = null">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="git-undo-go" disabled="@_busy"
+                        @onclick="ConfirmUndoAsync">Undo</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_closePrConfirm && _prDetail is { } closeTarget)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _closePrConfirm = false">
+        <div class="studio-modal" data-testid="git-pr-close-confirm" @onclick:stopPropagation="true">
+            <h2>Close pull request</h2>
+            <p class="studio-muted">
+                Close !@closeTarget.Summary.Number "@closeTarget.Summary.Title" without merging?
+                The branch is untouched and the pull request can be reopened on the host.
+            </p>
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _closePrConfirm = false">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="git-pr-close-go" disabled="@_busy"
+                        @onclick="ClosePullRequestAsync">Close pull request</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (_branchPrompt)
+{
+    <div class="studio-modal-backdrop" @onclick="() => _branchPrompt = false">
+        <div class="studio-modal" @onclick:stopPropagation="true">
+            <h2>New branch</h2>
+            <label class="studio-modal-field">
+                <span>From @_status.Branch</span>
+                <input class="studio-input" placeholder="feature/my-branch" @bind="_branchName" @bind:event="oninput"
+                       data-testid="git-branch-name" />
+            </label>
+            @if (_branchError is not null)
+            {
+                <p class="studio-error">@_branchError</p>
+            }
+            <div class="studio-modal-actions">
+                <button type="button" class="studio-btn studio-btn-alt" @onclick="() => _branchPrompt = false">Cancel</button>
+                <button type="button" class="studio-btn" data-testid="git-branch-create"
+                        disabled="@string.IsNullOrWhiteSpace(_branchName)" @onclick="CreateBranchAsync">Create and switch</button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter]
+    public string? Tab { get; set; }
+
+    /// <summary>Set by the /git/history/{path} route (phase 7): the file whose history fills the body.</summary>
+    [Parameter]
+    public string? HistoryPath { get; set; }
+
+    /// <summary>Set by /git/commit/{sha}: opens that commit's detail (the line-blame jump target).</summary>
+    [Parameter]
+    public string? CommitSha { get; set; }
+
+    /// <summary>Set by /git/pr/{number}: opens that pull request on the Remote tab.</summary>
+    [Parameter]
+    public int? PrNumber { get; set; }
+
+    private ElementReference _diffHost;
+    private GitWorkingStatus _status = GitWorkingStatus.Empty;
+    private IReadOnlyList<GitBranch> _branches = [];
+    private IReadOnlyList<GitGraphCommit> _graph = [];
+    private IReadOnlyList<GitTag> _tags = [];
+    private bool _syncMenuOpen;
+    private bool _diffInline;
+    private bool _diffPrefLoaded;
+    private IReadOnlyList<GitRemote> _remotes = [];
+    private string _repoName = string.Empty;
+    private string? _remoteUrl;
+    private bool _busy;
+    private bool _syncBusy;
+
+    // Backlog 231: the last remote operation's failure, shown under the sync buttons with what may be done about it.
+    private string? _syncNote;
+    private bool _syncNoteUnknown;
+    private Func<Task>? _syncRetry;
+    private GitPendingPush? _syncPending;
+    private GitWorkingEntry? _selected;
+    private GitCommitDetail? _commitDetail;
+    private string? _commitFile;
+    private (string Original, string Modified)? _pendingDiff;
+    private bool _diffInitialized;
+    private bool _branchPrompt;
+    private string _branchName = string.Empty;
+    private string? _branchError;
+    private IDisposable? _changeSubscription;
+    private bool _statusRefreshQueued;
+
+    // ---- Owner batch 2026-07-26: stash, undo, tree views, checkout confirm, remote branches ----
+    private IReadOnlyList<GitStash> _stashes = [];
+    private IReadOnlyList<GitRemoteBranch> _remoteBranches = [];
+    private GitBranch? _checkoutTarget;
+    private bool _stashPrompt;
+    private string _stashMessage = string.Empty;
+    private (IReadOnlyList<string>? Paths, string Label)? _undoTarget;
+    private string? _reviewActionNote;
+    private bool _reviewActionFailed;
+    private bool _prInitAttempted;
+
+    private int TotalChangeCount => _status.StagedEntries.Count + _status.UnstagedEntries.Count;
+
+    private bool HasWorkingChanges => TotalChangeCount > 0;
+
+    private bool ShowDiff => _selected is not null || _commitFile is not null || _historySha is not null || _prFile is not null;
+
+    /// <summary>Whether the detail pane is open: a change, a commit, a pull request or a file-history commit is selected.</summary>
+    private bool DetailOpen => _selected is not null || _commitDetail is not null || _prDetail is not null || _historySha is not null;
+
+    private string DetailLabel =>
+        _selected is not null ? "Change"
+        : _historySha is not null ? "File at a commit"
+        : _prDetail is not null ? "Pull request"
+        : "Commit";
+
+    private IReadOnlyList<string> RemoteNames => _remotes.Select(r => r.Name).ToList();
+
+    // ---- File history (phase 7, locked decision 4: git-log based, no local snapshots) ----
+    private IReadOnlyList<GitCommit> _history = [];
+    private string? _historySha;
+
+    // ---- Pull requests (phase 6) ----
+    private bool _prConfigured;
+    private PullRequestState _prState = PullRequestState.Open;
+    private IReadOnlyList<Fravashi.Domain.PullRequests.PullRequest> _pullRequests = [];
+    private PullRequestDetail? _prDetail;
+    private string? _prError;
+    private bool _prCreateOpen;
+    private string _prTitle = string.Empty;
+    private string _prBody = string.Empty;
+    private string _prSource = string.Empty;
+    private string _prTarget = string.Empty;
+    private string? _prCreateError;
+
+    // ---- PR lifecycle (owner batch T1, 2026-07-26): reviews, close, changed files ----
+    private IReadOnlyList<PullRequestReview> _prReviews = [];
+    private IReadOnlyList<GitFileChange> _prFiles = [];
+    private string? _prFilesError;
+    private string? _prFile;
+    private string? _prMergeBase;
+    private string _reviewComment = string.Empty;
+    private bool _closePrConfirm;
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Git.IsAvailable)
+        {
+            return;
+        }
+
+        _changeSubscription = ChangeNotifier.Subscribe(OnRepositoryChanged);
+        await LoadAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (!string.IsNullOrEmpty(HistoryPath) && Git.IsAvailable)
+        {
+            _history = await Git.GetFileHistoryAsync(HistoryPath, "HEAD", max: 100);
+            _historySha = null;
+            _selected = null;
+            _commitDetail = null;
+            _commitFile = null;
+            _prDetail = null;
+            _prFile = null;
+        }
+        else if (_historySha is not null)
+        {
+            // Leaving the history view: its diff must not linger under the next selection.
+            _historySha = null;
+        }
+
+        // The Pull requests section is always on the page now (work item #367), so it initializes once, after the
+        // history has been read: a slow provider never holds up the part of the page that opens first.
+        if (Git.IsAvailable && !_prInitAttempted)
+        {
+            _prInitAttempted = true;
+            await InitPullRequestsAsync();
+        }
+
+        // Deep links from the editor's line blame: /git/commit/{sha} and /git/pr/{number}.
+        if (CommitSha is { Length: > 0 } sha && Git.IsAvailable && _commitDetail?.Commit.Sha != sha)
+        {
+            await SelectCommitAsync(sha);
+        }
+
+        if (PrNumber is { } prNumber && Git.IsAvailable && _prConfigured && _prDetail?.Summary.Number != prNumber)
+        {
+            await SelectPullRequestAsync(prNumber);
+        }
+    }
+
+    private async Task SelectHistoryCommitAsync(string sha)
+    {
+        if (HistoryPath is not { } path)
+        {
+            return;
+        }
+
+        _historySha = sha;
+        _selected = null;
+        _commitDetail = null;
+        _commitFile = null;
+        _prDetail = null;
+        _prFile = null;
+        var original = await Git.ReadFileAsync($"{sha}~1", path);
+        var modified = await Git.ReadFileAsync(sha, path);
+        _pendingDiff = (original?.Content ?? string.Empty, modified?.Content ?? string.Empty);
+        StateHasChanged();
+    }
+
+    private async Task LoadAsync()
+    {
+        _status = await WorkingTree.GetStatusAsync();
+        _branches = await Git.GetBranchesAsync();
+        _stashes = await WorkingTree.GetStashesAsync();
+        _remoteUrl = await Git.GetRemoteUrlAsync();
+        _repoName = RepoNameOf(_remoteUrl) ?? "Repository";
+        _remotes = await Remote.GetRemotesAsync();
+        _remoteBranches = await Git.GetRemoteBranchesAsync();
+        _tags = await Git.GetTagsAsync();
+        await LoadCommitsAsync();
+    }
+
+    private async Task LoadCommitsAsync()
+    {
+        _graph = await Git.GetGraphAsync(150);
+        StateHasChanged();
+    }
+
+    private string Relative(DateTimeOffset when) =>
+        Fravashi.Web.Services.RelativeTime.Since(when, Clock.GetUtcNow(), brief: true, PersonTimeZone.Of(ServiceLookup)?.Zone);
+
+    private static string? RepoNameOf(string? remoteUrl)
+    {
+        if (string.IsNullOrWhiteSpace(remoteUrl))
+        {
+            return null;
+        }
+
+        var trimmed = remoteUrl.TrimEnd('/');
+        if (trimmed.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+        {
+            trimmed = trimmed[..^4];
+        }
+
+        var slash = trimmed.LastIndexOfAny(['/', ':']);
+        return slash >= 0 ? trimmed[(slash + 1)..] : trimmed;
+    }
+
+    // ---- Status / staging / commit ----
+
+    private async Task RefreshStatusAsync()
+    {
+        _status = await WorkingTree.GetStatusAsync();
+        _stashes = await WorkingTree.GetStashesAsync();
+        if (_selected is { } selected
+            && _status.StagedEntries.All(e => e.Path != selected.Path || e.Staged != selected.Staged)
+            && _status.UnstagedEntries.All(e => e.Path != selected.Path || e.Staged != selected.Staged))
+        {
+            _selected = null;
+            _pendingDiff = null;
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task StageAsync(IReadOnlyList<string> paths)
+    {
+        try
+        {
+            await WorkingTree.StageAsync(paths);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Notifications.Add(ex.Message, NotificationSeverity.Error);
+        }
+
+        await RefreshStatusAsync();
+    }
+
+    private async Task UnstageAsync(IReadOnlyList<string> paths)
+    {
+        try
+        {
+            await WorkingTree.UnstageAsync(paths);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Notifications.Add(ex.Message, NotificationSeverity.Error);
+        }
+
+        await RefreshStatusAsync();
+    }
+
+    /// <summary>Commits the staged changes; answers whether the commit was made, so the box keeps a message that failed.</summary>
+    private async Task<bool> CommitAsync(string message)
+    {
+        _busy = true;
+        try
+        {
+            var outcome = await WorkingTree.CommitAsync(message);
+            if (!outcome.Succeeded)
+            {
+                Notifications.Add(outcome.Error ?? "The commit failed.", NotificationSeverity.Error);
+                return false;
+            }
+
+            Notifications.Add($"Committed {outcome.Sha?[..Math.Min(7, outcome.Sha.Length)]}.", NotificationSeverity.Success);
+            _selected = null;
+            await LoadAsync();
+            return true;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    /// <summary>Switching branches always confirms; with local changes it offers bring-or-stash (VS Code).</summary>
+    private void RequestCheckout(GitBranch branch)
+    {
+        if (!branch.IsCurrent)
+        {
+            _checkoutTarget = branch;
+        }
+    }
+
+    private async Task ConfirmCheckoutAsync(bool stashFirst)
+    {
+        if (_checkoutTarget is not { } target)
+        {
+            return;
+        }
+
+        _checkoutTarget = null;
+        if (stashFirst)
+        {
+            var stashed = await WorkingTree.StashAsync($"switch backup: {_status.Branch} to {target.Name}");
+            if (!stashed.Succeeded)
+            {
+                Notifications.Add(stashed.Error ?? "Stashing before the switch failed; nothing was switched.", NotificationSeverity.Error);
+                return;
+            }
+        }
+
+        try
+        {
+            await Git.CheckoutAsync(target.Name);
+            Notifications.Add($"Switched to {target.Name}.", NotificationSeverity.Success);
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Typical: local changes would be overwritten. Honest message, nothing forced.
+            Notifications.Add(ex.Message, NotificationSeverity.Error);
+        }
+
+        await LoadAsync();
+        StateHasChanged();
+    }
+
+    /// <summary>Checkout a remote branch as a local tracking branch (git's DWIM checkout).</summary>
+    private async Task CheckoutRemoteAsync(GitRemoteBranch branch)
+    {
+        try
+        {
+            await Git.CheckoutTrackingAsync(branch);
+            Notifications.Add($"Checked out {branch.Name} tracking {branch.FullName}.", NotificationSeverity.Success);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Notifications.Add(ex.Message, NotificationSeverity.Error);
+        }
+
+        await LoadAsync();
+        StateHasChanged();
+    }
+
+    // ---- Stash and undo (undo = path-scoped backup stash, recoverable from the list) ----
+
+    private void OpenStashPrompt()
+    {
+        _stashPrompt = true;
+        _stashMessage = string.Empty;
+    }
+
+    private async Task StashAllAsync()
+    {
+        _stashPrompt = false;
+        var message = string.IsNullOrWhiteSpace(_stashMessage) ? $"stash on {_status.Branch}" : _stashMessage.Trim();
+        _busy = true;
+        try
+        {
+            var outcome = await WorkingTree.StashAsync(message);
+            if (outcome.Succeeded)
+            {
+                Notifications.Add($"Stashed as \"{message}\".", NotificationSeverity.Success);
+            }
+            else
+            {
+                Notifications.Add(outcome.Error ?? "The stash failed.", NotificationSeverity.Error);
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await RefreshStatusAsync();
+    }
+
+    private void RequestUndo((IReadOnlyList<string>? Paths, string Label) target) => _undoTarget = target;
+
+    private async Task ConfirmUndoAsync()
+    {
+        if (_undoTarget is not { } target)
+        {
+            return;
+        }
+
+        _undoTarget = null;
+        _busy = true;
+        try
+        {
+            var outcome = await WorkingTree.StashAsync($"change backup: {target.Label}", target.Paths);
+            if (outcome.Succeeded)
+            {
+                Notifications.Add(
+                    $"Undid the changes to {target.Label}; they are recoverable from the stash \"change backup: {target.Label}\".",
+                    NotificationSeverity.Success);
+            }
+            else
+            {
+                Notifications.Add(outcome.Error ?? "The undo failed; nothing was changed.", NotificationSeverity.Error);
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await RefreshStatusAsync();
+    }
+
+    private async Task StashRestoreAsync(int index, bool pop)
+    {
+        _busy = true;
+        try
+        {
+            var outcome = pop ? await WorkingTree.StashPopAsync(index) : await WorkingTree.StashApplyAsync(index);
+            if (outcome.Succeeded)
+            {
+                Notifications.Add(pop ? "Stash popped." : "Stash applied.", NotificationSeverity.Success);
+            }
+            else
+            {
+                Notifications.Add(outcome.Error ?? "Restoring the stash failed.", NotificationSeverity.Error);
+            }
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await RefreshStatusAsync();
+    }
+
+    private async Task CreateBranchAsync()
+    {
+        try
+        {
+            await Git.CreateBranchAsync(_branchName.Trim(), _status.Branch, checkout: true);
+            _branchPrompt = false;
+            _branchName = string.Empty;
+            _branchError = null;
+            await LoadAsync();
+        }
+        catch (InvalidOperationException ex)
+        {
+            _branchError = ex.Message;
+        }
+    }
+
+    // ---- Pull requests (phase 6) ----
+
+    private async Task InitPullRequestsAsync()
+    {
+        try
+        {
+            _prConfigured = await PullRequests.IsConfiguredAsync();
+            if (_prConfigured)
+            {
+                await LoadPullRequestsAsync();
+            }
+        }
+        catch (Exception ex) when (PullRequestFailureWords.Catches(ex))
+        {
+            _prConfigured = true; // provider known, call failed: show the error, not the stub
+            _prError = PullRequestFailureWords.For(ex, write: false);
+        }
+    }
+
+    private async Task LoadPullRequestsAsync(PullRequestState? state = null)
+    {
+        _prState = state ?? _prState;
+        _prError = null;
+        try
+        {
+            _pullRequests = await PullRequests.ListAsync(_prState);
+        }
+        catch (Exception ex) when (PullRequestFailureWords.Catches(ex))
+        {
+            _pullRequests = [];
+            _prError = PullRequestFailureWords.For(ex, write: false);
+        }
+
+        StateHasChanged();
+    }
+
+    private async Task SelectPullRequestAsync(int number)
+    {
+        _selected = null;
+        _commitDetail = null;
+        _commitFile = null;
+        _prFile = null;
+        _prReviews = [];
+        _prFiles = [];
+        _prFilesError = null;
+        _reviewComment = string.Empty;
+        _reviewActionNote = null;
+        _reviewActionFailed = false;
+        try
+        {
+            _prDetail = await PullRequests.GetAsync(number);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
+        {
+            Notifications.Add(ex.Message, NotificationSeverity.Error);
+        }
+
+        if (_prDetail is { } detail)
+        {
+            try
+            {
+                _prReviews = await PullRequests.GetReviewsAsync(detail.Summary.Number);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
+            {
+                Notifications.Add(ex.Message, NotificationSeverity.Warning);
+            }
+
+            await LoadPrFilesAsync(detail);
+        }
+
+        StateHasChanged();
+    }
+
+    private static bool IsPrOpen(PullRequestDetail detail) =>
+        string.Equals(detail.Summary.State, "open", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(detail.Summary.State, "active", StringComparison.OrdinalIgnoreCase);
+
+    private static string ReviewStateClass(string state) =>
+        state.Contains("approv", StringComparison.OrdinalIgnoreCase) ? "git-review-approved"
+        : state.Contains("request", StringComparison.OrdinalIgnoreCase)
+            || state.Contains("reject", StringComparison.OrdinalIgnoreCase)
+            || state.Contains("waiting", StringComparison.OrdinalIgnoreCase) ? "git-review-changes"
+        : "git-review-comment";
+
+    /// <summary>
+    /// The PR's changed files, computed locally against the fetched origin refs (provider-agnostic;
+    /// no extra API surface). Unknown refs mean the clone has not fetched them yet: honest hint.
+    /// </summary>
+    private async Task LoadPrFilesAsync(PullRequestDetail detail)
+    {
+        _prFilesError = null;
+        _prFiles = [];
+        _prMergeBase = null;
+        var baseRef = $"origin/{detail.Summary.TargetBranch}";
+        var headRef = $"origin/{detail.Summary.SourceBranch}";
+        try
+        {
+            _prMergeBase = await Git.GetMergeBaseAsync(baseRef, headRef);
+            _prFiles = await Git.GetDiffFilesAsync(baseRef, headRef);
+        }
+        catch (InvalidOperationException)
+        {
+            _prFilesError = $"The branches ({baseRef}, {headRef}) are not fetched locally yet.";
+        }
+    }
+
+    private async Task FetchThenReloadPrFilesAsync()
+    {
+        _syncBusy = true;
+        StateHasChanged();
+        try
+        {
+            var outcome = await Remote.FetchAsync();
+            if (!outcome.Succeeded)
+            {
+                Notifications.Add(outcome.Error ?? "The fetch failed.", NotificationSeverity.Error);
+                return;
+            }
+        }
+        finally
+        {
+            _syncBusy = false;
+        }
+
+        if (_prDetail is { } detail)
+        {
+            await LoadPrFilesAsync(detail);
+        }
+
+        StateHasChanged();
+    }
+
+    /// <summary>Diff one changed file of the PR: the merge-base version against the source branch's.</summary>
+    private async Task SelectPrFileAsync(string path)
+    {
+        if (_prDetail is not { } detail)
+        {
+            return;
+        }
+
+        _selected = null;
+        _commitFile = null;
+        _historySha = null;
+        _prFile = path;
+        var headRef = $"origin/{detail.Summary.SourceBranch}";
+        var original = _prMergeBase is { } mergeBase ? await Git.ReadFileAsync(mergeBase, path) : null;
+        var modified = await Git.ReadFileAsync(headRef, path);
+        _pendingDiff = (original?.Content ?? string.Empty, modified?.Content ?? string.Empty);
+        StateHasChanged();
+    }
+
+    private async Task SubmitReviewAsync(ReviewVerdict verdict)
+    {
+        if (_prDetail is not { } detail)
+        {
+            return;
+        }
+
+        string note;
+        var failed = false;
+        _busy = true;
+        try
+        {
+            await PullRequests.SubmitReviewAsync(detail.Summary.Number, verdict, _reviewComment.Trim());
+            note = verdict switch
+            {
+                ReviewVerdict.Approve => $"Approved !{detail.Summary.Number}.",
+                ReviewVerdict.RequestChanges => $"Requested changes on !{detail.Summary.Number}.",
+                _ => $"Commented on !{detail.Summary.Number}.",
+            };
+            Notifications.Add(note, NotificationSeverity.Success);
+            _reviewComment = string.Empty;
+        }
+        catch (Exception ex) when (PullRequestFailureWords.Catches(ex))
+        {
+            failed = true;
+            note = PullRequestFailureWords.For(ex, write: true);
+            if (verdict == ReviewVerdict.Approve && ex.Message.Contains("422", StringComparison.Ordinal))
+            {
+                note += " (Most hosts, Forgejo included, refuse approving your own pull request.)";
+            }
+
+            Notifications.Add(note, NotificationSeverity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        // The refresh resets the pane state, so the outcome note is set AFTER it.
+        await SelectPullRequestAsync(detail.Summary.Number);
+        _reviewActionNote = note;
+        _reviewActionFailed = failed;
+        StateHasChanged();
+    }
+
+    private async Task ClosePullRequestAsync()
+    {
+        if (_prDetail is not { } detail)
+        {
+            return;
+        }
+
+        string note;
+        var failed = false;
+        _closePrConfirm = false;
+        _busy = true;
+        try
+        {
+            await PullRequests.CloseAsync(detail.Summary.Number);
+            note = $"Pull request !{detail.Summary.Number} closed without merging.";
+            Notifications.Add(note, NotificationSeverity.Success);
+        }
+        catch (Exception ex) when (PullRequestFailureWords.Catches(ex))
+        {
+            failed = true;
+            note = PullRequestFailureWords.For(ex, write: true);
+            Notifications.Add(note, NotificationSeverity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await LoadPullRequestsAsync();
+        await SelectPullRequestAsync(detail.Summary.Number);
+        _reviewActionNote = note;
+        _reviewActionFailed = failed;
+        StateHasChanged();
+    }
+
+    /// <summary>Branch names offered in the create-PR dialog: local and remote, deduplicated.</summary>
+    private IReadOnlyList<string> PrBranchOptions =>
+        _branches.Select(b => b.Name)
+            .Concat(_remoteBranches.Select(r => r.Name))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+    private void OpenCreatePullRequest()
+    {
+        _prCreateOpen = true;
+        _prCreateError = null;
+        _prTitle = string.Empty;
+        _prBody = string.Empty;
+        var options = PrBranchOptions;
+        _prSource = options.Contains(_status.Branch) ? _status.Branch : options.FirstOrDefault() ?? _status.Branch;
+        _prTarget = options.FirstOrDefault(n => n is "main" or "master")
+            ?? options.FirstOrDefault(n => n != _prSource) ?? _prSource;
+    }
+
+    private async Task CreatePullRequestAsync()
+    {
+        _busy = true;
+        try
+        {
+            var created = await PullRequests.CreateAsync(
+                new CreatePullRequestRequest(_prTitle.Trim(), _prBody, _prSource, _prTarget));
+            _prCreateOpen = false;
+            Notifications.Add($"Pull request !{created.Number} created.", NotificationSeverity.Success);
+            await LoadPullRequestsAsync(PullRequestState.Open);
+            await SelectPullRequestAsync(created.Number);
+        }
+        catch (Exception ex) when (PullRequestFailureWords.Catches(ex))
+        {
+            _prCreateError = PullRequestFailureWords.For(ex, write: true);
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task MergePullRequestAsync(MergeMethod method)
+    {
+        if (_prDetail is not { } detail)
+        {
+            return;
+        }
+
+        string note;
+        var failed = false;
+        _busy = true;
+        try
+        {
+            await PullRequests.MergeAsync(detail.Summary.Number, method);
+            note = $"Pull request !{detail.Summary.Number} merged.";
+            Notifications.Add(note, NotificationSeverity.Success);
+        }
+        catch (Exception ex) when (PullRequestFailureWords.Catches(ex))
+        {
+            failed = true;
+            note = PullRequestFailureWords.For(ex, write: true);
+            Notifications.Add(note, NotificationSeverity.Error);
+        }
+        finally
+        {
+            _busy = false;
+        }
+
+        await LoadPullRequestsAsync();
+        await SelectPullRequestAsync(detail.Summary.Number);
+        _reviewActionNote = note;
+        _reviewActionFailed = failed;
+        StateHasChanged();
+    }
+
+    // ---- Sync (phase 5) ----
+
+    private async Task FetchAsync()
+    {
+        await RunSyncAsync(() => Remote.FetchAsync(), "Fetched from origin.", FetchAsync);
+    }
+
+    private async Task PullAsync()
+    {
+        await RunSyncAsync(() => Remote.PullAsync(), "Pulled from origin (fast-forward).", PullAsync);
+    }
+
+    private async Task PushAsync()
+    {
+        await RunSyncAsync(() => Remote.PushAsync(), "Pushed to origin.", PushAsync);
+    }
+
+    /// <summary>Asks origin whether a push of unknown outcome arrived; pushes nothing (backlog 231).</summary>
+    private async Task CheckPushAsync()
+    {
+        if (_syncPending is { } pending)
+        {
+            await RunSyncAsync(() => Remote.ComparePushAsync(pending), "Pushed to origin.", PushAsync);
+        }
+    }
+
+    /// <summary>
+    /// Runs one remote operation and shows its outcome under the sync buttons as well as in the notifications
+    /// (backlog 231): Retry only when the outcome says doing it again is safe, Check origin only for a push whose
+    /// answer was lost. Nothing from the remote call may escape the click handler, because an exception there ends
+    /// the circuit and the person never learns what happened.
+    /// </summary>
+    private async Task RunSyncAsync(Func<Task<GitSyncOutcome>> operation, string successMessage, Func<Task> retry)
+    {
+        _syncMenuOpen = false;
+        _syncBusy = true;
+        _syncNote = null;
+        _syncRetry = null;
+        _syncPending = null;
+        StateHasChanged();
+        try
+        {
+            GitSyncOutcome outcome;
+            try
+            {
+                outcome = await operation();
+            }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or InvalidOperationException or IOException)
+            {
+                Logger.LogWarning(ex, "A remote git operation escaped its own wording.");
+                outcome = new GitSyncOutcome(false, $"The operation stopped before an answer came back ({ex.Message}).");
+            }
+
+            if (outcome.Succeeded)
+            {
+                // A push settled by comparing says how it was known; a pull's detail is git's own summary and stays out.
+                Notifications.Add(outcome.Detail is { Length: > 0 } detail && successMessage.StartsWith("Pushed", StringComparison.Ordinal)
+                    ? $"{successMessage} {detail}"
+                    : successMessage, NotificationSeverity.Success);
+            }
+            else
+            {
+                var said = outcome.Error ?? "The git operation failed.";
+                _syncNote = said;
+                _syncNoteUnknown = outcome.Failure == GitSyncFailure.OutcomeUnknown;
+                _syncRetry = outcome.RetrySafe ? retry : null;
+                _syncPending = outcome.Failure == GitSyncFailure.OutcomeUnknown ? outcome.Pending : null;
+                Notifications.Add(said,
+                    _syncNoteUnknown ? NotificationSeverity.Warning : NotificationSeverity.Error);
+            }
+
+            try
+            {
+                await LoadAsync();
+            }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or InvalidOperationException or IOException)
+            {
+                Logger.LogWarning(ex, "Reloading the Git page after a remote operation failed.");
+            }
+        }
+        finally
+        {
+            _syncBusy = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RetrySyncAsync()
+    {
+        if (_syncRetry is { } retry)
+        {
+            await retry();
+        }
+    }
+
+    // ---- Diff ----
+
+    private async Task SelectAsync(GitWorkingEntry entry)
+    {
+        _selected = entry;
+        _commitDetail = null;
+        _commitFile = null;
+        _prDetail = null;
+        _prFile = null;
+        _historySha = null;
+        _pendingDiff = await WorkingTree.GetWorkingDiffAsync(entry.Path, entry.Staged);
+        StateHasChanged();
+    }
+
+    // ---- Commit graph (phase 5, locked decision 3: linear list) ----
+
+    private async Task SelectCommitAsync(string sha)
+    {
+        _selected = null;
+        _commitFile = null;
+        _historySha = null; // a lingering history diff must never outlive a new selection
+        _prDetail = null;
+        _prFile = null;
+        _commitDetail = await Git.GetCommitAsync(sha);
+        StateHasChanged();
+    }
+
+    /// <summary>Diff one file of a commit: its parent's version against the commit's version.</summary>
+    private async Task SelectCommitFileAsync(string sha, string path)
+    {
+        _commitFile = path;
+        var original = await Git.ReadFileAsync($"{sha}~1", path);
+        var modified = await Git.ReadFileAsync(sha, path);
+        _pendingDiff = (original?.Content ?? string.Empty, modified?.Content ?? string.Empty);
+        StateHasChanged();
+    }
+
+    /// <summary>Closes the detail pane: the history takes the whole main area again.</summary>
+    private async Task CloseDetailAsync()
+    {
+        _selected = null;
+        _commitDetail = null;
+        _commitFile = null;
+        _prDetail = null;
+        _prFile = null;
+        _historySha = null;
+        _pendingDiff = null;
+        await DisposeDiffAsync();
+    }
+
+    private async Task ToggleDiffModeAsync()
+    {
+        _diffInline = !_diffInline;
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.setDiffInline", _diffInline);
+            await JS.InvokeVoidAsync("fravashiCode.setPref", "git-diff-mode", _diffInline ? "inline" : "side");
+        }
+        catch (JSException)
+        {
+            // The mode is a convenience; the diff itself is unaffected.
+        }
+    }
+
+    // The diff editor lives on an element inside the detail pane, which leaves the page when the pane closes, so the
+    // editor is disposed with it and made again on the next open.
+    private async Task DisposeDiffAsync()
+    {
+        if (!_diffInitialized)
+        {
+            return;
+        }
+
+        _diffInitialized = false;
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.disposeDiff");
+        }
+        catch (JSException)
+        {
+            // Nothing to clean up on the page side.
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_diffPrefLoaded)
+        {
+            _diffPrefLoaded = true;
+            try
+            {
+                _diffInline = await JS.InvokeAsync<string?>("fravashiCode.getPref", "git-diff-mode") == "inline";
+            }
+            catch (JSException)
+            {
+                // Side by side stays the default.
+            }
+        }
+
+        if (!DetailOpen)
+        {
+            await DisposeDiffAsync();
+        }
+
+        if (_pendingDiff is { } diff
+            && (_selected?.Path ?? _commitFile ?? _prFile ?? (_historySha is not null ? HistoryPath : null)) is { } diffPath)
+        {
+            _pendingDiff = null;
+            if (!_diffInitialized)
+            {
+                await JS.InvokeVoidAsync("fravashiCode.initDiff", _diffHost);
+                if (_diffInline)
+                {
+                    await JS.InvokeVoidAsync("fravashiCode.setDiffInline", true);
+                }
+
+                _diffInitialized = true;
+            }
+
+            await JS.InvokeVoidAsync("fravashiCode.openDiff", diffPath, diff.Original, diff.Modified);
+        }
+    }
+
+    // ---- External changes keep the status fresh (same watcher the Code page uses) ----
+
+    private void OnRepositoryChanged(RepositoryChange change)
+    {
+        if (_statusRefreshQueued)
+        {
+            return;
+        }
+
+        _statusRefreshQueued = true;
+        _ = InvokeAsync(async () =>
+        {
+            try
+            {
+                await Task.Delay(500);
+                _statusRefreshQueued = false;
+                await RefreshStatusAsync();
+            }
+            catch (Exception ex)
+            {
+                _statusRefreshQueued = false;
+                Logger.LogWarning(ex, "Refreshing git status after a repository change failed.");
+            }
+        });
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _changeSubscription?.Dispose();
+        try
+        {
+            await JS.InvokeVoidAsync("fravashiCode.disposeDiff");
+        }
+        catch (JSDisconnectedException)
+        {
+            // Circuit already gone.
+        }
+        catch (InvalidOperationException)
+        {
+            // The PRERENDER instance disposing: it never had a JS runtime to clean up.
+        }
+    }
+}

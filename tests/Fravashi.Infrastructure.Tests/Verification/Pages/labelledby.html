@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>People</title>
+<style>
+  body { margin: 0; background: #14161c; color: #e8e4d8; font-family: Georgia, serif; }
+  main { padding: 24px 32px; display: flex; flex-direction: column; gap: 18px; }
+  h1 { font-size: 30px; font-weight: normal; margin: 0; letter-spacing: 1px; }
+  .bar { display: flex; flex-direction: row; gap: 10px; align-items: center; }
+  .bar input { background: #22252e; color: #e8e4d8; border: 1px solid #555; padding: 8px 10px; font: inherit; width: 260px; }
+  .bar button, dialog button { background: #c9a227; color: #14161c; border: 0; padding: 9px 16px; font: inherit; border-radius: 3px; }
+  #add { background: #c9a227; color: #14161c; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #333; }
+  th { color: #c9a227; font-variant: small-caps; }
+  dialog { background: #1d2029; color: #e8e4d8; border: 1px solid #c9a227; padding: 20px 26px; }
+  dialog form { display: flex; flex-direction: column; gap: 12px; }
+  dialog label { display: flex; flex-direction: column; gap: 4px; }
+  .actions { display: flex; flex-direction: row; gap: 10px; }
+  @media (max-width: 600px) { .bar { flex-direction: column; align-items: stretch; } .bar input { width: auto; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Team directory</h1>
+  <!--TOOLBAR-->
+  <div class="bar">
+    <input type="search" aria-label="Search by name" placeholder="Find someone">
+    <button id="add" type="button">Add person</button>
+    <button type="button" aria-label="Refresh">&#x21bb;</button>
+  </div>
+  <!--/TOOLBAR-->
+  <!--TABLE-->
+  <table>
+    <thead><tr><th>Name</th><th>Role</th><th>Office</th></tr></thead>
+    <tbody>
+      <tr><td>Rosalind Franklin</td><td>Chemist</td><td>Cambridge</td></tr>
+      <tr><td>Edsger Dijkstra</td><td>Professor</td><td>Austin</td></tr>
+      <tr><td>Barbara Liskov</td><td>Professor</td><td>Boston</td></tr>
+    </tbody>
+  </table>
+  <!--/TABLE-->
+</main>
+<dialog id="dlg" aria-labelledby="dlg-title">
+  <h2 id="dlg-title">Add a person</h2>
+  <form method="dialog">
+    <label>Name <input type="text" required></label>
+    <label>Role <select><option>Chemist</option><option>Professor</option></select></label>
+    <!--OFFICE--><label>Office <input type="text"></label><!--/OFFICE-->
+    <label><input type="checkbox" checked> Send a welcome email</label>
+    <div class="actions">
+      <button type="button">Save</button>
+      <button type="button" onclick="document.getElementById('dlg').close()">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+  document.getElementById('add').addEventListener('click', function () { document.getElementById('dlg').showModal(); });
+</script>
+</body>
+</html>

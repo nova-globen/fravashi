@@ -1,0 +1,126 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@implements IDisposable
+
+@* ADR 0028 (backlog 152): how much this FOLDER lets the agent do without asking. Work item #356 moved it out of the
+   session work strip's Details, where nobody saw it, into the session header, where it is always on screen. It is a
+   property of the workspace, not the conversation; the approval gate reads the level live, so choosing it here
+   applies to the next call. What each level permits is decided by the broker and is not changed here. Renders
+   nothing without a folder or without the trust store (a wiring that has none, such as most component tests). *@
+@if (!string.IsNullOrWhiteSpace(WorkspaceId) && _trustStore is not null && _workspaces is not null)
+{
+    <label class="session-trust" data-testid="session-trust-picker" title="@TrustTitle">
+        <span class="session-trust-label">Auto-approve</span>
+        <select class="studio-input session-trust-select" data-testid="session-trust"
+                title="@TrustTitle" aria-label="What runs without asking in this folder"
+                @onchange="OnTrustAsync">
+            <option value="@WorkspaceTrustLevels.Name(WorkspaceTrust.Ask)" selected="@(_trust == WorkspaceTrust.Ask)"
+                    title="@AskCaption">Nothing (ask)</option>
+            <option value="@WorkspaceTrustLevels.Name(WorkspaceTrust.Edits)" selected="@(_trust == WorkspaceTrust.Edits)"
+                    title="@EditsCaption">Edits in the copy</option>
+        </select>
+    </label>
+    @if (_trustRefusal is { Length: > 0 } trustRefusal)
+    {
+        <span class="session-trust-refusal" data-testid="session-trust-refusal" title="@trustRefusal">@trustRefusal</span>
+    }
+}
+
+@code {
+    /// <summary>What the Ask level lets run, in one line.</summary>
+    public const string AskCaption = "Ask: every change asks you first.";
+
+    /// <summary>What the Edits level lets run, in one line.</summary>
+    public const string EditsCaption =
+        "Edits: file edits inside the copy run without asking; commands, hidden paths and anything outside the copy still ask.";
+
+    /// <summary>The workspace the conversation runs in: the folder whose trust level this sets.</summary>
+    [Parameter]
+    public string? WorkspaceId { get; set; }
+
+    private IWorkspaceTrust? _trustStore;
+    private IWorkspaceStore? _workspaces;
+    private WorkspaceTrust _trust = WorkspaceTrust.Ask;
+
+    /// <summary>
+    /// The workspace id this picker actually reads and writes (backlog 312): WorkspaceId itself, or, when it names a
+    /// worktree, the repository folder it was made from, which is what AgentApprovalBroker.TrustFor reads.
+    /// </summary>
+    private string? _trustWorkspaceId;
+
+    /// <summary>Shown when a worktree's repository folder has no record, so no level can be read or set (backlog 312).</summary>
+    private string? _trustRefusal;
+
+    protected override void OnInitialized()
+    {
+        _trustStore = Services.GetService<IWorkspaceTrust>();
+        _workspaces = Services.GetService<IWorkspaceStore>();
+        if (_trustStore is not null)
+        {
+            _trustStore.Changed += OnTrustChanged;
+        }
+    }
+
+    protected override void OnParametersSet() => Load();
+
+    public void Dispose()
+    {
+        if (_trustStore is not null)
+        {
+            _trustStore.Changed -= OnTrustChanged;
+        }
+    }
+
+    private string? Scope() =>
+        _workspaces is null ? null : WorkspaceTrustScope.For(_workspaces, WorkspaceId);
+
+    private void OnTrustChanged(string workspaceId)
+    {
+        if (!string.Equals(workspaceId, Scope(), StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _ = InvokeAsync(() =>
+        {
+            Load();
+            StateHasChanged();
+        });
+    }
+
+    private void Load()
+    {
+        _trustWorkspaceId = Scope();
+        _trust = _trustWorkspaceId is null || _trustStore is null ? WorkspaceTrust.Ask : _trustStore.For(_trustWorkspaceId);
+        _trustRefusal = !string.IsNullOrWhiteSpace(WorkspaceId) && _trustWorkspaceId is null
+            ? "This worktree's repository folder is not registered, so its trust level cannot be read or set here."
+            : null;
+    }
+
+    /// <summary>What the picker says on hover: the exact bound of the chosen level, and, inside a worktree, whose level it is.</summary>
+    private string TrustTitle =>
+        (_trust == WorkspaceTrust.Edits
+            ? "Edits by Write, Edit, MultiEdit and NotebookEdit that land inside the contained copy run without asking, "
+              + "once the session has its work item and plan. Commands, anything outside the copy, hidden paths "
+              + "(.githooks, .forgejo, .claude and the like) and every other tool still ask."
+            : "Every change asks you first. Choose Edits in the copy to let file edits inside the copy run without asking.")
+        + (_trustWorkspaceId is { Length: > 0 } && !string.Equals(_trustWorkspaceId, WorkspaceId, StringComparison.Ordinal)
+            ? " This is the repository folder's own level, which this worktree runs under too."
+            : string.Empty);
+
+    private void OnTrustAsync(ChangeEventArgs e)
+    {
+        // Null only when WorkspaceId names a worktree whose repository folder has no record (backlog 312): there is
+        // nothing to set a level ON. Load still runs, so the picker goes back to the level that applies (Ask).
+        if (_trustWorkspaceId is { Length: > 0 } trustWorkspaceId && _trustStore is not null)
+        {
+            _trustStore.Set(trustWorkspaceId, WorkspaceTrustLevels.Parse(e.Value?.ToString()));
+        }
+
+        Load();
+    }
+}

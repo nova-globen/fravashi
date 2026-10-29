@@ -1,0 +1,297 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Time
+@using Fravashi.Web.Services
+@using Fravashi.Application.AgentRuntimes.Broker
+@using Fravashi.Application.Onboarding
+@using Fravashi.Application.Onboarding.Auth
+@using Fravashi.Application.Persistence
+@implements IDisposable
+@inject BrokerOptions Broker
+@inject IBrokerTokenService BrokerTokens
+@inject BrokerTokenHealth Health
+@inject IProviderAuthenticatorResolver Authenticators
+@inject ISecretStore Secrets
+
+@* Remote credential broker (ADR 0010, corporate / untrusted-client tier - plan 04 B3). Shows the honest broker
+   connection status and lets the user sign in with their identity provider, mint a token, and revoke it. Every
+   "yes" here is derived from a real stored artifact (a signed-in identity proof; a stored token whose recorded
+   expiry is still in the future) - never an assumption (assertion-gap rule). In the single-user default the tier
+   is off and this card says so plainly. *@
+
+<div class="broker-card" data-testid="broker-card">
+    @if (!_status.Active && !Broker.LocalKeyForbidden)
+    {
+        <p class="studio-muted" data-testid="broker-inactive">
+            The remote credential broker is <strong>not enabled</strong> in this build. The single-user default
+            keeps your key local (ADR 0003); brokering is turned on only by the corporate <code>corp-broker</code>
+            posture, where the organization's shared key stays on the remote broker and never reaches this device.
+        </p>
+    }
+    else if (!_status.Active && Broker.LocalKeyForbidden)
+    {
+        @* corp-broker variant, but no broker endpoint configured. The tier is ON (the local org-key path is
+           compiled off), so agent runs FAIL CLOSED - honest, never a silent fall back to a local key. *@
+        <p class="ob-probe-fail-text" data-testid="broker-misconfigured">
+            This is the <code>corp-broker</code> build: the organization key is <strong>never</strong> on this device
+            and the local-key path is switched off. But the broker endpoint is <strong>not configured</strong>
+            (<code>Broker:BaseUrl</code>), so agent runs are <strong>blocked</strong> until your operator sets it -
+            the tier fails closed rather than fall back to a local key.
+        </p>
+    }
+    else
+    {
+        @if (Broker.LocalKeyForbidden)
+        {
+            <p class="studio-muted" data-testid="broker-tier">
+                This is the <code>corp-broker</code> build: the organization's shared key stays on the remote broker
+                and <strong>never reaches this device</strong>. Sign-in is <strong>mandatory</strong> - agent runs
+                need a valid per-user broker token; without one they are blocked (there is no local-key fallback).
+            </p>
+
+            @if (!_status.TokenValid)
+            {
+                <p class="ob-probe-fail-text" data-testid="broker-runs-blocked">
+                    Agent runs are <strong>blocked</strong> until you sign in and mint a broker token.
+                </p>
+            }
+        }
+
+        <dl class="studio-detail" data-testid="broker-status">
+            <dt>Signed-in identity</dt>
+            <dd data-testid="broker-identity">
+                @if (_status.SignedIn)
+                {
+                    <span>@(_status.Identity ?? "signed in") </span>
+                }
+                else
+                {
+                    <span class="studio-muted">not signed in</span>
+                }
+            </dd>
+            <dt>Token</dt>
+            <dd data-testid="broker-token-state">
+                @if (_status.TokenValid)
+                {
+                    <span class="broker-ok">Authorized - valid until @if (_status.ExpiresAt is { } expires) { <LocalTime At="expires" Style="LocalTimeStyle.DateTime" TestId="broker-expires" /> } else { @(" - ") }</span>
+                }
+                else
+                {
+                    <span class="studio-muted">no valid token</span>
+                }
+            </dd>
+            <dt>Last mint</dt>
+            <dd data-testid="broker-last-mint">@if (_status.LastMintUtc is { } m) { <LocalTime At="m" Style="LocalTimeStyle.DateTime" /> } else { @(" - ") }</dd>
+        </dl>
+
+        @* Backlog 235: an outage the refresher is riding out ("Broker unreachable since 14:02 (...), retrying"), or a
+           refusal it will not repeat, in the words every other surface uses. *@
+        @* Backlog 246: the parts, so "since" and "next attempt at" are in the person's zone. *@
+        @if (_status.TroubleWords is { } troubleWords)
+        {
+            <p class="ob-probe-fail-text" data-testid="broker-trouble"><StampedText Words="troubleWords" /></p>
+        }
+        else if (_status.Trouble is { } trouble)
+        {
+            <p class="ob-probe-fail-text" data-testid="broker-trouble">@trouble</p>
+        }
+
+        @if (!_status.SignedIn || _start is not null)
+        {
+            <div class="broker-signin" data-testid="broker-signin">
+                @if (_start is null)
+                {
+                    <button type="button" class="studio-btn" disabled="@_busy" @onclick="StartSignInAsync"
+                            data-testid="broker-signin-start">
+                        @(_busy ? "Starting…" : $"Sign in with {ProviderLabel}")
+                    </button>
+                    <p class="ob-field-hint">
+                        You'll be asked to grant @(ProductName.Short) access to your @ProviderLabel identity. The broker verifies
+                        it and mints a short-lived, per-user token - the organization key never reaches this device.
+                    </p>
+                }
+                else
+                {
+                    <p>To sign in, open the verification page and enter this code:</p>
+                    <div class="ob-devicecode-row">
+                        <code class="ob-usercode" data-testid="broker-usercode">@_start.UserCode</code>
+                        <a class="studio-btn" href="@_start.VerificationUri" target="_blank" rel="noopener">Open verification page</a>
+                    </div>
+                    <p class="ob-devicecode-status" data-testid="broker-poll-status">@_pollStatus</p>
+                }
+            </div>
+        }
+        else
+        {
+            <div class="broker-actions" data-testid="broker-actions">
+                <button type="button" class="studio-btn" disabled="@_busy" @onclick="MintAsync"
+                        data-testid="broker-mint">@(_busy ? "Working…" : "Mint token now")</button>
+                <button type="button" class="studio-btn studio-btn-alt" disabled="@_busy" @onclick="RevokeAsync"
+                        data-testid="broker-revoke">Revoke token</button>
+            </div>
+        }
+
+        @if (_message is not null)
+        {
+            <p class="@(_error ? "ob-probe-fail-text" : "ob-saved")" data-testid="broker-message"><StampedText Words="_message" /></p>
+        }
+    }
+</div>
+
+@code {
+    private BrokerConnectionStatus _status = BrokerConnectionStatus.Inactive;
+    private bool _busy;
+    private bool _error;
+    private StampedWords? _message;
+
+    private DeviceCodeStart? _start;
+    private string _pollStatus = "Waiting for you to authorize…";
+    private CancellationTokenSource? _pollCts;
+
+    // Backlog 269: the card follows the process's one health record while it is rendered, so the refresher's re-mint, an
+    // outage starting, moving on or ending, and a refusal show without a reload. The events come from whatever thread
+    // minted, so the status is read and rendered on the renderer's dispatcher.
+    protected override void OnInitialized()
+    {
+        _status = BrokerTokens.GetStatus();
+        Health.Changed += OnHealthChanged;
+        Health.Renewed += OnRenewed;
+    }
+
+    private void OnHealthChanged() => _ = InvokeAsync(() =>
+    {
+        _status = BrokerTokens.GetStatus();
+        StateHasChanged();
+    });
+
+    private void OnRenewed(string tokenId) => OnHealthChanged();
+
+    private string ProviderName => Broker.IdentityProvider?.Trim().ToLowerInvariant() switch
+    {
+        "entra" => OnboardingProviders.AzureDevOps,
+        _ => OnboardingProviders.GitHub,
+    };
+
+    private string ProviderLabel => ProviderName switch
+    {
+        OnboardingProviders.AzureDevOps => "Microsoft Entra",
+        _ => "GitHub",
+    };
+
+    private async Task StartSignInAsync()
+    {
+        _message = null;
+        _error = false;
+        var authenticator = Authenticators.DeviceCodeFor(ProviderName);
+        if (authenticator is null)
+        {
+            _error = true;
+            _message = StampedWords.Of($"{ProviderLabel} sign-in is not configured for this install.");
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _start = await authenticator.StartAsync();
+            _pollStatus = "Waiting for you to authorize…";
+            _pollCts = new CancellationTokenSource();
+            _ = PollAsync(authenticator, _start, _pollCts.Token);
+        }
+        catch (Exception ex)
+        {
+            _error = true;
+            _message = StampedWords.Of(ex.Message);
+            _start = null;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task PollAsync(IDeviceCodeAuthenticator authenticator, DeviceCodeStart start, CancellationToken token)
+    {
+        var result = await DeviceCodeDriver.RunAsync(
+            start,
+            (dc, ct) => authenticator.PollOnceAsync(dc, ct),
+            (secs, ct) => Task.Delay(TimeSpan.FromSeconds(secs), ct),
+            DateTimeOffset.UtcNow,
+            () => DateTimeOffset.UtcNow,
+            OnPoll,
+            token);
+
+        if (result.State == DevicePollState.Success && result.Credential is not null)
+        {
+            await InvokeAsync(async () =>
+            {
+                // Store the IdP access token as the identity proof, then mint the broker token from it.
+                Secrets.Set(BrokerReferences.IdentitySecretRef, CredentialEnvelope.Serialize(result.Credential));
+                _start = null;
+                await MintAsync();
+            });
+        }
+    }
+
+    private void OnPoll(DevicePollResult result) => _ = InvokeAsync(() =>
+    {
+        _pollStatus = result.State switch
+        {
+            DevicePollState.Pending or DevicePollState.SlowDown => "Waiting for you to authorize…",
+            DevicePollState.Success => "Authorized - minting a broker token…",
+            DevicePollState.Denied => $"Sign-in was denied. {result.Detail}",
+            DevicePollState.Expired => result.Detail ?? "The sign-in request expired. Start it again.",
+            _ => $"Sign-in failed. {result.Detail}",
+        };
+        StateHasChanged();
+    });
+
+    private async Task MintAsync()
+    {
+        _busy = true;
+        _message = null;
+        try
+        {
+            var result = await BrokerTokens.MintAsync();
+            _error = !result.Success;
+            _message = result.Success
+                ? StampedWords.Of(
+                    $"Minted a broker token for {result.Subject}, valid until ",
+                    result.ExpiresAt is { } expires ? StampedWords.At(expires) : " - ",
+                    ".")
+                : result.ErrorWords ?? StampedWords.Of(result.Error);
+        }
+        finally
+        {
+            _busy = false;
+            _status = BrokerTokens.GetStatus();
+            StateHasChanged();
+        }
+    }
+
+    private async Task RevokeAsync()
+    {
+        _busy = true;
+        _message = null;
+        try
+        {
+            var result = await BrokerTokens.RevokeAsync();
+            _error = !result.Success;
+            _message = StampedWords.Of(result.Success ? "The broker token was revoked and cleared." : result.Error);
+        }
+        finally
+        {
+            _busy = false;
+            _status = BrokerTokens.GetStatus();
+            StateHasChanged();
+        }
+    }
+
+    public void Dispose()
+    {
+        Health.Changed -= OnHealthChanged;
+        Health.Renewed -= OnRenewed;
+        _pollCts?.Cancel();
+        _pollCts?.Dispose();
+    }
+}

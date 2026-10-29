@@ -1,0 +1,202 @@
+@namespace Fravashi.Web.Components.WorkItems
+@using System.Text
+@using System.Text.Json
+@using Fravashi.Application.Verification
+@using Fravashi.Domain.WorkItems.AgentLayer
+@inject IServiceProvider Services
+
+@* Backlog 224: what a verification run said about the approved design, under its evidence line. The verdict is the
+   structural one (ADR 0030); the pictures are build beside prototype per phase and viewport, read from the run's
+   verification artifacts only when asked, as data URIs, so no address serves files out of the data directory. *@
+@if (_design is { } design)
+{
+    <div class="work-item-design-check" data-testid="work-item-design-check">
+        @if (design.Unread is { } said)
+        {
+            <div>@said</div>
+        }
+        else
+        {
+            <div>Checked against <span class="work-item-ref">@@@design.Number</span> "@design.Title" at version @design.Version, the version approved.</div>
+            <ul class="work-item-list">
+                @foreach (var screen in design.Screens)
+                {
+                    <li data-testid="work-item-design-screen">
+                        <strong>@screen.Outcome</strong> @screen.Label@(screen.Url is null ? string.Empty : " at " + screen.Url)
+                        @if (screen.Console > 0)
+                        {
+                            <span>, @screen.Console console error(s)</span>
+                        }
+                        @if (screen.Findings.Count > 0)
+                        {
+                            <ul>
+                                @foreach (var finding in screen.Findings)
+                                {
+                                    <li data-testid="work-item-design-finding">@finding</li>
+                                }
+                            </ul>
+                        }
+                    </li>
+                }
+            </ul>
+            @if (Record.ArtefactRef is { } reference)
+            {
+                <button type="button" class="studio-button" data-testid="work-item-design-files" @onclick="ToggleAsync">
+                    @(_files is null ? "Show screenshots and report" : "Hide screenshots and report")
+                </button>
+                @if (_files is { Count: 0 })
+                {
+                    <div class="work-item-empty">The files of this run are gone (deleted under Settings &gt; Data &gt; Evidence retention) or could not be read. It was kept at @reference.</div>
+                }
+                else if (_files is not null)
+                {
+                    @foreach (var (name, text) in _texts)
+                    {
+                        <details>
+                            <summary>@name</summary>
+                            <pre class="work-item-design-text">@text</pre>
+                        </details>
+                    }
+                    @foreach (var pair in _pairs)
+                    {
+                        <figure class="work-item-design-pair" data-testid="work-item-design-pair">
+                            <figcaption>@pair.Key</figcaption>
+                            <div class="work-item-design-pair-sides">
+                                <div><div>Build</div>@Picture(pair.Build)</div>
+                                <div><div>Prototype</div>@Picture(pair.Prototype)</div>
+                            </div>
+                        </figure>
+                    }
+                }
+            }
+        }
+    </div>
+}
+
+@code {
+    /// <summary>The evidence record; nothing is shown unless its details carry a design check.</summary>
+    [Parameter, EditorRequired]
+    public EvidenceRecord Record { get; set; } = default!;
+
+    private DesignShown? _design;
+    private IReadOnlyList<string>? _files;
+    private List<(string Name, string Text)> _texts = [];
+    private List<(string Key, string? Build, string? Prototype)> _pairs = [];
+
+    protected override void OnParametersSet()
+    {
+        _design = Read(Record.Details);
+        _files = null;
+        _texts = [];
+        _pairs = [];
+    }
+
+    private RenderFragment Picture(string? data) => builder =>
+    {
+        if (data is null)
+        {
+            builder.AddContent(0, "not taken");
+            return;
+        }
+
+        builder.OpenElement(1, "img");
+        builder.AddAttribute(2, "src", data);
+        builder.AddAttribute(3, "alt", "screenshot");
+        builder.AddAttribute(4, "loading", "lazy");
+        builder.CloseElement();
+    };
+
+    private async Task ToggleAsync()
+    {
+        if (_files is not null)
+        {
+            _files = null;
+            _texts = [];
+            _pairs = [];
+            return;
+        }
+
+        if (Record.ArtefactRef is not { } reference || Services.GetService(typeof(IVerificationArtifacts)) is not IVerificationArtifacts store)
+        {
+            _files = [];
+            return;
+        }
+
+        _files = await store.ListAsync(reference);
+        foreach (var name in _files.Where(n => !n.EndsWith(".png", StringComparison.Ordinal)))
+        {
+            if (await store.ReadAsync(reference, name) is { } bytes)
+            {
+                _texts.Add((name, Encoding.UTF8.GetString(bytes)));
+            }
+        }
+
+        var keys = _files
+            .Select(n => n.EndsWith(".build.png", StringComparison.Ordinal) ? n[..^".build.png".Length]
+                : n.EndsWith(".prototype.png", StringComparison.Ordinal) ? n[..^".prototype.png".Length] : null)
+            .OfType<string>()
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal);
+        foreach (var key in keys)
+        {
+            _pairs.Add((key, await DataUri(store, reference, key + ".build.png"), await DataUri(store, reference, key + ".prototype.png")));
+        }
+    }
+
+    private static async Task<string?> DataUri(IVerificationArtifacts store, string reference, string name) =>
+        await store.ReadAsync(reference, name) is { } png ? "data:image/png;base64," + Convert.ToBase64String(png) : null;
+
+    /// <summary>The design part of a scenario run's details, or null when the run checked no design.</summary>
+    private static DesignShown? Read(string? details)
+    {
+        if (string.IsNullOrWhiteSpace(details))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(details);
+            if (!document.RootElement.TryGetProperty("design", out var design) || design.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var screens = new List<ScreenShown>();
+            if (design.TryGetProperty("screens", out var list) && list.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var screen in list.EnumerateArray())
+                {
+                    var title = Text(screen, "title");
+                    var id = Text(screen, "id");
+                    screens.Add(new ScreenShown(
+                        Text(screen, "outcome") switch { "Passed" => "PASSED", "Failed" => "FAILED", _ => "NOT RUN" },
+                        title is null ? $"({id})" : id is null ? $"\"{title}\"" : $"\"{title}\" ({id})",
+                        Text(screen, "url"),
+                        screen.TryGetProperty("console", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetInt32() : 0,
+                        screen.TryGetProperty("findings", out var f) && f.ValueKind == JsonValueKind.Array
+                            ? [.. f.EnumerateArray().Select(x => x.GetString()).OfType<string>()]
+                            : []));
+                }
+            }
+
+            return new DesignShown(
+                design.TryGetProperty("number", out var n) && n.ValueKind == JsonValueKind.Number ? n.GetInt32() : 0,
+                Text(design, "title") ?? string.Empty,
+                design.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt64() : 0,
+                Text(design, "unreadable"),
+                screens);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? Text(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+    private sealed record DesignShown(int Number, string Title, long Version, string? Unread, IReadOnlyList<ScreenShown> Screens);
+
+    private sealed record ScreenShown(string Outcome, string Label, string? Url, int Console, IReadOnlyList<string> Findings);
+}

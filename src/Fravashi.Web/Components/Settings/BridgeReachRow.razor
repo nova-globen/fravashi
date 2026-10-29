@@ -1,0 +1,40 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Infrastructure.Bridge
+@inject BridgeReachMonitor Monitor
+@implements IDisposable
+
+@* Backlog 252 and 278: says why fravashi.exe's host bridge cannot be reached from inside the container, naming fravashi.exe
+   not running before Windows Firewall, and the one command that fixes the firewall once it becomes the more likely
+   cause (the bridge has stayed unreachable long enough). Asks the bridge again when the page opens. A bridge that
+   answers, a bridge that has not failed for long enough to say so, and a studio with no bridge on purpose all
+   render NOTHING. *@
+
+@if (Monitor.Words is { } words)
+{
+    <dt>Host bridge</dt>
+    <dd data-testid="bridge-reach-row">
+        <span class="studio-error">@words</span>
+    </dd>
+}
+
+@code {
+    private readonly CancellationTokenSource _closed = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            await Monitor.CheckAsync(_closed.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // The page closed while it was asking.
+        }
+    }
+
+    public void Dispose()
+    {
+        _closed.Cancel();
+        _closed.Dispose();
+    }
+}

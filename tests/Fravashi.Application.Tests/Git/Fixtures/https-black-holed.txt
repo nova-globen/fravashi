@@ -1,0 +1,1 @@
+fatal: unable to access 'https://192.0.2.1/r.git/': Failed to connect to 192.0.2.1 port 443 after 134265 ms: Couldn't connect to server

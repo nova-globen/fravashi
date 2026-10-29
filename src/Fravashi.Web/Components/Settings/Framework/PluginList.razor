@@ -1,0 +1,55 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+
+@* The Plugins list (UI11): a card per plugin showing its name/display name, version, and description. *@
+
+<div class="skill-list" data-testid="plugin-list">
+    <div class="skill-list-header">
+        <h2>Plugins</h2>
+        <a class="studio-btn" href="/settings/framework/plugins/new" data-testid="plugin-new">New plugin</a>
+    </div>
+
+    @if (_plugins.Count == 0)
+    {
+        <div class="page-body-empty" data-testid="plugin-list-empty">
+            <p class="studio-muted">No plugins yet. Create one to get started.</p>
+        </div>
+    }
+    else
+    {
+        <div class="skill-cards">
+            @foreach (var item in _plugins)
+            {
+                var plugin = item.Definition;
+                <a class="skill-card" href="@($"/settings/framework/plugins/view/{item.Id}")"
+                   data-testid="@($"plugin-card-{plugin.Name}")">
+                    <SkillIconDisplay Icon="Icon" Size="44" Fallback="@Title(plugin)"
+                                      TestId="@($"plugin-card-icon-{plugin.Name}")" />
+                    <div class="skill-card-text">
+                        <div class="skill-card-title">@Title(plugin)</div>
+                        <div class="skill-card-subtitle">@plugin.Description</div>
+                        <div class="skill-card-name">@plugin.Name@(string.IsNullOrWhiteSpace(plugin.Version) ? "" : $" · v{plugin.Version}")</div>
+                    </div>
+                </a>
+            }
+        </div>
+    }
+</div>
+
+@code {
+    private static readonly SkillIcon Icon = new("PuzzlePiece", null);
+
+    private sealed record Item(string Id, PluginDefinition Definition);
+
+    private IReadOnlyList<Item> _plugins = [];
+
+    protected override void OnInitialized() =>
+        _plugins = Store.List(FrameworkArtifactKind.Plugin)
+            .Select(a => new Item(a.Id, FrameworkPayload<PluginDefinition>.From(a)))
+            .ToList();
+
+    private static string Title(PluginDefinition p) =>
+        string.IsNullOrWhiteSpace(p.DisplayName) ? p.Name : p.DisplayName;
+}

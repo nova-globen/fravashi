@@ -1,0 +1,62 @@
+@namespace Fravashi.Web.Components.Shell
+
+@* Two-pane split: a resizable sidebar (left) + body (right) (UI9), reusable across pages -- currently
+   Settings' Environment and Framework tabs. Resizing (UI10) is handled entirely by pageSplit.js via the
+   .page-split-handle; no server round-trip while dragging, and the width persists across page loads.
+   Work item #364: the panel also collapses, from the chevron at its foot, the strip's expand button or
+   Ctrl+B. Collapsed is a per-window preference like the width (an attribute on <html> that bootstrap.js
+   restores before first paint), so BOTH controls are always rendered here and studio.css shows the one that
+   applies; each control's aria-expanded is therefore fixed, because it is only visible in its own state. *@
+<div class="page-split">
+    <nav class="@SidebarClass" aria-label="@SidebarLabel" data-testid="@SidebarTestId">
+        @Sidebar
+        <div class="page-sidebar-foot">
+            <button type="button" class="page-split-toggle" data-page-split-toggle="collapse" data-testid="page-split-collapse"
+                    aria-expanded="true" aria-label="Collapse side panel (Ctrl+B)" title="Collapse side panel (Ctrl+B)">
+                <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M10 3.5 5.5 8l4.5 4.5" /></svg>
+            </button>
+        </div>
+    </nav>
+    <div class="page-split-strip" data-testid="page-split-strip">
+        <button type="button" class="page-split-toggle" data-page-split-toggle="expand" data-testid="page-split-expand"
+                aria-expanded="false" aria-label="Expand side panel (Ctrl+B)" title="Expand side panel (Ctrl+B)">
+            <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M6 3.5 10.5 8 6 12.5" /></svg>
+        </button>
+    </div>
+    <div class="page-split-handle" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"
+         title="Drag to resize, double-click to reset"></div>
+    <div class="@BodyClass" data-testid="@BodyTestId">
+        @Body
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public RenderFragment Sidebar { get; set; } = default!;
+
+    [Parameter, EditorRequired]
+    public RenderFragment Body { get; set; } = default!;
+
+    [Parameter]
+    public string SidebarLabel { get; set; } = string.Empty;
+
+    [Parameter]
+    public string? SidebarTestId { get; set; }
+
+    [Parameter]
+    public string? BodyTestId { get; set; }
+
+    /// <summary>Extra class(es) alongside "page-sidebar", e.g. a page-specific styling hook.</summary>
+    [Parameter]
+    public string? SidebarCssClass { get; set; }
+
+    /// <summary>Extra class(es) alongside "page-body", e.g. a page-specific styling hook.</summary>
+    [Parameter]
+    public string? BodyCssClass { get; set; }
+
+    private string SidebarClass =>
+        string.IsNullOrWhiteSpace(SidebarCssClass) ? "page-sidebar" : $"page-sidebar {SidebarCssClass}";
+
+    private string BodyClass =>
+        string.IsNullOrWhiteSpace(BodyCssClass) ? "page-body" : $"page-body {BodyCssClass}";
+}

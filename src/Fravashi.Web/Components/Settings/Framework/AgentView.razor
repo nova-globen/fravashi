@@ -1,0 +1,138 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.AgentRuntimes
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Read-only agent view (UI10): the rendered subagent, and the subagent-markdown preview pane (the
+   quoted-values/unquoted-keys frontmatter serialization, read-only, no file sync). Delete is confirmed. *@
+
+@if (_agent is null)
+{
+    <div class="page-body-empty" data-testid="agent-view-missing">
+        <p class="studio-muted">That agent no longer exists.</p>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/agents">Back to agents</a>
+    </div>
+}
+else
+{
+    <div class="skill-view" data-testid="agent-view">
+        <div class="skill-view-header">
+            <SkillIconDisplay Icon="_agent.EffectiveIconLarge" BrandColor="@_agent.BrandColor" Size="56"
+                              Fallback="@Title" TestId="agent-view-icon" />
+            <div class="skill-view-heading">
+                <h2 data-testid="agent-view-title">@Title</h2>
+                <div class="skill-view-name">@_agent.Name</div>
+                @if (!string.IsNullOrWhiteSpace(_agent.ShortDescription))
+                {
+                    <div class="studio-muted">@_agent.ShortDescription</div>
+                }
+            </div>
+            <div class="skill-view-actions">
+                <a class="studio-btn" href="@($"/settings/framework/agents/edit/{Id}")" data-testid="agent-edit">Edit</a>
+                <button class="studio-btn studio-btn-danger" @onclick="() => _confirmDelete = true"
+                        data-testid="agent-delete">Delete</button>
+            </div>
+        </div>
+
+        <dl class="skill-view-meta">
+            <dt>Description (when to delegate)</dt>
+            <dd data-testid="agent-view-description">@_agent.Description</dd>
+            @if (_agent.Tools.Count > 0)
+            {
+                <dt>Tools (allowlist)</dt>
+                <dd data-testid="agent-view-tools">@string.Join(", ", _agent.Tools)</dd>
+            }
+            else
+            {
+                <dt>Tools (allowlist)</dt>
+                <dd class="studio-muted">Inherits all tools (none listed)</dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_agent.Model))
+            {
+                <dt>Model</dt>
+                <dd data-testid="agent-view-model">@_agent.Model</dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_agent.BrandColor))
+            {
+                <dt>Brand colour</dt>
+                <dd><span class="skill-swatch" style="background:@_agent.BrandColor"></span> @_agent.BrandColor</dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_agent.DefaultPrompt))
+            {
+                <dt>Default prompt</dt>
+                <dd><code data-testid="agent-view-prompt">@_agent.DefaultPrompt</code></dd>
+            }
+            <dt>Targets</dt>
+            <dd data-testid="agent-view-targets">
+                @if (_agent.Targets.Count == 0)
+                {
+                    <span class="studio-muted">None</span>
+                }
+                else
+                {
+                    @string.Join(", ", _agent.Targets.Select(t => AgentRuntimeCatalog.For(t).DisplayName))
+                }
+            </dd>
+        </dl>
+
+        <section class="skill-view-section">
+            <h2>System prompt</h2>
+            <pre class="skill-view-content" data-testid="agent-view-prompt-body">@_agent.SystemPrompt</pre>
+        </section>
+
+        <section class="skill-view-section">
+            <h2>Subagent markdown preview</h2>
+            <p class="ob-field-hint">Read-only. Claude's canonical form - string values quoted, keys unquoted. Not written to disk (no file sync).</p>
+            <pre class="skill-view-skillmd" data-testid="agent-view-markdown">@_markdown</pre>
+        </section>
+    </div>
+
+    @if (_confirmDelete)
+    {
+        <div class="studio-modal-backdrop" @onclick="() => _confirmDelete = false">
+            <div class="studio-modal" style="width:420px;" @onclick:stopPropagation>
+                <h2 style="margin:0 0 10px;">Delete agent</h2>
+                <p>Delete <strong>@Title</strong> (<code>@_agent.Name</code>)? This cannot be undone.</p>
+                <div class="studio-modal-actions" style="margin-top:14px;">
+                    <button class="studio-btn studio-btn-danger" @onclick="DeleteAsync" data-testid="agent-delete-confirm">Delete</button>
+                    <button class="studio-btn studio-btn-alt" @onclick="() => _confirmDelete = false"
+                            data-testid="agent-delete-cancel">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private AgentDefinition? _agent;
+    private string _markdown = string.Empty;
+    private bool _confirmDelete;
+
+    private string Title =>
+        _agent is null ? string.Empty
+        : string.IsNullOrWhiteSpace(_agent.DisplayName) ? _agent.Name : _agent.DisplayName;
+
+    protected override void OnParametersSet()
+    {
+        _agent = null;
+        if (!string.IsNullOrWhiteSpace(Id) && Store.Get(Id) is { } artifact)
+        {
+            _agent = FrameworkPayload<AgentDefinition>.From(artifact);
+            _markdown = AgentDocument.ToAgentMarkdown(_agent);
+        }
+    }
+
+    private void DeleteAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(Id))
+        {
+            Store.Remove(Id);
+        }
+
+        Nav.NavigateTo("/settings/framework/agents");
+    }
+}

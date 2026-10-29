@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Fravashi.Launcher.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="AwesomeAssertions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Fravashi.Launcher\Fravashi.Launcher.csproj" />
+    <!-- Backup/restore (backlog 79) is the one feature split across both halves of the product: the
+         studio writes the archive because it owns the open database, the launcher restores it because
+         it needs the studio stopped. Production code keeps them apart (the launcher takes no project
+         references by design, so it parses the manifest with its own reader), which leaves exactly one
+         place the shared FILE FORMAT can be held honest: a test that drives a real archive from the
+         studio's writer through the launcher's reader. Only tests may reference across like this. -->
+    <ProjectReference Include="..\..\src\Fravashi.Infrastructure\Fravashi.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Backlog 230: the scripted network of backlog 228. Only its BCL-only files: ScriptedConnector names
+         NetworkFailure, which this project sees twice (the launcher links its own copy, and Infrastructure brings
+         Application's), so naming that type here is ambiguous and tests assert on its words instead. -->
+    <Compile Include="..\Shared\Network\NetworkScript.cs" LinkBase="Shared\Network" />
+    <Compile Include="..\Shared\Network\ScriptedShapes.cs" LinkBase="Shared\Network" />
+    <Compile Include="..\Shared\Network\ScriptedHttpHandler.cs" LinkBase="Shared\Network" />
+  </ItemGroup>
+
+</Project>

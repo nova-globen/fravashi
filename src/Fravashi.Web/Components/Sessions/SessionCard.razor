@@ -1,0 +1,125 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Domain.AgentSessions
+
+@* One session in the sidebar list: what it was asked to do, and where it got to. The row is the card
+   button plus a rename control beside it (backlog 109); the button stays the thing that selects, and
+   the rename control is a sibling rather than a child because a button cannot contain a button. While a
+   name is being typed the row IS the box, so a click in it cannot also select. *@
+<div class="session-card-row @(Selected ? "active" : string.Empty)" data-testid="session-card-row">
+    @if (_renaming)
+    {
+        <SessionRenameBox Value="@Title" CssClass="session-card-rename-input"
+                          TestId="session-card-rename-input" Done="OnRenameDone" />
+    }
+    else
+    {
+        <button type="button" class="session-card @(Selected ? "active" : string.Empty)"
+                data-testid="session-card" @onclick="() => Select.InvokeAsync()">
+            <span class="session-card-state session-card-state-@StateClass" aria-hidden="true"></span>
+            <span class="session-card-body">
+                <span class="session-card-title">@Title</span>
+                <span class="session-card-sub">
+                    @if (Imported)
+                    {
+                        @* Backlog 43: run outside Fravashi. It has no outcome the studio saw, so no state is claimed. *@
+                        <span class="session-card-imported" data-testid="session-card-imported"
+                              title="Run with the CLI outside @(ProductName.Short) and imported from its history">Imported</span>
+                    }
+                    else
+                    {
+                        @StateLabel
+                    }
+                    · <LocalTime At="Started" Style="Fravashi.Web.Services.LocalTimeStyle.Short" />
+                    @if (Assistant)
+                    {
+                        @* Work item #359: Home's studio assistant, which talks a report through and files it. *@
+                        <span class="session-chip-graph-only" data-testid="session-card-assistant"
+                              title="Home's @(ProductName.Short) assistant: reads the folder, writes work items and the wiki, and asks before starting work">@AgentAssistantTools.Label</span>
+                    }
+                    @if (GraphOnly)
+                    {
+                        @* Work item #352: a conversation that may only read the folder and write the graph. *@
+                        <span class="session-chip-graph-only" data-testid="session-card-graph-only"
+                              title="Reads the folder and writes work items and the wiki; never changes a file, runs a command or touches git">@AgentGraphOnlyTools.Label</span>
+                    }
+                </span>
+            </span>
+        </button>
+        @* An imported conversation is the CLI's file on the host, and import never writes back, so there is
+           nothing a rename could be saved to. *@
+        @* Work item #366: move a live conversation to the Code page's panel, beside the editor. *@
+        @if (OpenBesideCode.HasDelegate)
+        {
+            <button type="button" class="session-card-rename" data-testid="session-card-open-beside-code"
+                    title="Open beside the code" aria-label="Open beside the code"
+                    @onclick="() => OpenBesideCode.InvokeAsync()">
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.2"
+                     stroke-linejoin="round" aria-hidden="true">
+                    <rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.6" />
+                    <path d="M10 2.6v10.8" />
+                    <path d="M10.6 4.1h3.2v7.8h-3.2z" fill="currentColor" stroke="none" />
+                </svg>
+            </button>
+        }
+        @if (!Imported)
+        {
+            <button type="button" class="session-card-rename" data-testid="session-card-rename"
+                    title="Rename conversation" aria-label="Rename conversation"
+                    @onclick="() => _renaming = true">
+                &#9998;
+            </button>
+        }
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = string.Empty;
+
+    [Parameter]
+    public AgentSessionState State { get; set; }
+
+    [Parameter]
+    public DateTimeOffset Started { get; set; }
+
+    [Parameter]
+    public bool Selected { get; set; }
+
+    /// <summary>Backlog 43: a conversation imported from the CLI's own history rather than run in Fravashi.</summary>
+    [Parameter]
+    public bool Imported { get; set; }
+
+    /// <summary>Work item #352: a graph-only conversation, "Notes and items only", which the card labels.</summary>
+    [Parameter]
+    public bool GraphOnly { get; set; }
+
+    /// <summary>Work item #359: the studio assistant's conversation, which the card labels.</summary>
+    [Parameter]
+    public bool Assistant { get; set; }
+
+    [Parameter]
+    public EventCallback Select { get; set; }
+
+    /// <summary>Work item #366: when set, the row offers "Open beside the code" (a live conversation only).</summary>
+    [Parameter]
+    public EventCallback OpenBesideCode { get; set; }
+
+    /// <summary>Raised with the name the reader chose, only when it is new and not blank (backlog 109).</summary>
+    [Parameter]
+    public EventCallback<string> Rename { get; set; }
+
+    private bool _renaming;
+
+    private string StateClass => Imported ? "imported" : SessionStateText.CssSuffix(State);
+
+    private string StateLabel => SessionStateText.Label(State);
+
+    private async Task OnRenameDone(string? name)
+    {
+        _renaming = false;
+        if (name is not null)
+        {
+            await Rename.InvokeAsync(name);
+        }
+    }
+}

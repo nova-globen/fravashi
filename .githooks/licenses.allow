@@ -1,0 +1,88 @@
+# Dependency license manifest (see CLAUDE.md "Dependency license policy").
+# One line per SHIPPED dependency the license gate covers: Id=SPDX-license-id (or an owner-recorded
+# exception id). A license id not present in licenses.approved fails the pre-commit gate. Two classes
+# are gated: NuGet packages pinned in Directory.Packages.props / a .csproj, and the npm agent CLIs the
+# studio image bakes (the `name@${VERSION}` installs in the Dockerfile). Classes the gate does not
+# cover, and why, are recorded under CLASSES-NOT-GATED in licenses.approved.
+#
+# Adding a new dependency: verify its ACTUAL license first (a NuGet package's nuspec via
+# https://api.nuget.org/v3-flatcontainer/{id-lower}/{version}/{id-lower}.nuspec, or an npm package's
+# package.json "license" via https://registry.npmjs.org/{name}/{version}, and its GitHub LICENSE file
+# if that field is a "SEE LICENSE IN ..." or a nuspec "license type=file") before adding a line here.
+# Do not assume or copy a similar-sounding package's license.
+#
+# Verified 2026-07-23 against the exact NuGet versions pinned in Directory.Packages.props at that date.
+
+Microsoft.Data.Sqlite=MIT
+# Backlog 159, verified 2026-09-27 against the 1.63.0 nuspec (license expression MIT). It bundles playwright-core
+# (Apache-2.0) and a Node binary per platform; the image strips the Node binaries and runs the driver on its own.
+Microsoft.Playwright=MIT
+Microsoft.ML.OnnxRuntime=MIT
+SQLitePCLRaw.bundle_e_sqlite3=Apache-2.0
+Microsoft.Extensions.Hosting=MIT
+Microsoft.Extensions.Http=MIT
+Microsoft.Extensions.Options.ConfigurationExtensions=MIT
+Microsoft.Extensions.Configuration.Binder=MIT
+Microsoft.FluentUI.AspNetCore.Components=MIT
+Microsoft.FluentUI.AspNetCore.Components.Icons=MIT
+Markdig=BSD-2-Clause
+Markdown.ColorCode=MIT
+Newtonsoft.Json=MIT
+YamlDotNet=MIT
+MessagePack=MIT
+AngleSharp=MIT
+Microsoft.NET.Test.Sdk=MIT
+xunit=Apache-2.0
+xunit.runner.visualstudio=Apache-2.0
+coverlet.collector=MIT
+bunit=MIT
+NSubstitute=BSD-3-Clause
+# Owner-approved exception (2026-07-26, ADR 0014): free-but-proprietary Microsoft license, verified
+# from the nuspec (license type=file, authored by Microsoft). See the comment in licenses.approved.
+Microsoft.Web.WebView2=WebView2-Microsoft-License
+
+# Replaces FluentAssertions (removed 2026-07-23, see CLAUDE.md "Dependency license policy"): a
+# community fork created the same week FluentAssertions 8.0 moved to a commercial license, kept on
+# Apache-2.0 with an explicit "will never change license" commitment. Verified via nuspec + GitHub
+# LICENSE, 2026-07-23.
+AwesomeAssertions=Apache-2.0
+
+# Vendored web assets (not NuGet, so the hook does not parse these lines; recorded here so the whole
+# dependency picture lives in one file). See src/Fravashi.Web/wwwroot/vendor/VENDORED.md.
+#   monaco-editor 0.56.0 = MIT (verified npm package.json + bundled LICENSE, 2026-07-23)
+#   material-icon-theme 5.37.0 = MIT (verified npm package.json + bundled LICENSE, 2026-07-23)
+
+# npm agent CLIs the studio image bakes and ships (backlog 61 / ADR 0023). The `name@${VERSION}`
+# installs in the Dockerfile are parsed by the gate, so the line below IS checked (unlike the
+# vendored-asset comment above). Versions live in AgentRuntimeCatalog + the Dockerfile; the license is
+# a property of the package, not the version, so it is recorded once here. License verified 2026-08-08
+# from the package's registry.npmjs.org "license" field (Claude Code resolves to a "SEE LICENSE IN ..."
+# vendor file, which is why it is an owner-recorded exception, not an SPDX id).
+#   Claude Code is a proprietary vendor tool. The exception id covers only the one license question this
+#   gate can answer -- may we REDISTRIBUTE the binary in our image -- which is an owner/vendor
+#   arrangement (see licenses.approved). Its SERVICE TERMS about automated use are a commercial
+#   question reviewed out of band, NOT gated here (CLASSES-NOT-GATED in licenses.approved).
+@anthropic-ai/claude-code=Anthropic-Claude-Code-Terms
+#
+# Retired to v2, decided 2026-09-22 (docs/v2.md section 1): the image no longer installs these
+# two, so the gate no longer has anything to check for them. The verified licenses are kept because
+# they were checked against each registry entry, and v2 restoring an install must restore a real line
+# here (the gate blocks an install with no manifest entry, which is what it is for).
+# @openai/codex=Apache-2.0
+# @github/copilot=GitHub-Copilot-Terms
+
+# ---- Model weights the studio image bakes (backlog 40) ---------------------------------------------
+# Pinned in the Dockerfile as name@${REVISION}, which is the shape the hook already parses, so this is a
+# gated line like the npm CLIs and not an out-of-band note. Verified 2026-09-21 against the model's own
+# metadata on Hugging Face at revision 1110a243fdf4706b3f48f1d95db1a4f5529b4d41 (license: apache-2.0).
+all-MiniLM-L6-v2=Apache-2.0
+
+# ---- The browser the studio image bakes (backlog 159) -----------------------------------------------
+# Installed in the Dockerfile as `npx playwright@${PLAYWRIGHT_VERSION} install --only-shell chromium`, which is the
+# shape the hook parses, so the npm driver is a gated line: playwright 1.63.0 is Apache-2.0 (npm registry, verified
+# 2026-09-27; its only dependency, playwright-core 1.63.0, is Apache-2.0 too). The Chromium it downloads is pinned by
+# that version's browsers.json (chromium-headless-shell revision 1243, 153.0.8010.12); Chromium's own licence is
+# BSD-3-Clause with third-party components under their own notices, which the downloaded build carries. Recorded
+# below as its own line so the browser is never an unrecorded passenger of the driver.
+playwright=Apache-2.0
+chromium-headless-shell=BSD-3-Clause

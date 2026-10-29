@@ -1,0 +1,303 @@
+@using Fravashi.Application.Onboarding
+@using Fravashi.Application.Onboarding.Auth
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Variants
+@using Fravashi.Infrastructure.Onboarding.Auth
+@using Fravashi.Web.Services
+@using Microsoft.JSInterop
+@implements IDisposable
+@inject IAuthConfigStore AuthConfig
+@inject IProviderAuthenticatorResolver Authenticators
+@inject AuthCodeSignInStarter AuthCodeStarter
+@inject IFeatureFlags Features
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+@* Provider sign-in (SSO/OIDC, owner feedback F6; corrected by ADR 0004). Renders the auth-method choice -
+   "Sign in with <provider>" (the preferred path: the user grants the vendor-registered Fravashi app access)
+   or "Use an access token" (the unchanged PAT/API-token fallback) - plus the device-code UX (GitHub, Azure
+   DevOps) or the authorization-code launch (Atlassian 3LO). The user NEVER registers an app; the client ids
+   ship baked into the product (VendorAppDefaults). When a provider's app is not registered in this build the
+   sign-in button is honestly disabled ("not available in this build yet - use an access token"), never a dead
+   button and never a "register an app" instruction. Per-install overrides live in Settings → Advanced. *@
+
+@if (_gitHubSsoDisabled)
+{
+    @* I1 variant switch: GITHUB_LOGIN off. The GitHub SSO button is hidden honestly (reusing the ADR-0004
+       vendor-default disabled-state pattern) and GitHub connections are token-only in this build. *@
+    <p class="ob-field-hint" data-testid="@($"{Area}-signin-variant-off")">
+        GitHub single sign-on is turned off in this build (@Features.Variant) - connect GitHub with an access
+        token below.
+    </p>
+}
+else if (_strategy != AuthStrategy.Pat)
+{
+    <div class="ob-authmethod" role="group" aria-label="How to authorize">
+        <button type="button" class="ob-authmethod-btn @(UseSso ? "active" : "")"
+                @onclick="() => SetModeAsync(true)" data-testid="@($"{Area}-method-sso")">
+            Sign in with @ProviderLabel
+        </button>
+        <button type="button" class="ob-authmethod-btn @(!UseSso ? "active" : "")"
+                @onclick="() => SetModeAsync(false)" data-testid="@($"{Area}-method-pat")">
+            Use an access token
+        </button>
+    </div>
+
+    @if (UseSso)
+    {
+        <div class="ob-signin" data-testid="@($"{Area}-signin")">
+            @if (_config.IsConfigured)
+            {
+                @if (_signedIn)
+                {
+                    <p class="ob-saved" data-testid="@($"{Area}-signin-ok")">
+                        Signed in with @ProviderLabel - a token was acquired and stored.
+                        @if (_strategy == AuthStrategy.DeviceCode)
+                        {
+                            <span> Now run <strong>Test access</strong> to verify it, then save.</span>
+                        }
+                    </p>
+                }
+                else if (_start is not null)
+                {
+                    <div class="ob-devicecode" data-testid="@($"{Area}-devicecode")">
+                        <p>To sign in, open the verification page and enter this code:</p>
+                        <div class="ob-devicecode-row">
+                            <code class="ob-usercode" data-testid="@($"{Area}-usercode")">@_start.UserCode</code>
+                            <button type="button" class="studio-btn studio-btn-alt" @onclick="CopyCodeAsync"
+                                    data-testid="@($"{Area}-copy-code")">@(_copied ? "Copied" : "Copy code")</button>
+                            <a class="studio-btn" href="@_start.VerificationUri" target="_blank" rel="noopener"
+                               data-testid="@($"{Area}-open-verify")">Open verification page</a>
+                        </div>
+                        <p class="ob-devicecode-status @PollClass" data-testid="@($"{Area}-poll-status")">@_pollStatus</p>
+                    </div>
+                }
+                else
+                {
+                    <button type="button" class="studio-btn" disabled="@_busy" @onclick="StartAsync"
+                            data-testid="@($"{Area}-signin-start")">
+                        @(_busy ? "Starting…" : $"Sign in with {ProviderLabel}")
+                    </button>
+                    <p class="ob-field-hint" data-testid="@($"{Area}-signin-grant")">
+                        @if (_strategy == AuthStrategy.DeviceCode)
+                        {
+                            @($"You'll be asked to grant {ProductName.Short} access to {GrantNoun}. There is nothing to register - just approve.")
+                        }
+                        else
+                        {
+                            @($"This opens {ProviderLabel} in your browser to authorize {ProductName.Short}, then returns here. The token is acquired and stored; probe integration for Atlassian 3LO tokens is a follow-up (see docs/sso-setup.md).")
+                        }
+                    </p>
+                    @if (_error is not null)
+                    {
+                        <p class="ob-probe-fail-text" data-testid="@($"{Area}-signin-error")">@_error</p>
+                    }
+                }
+            }
+            else
+            {
+                <button type="button" class="studio-btn" disabled data-testid="@($"{Area}-signin-disabled")">
+                    Sign in with @ProviderLabel
+                </button>
+                <p class="ob-field-hint" data-testid="@($"{Area}-signin-reason")">@UnavailableCopy</p>
+            }
+        </div>
+    }
+}
+
+@code {
+    [Parameter, EditorRequired] public string Area { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Provider { get; set; } = string.Empty;
+    [Parameter] public string? BaseUrl { get; set; }
+    [Parameter, EditorRequired] public string ConnectionId { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string CredentialRef { get; set; } = string.Empty;
+    [Parameter] public bool UseSso { get; set; }
+    [Parameter] public EventCallback<bool> UseSsoChanged { get; set; }
+    [Parameter] public EventCallback<StoredCredential> OnSignedIn { get; set; }
+    [Parameter] public string ReturnMode { get; set; } = "wizard";
+
+    private AuthStrategy _strategy;
+    private ProviderAuthConfig _config = default!;
+    private bool _gitHubSsoDisabled;
+    private bool _busy;
+    private bool _signedIn;
+    private bool _copied;
+    private string? _error;
+
+    private DeviceCodeStart? _start;
+    private DevicePollState _pollState = DevicePollState.Pending;
+    private string _pollStatus = "Waiting for you to authorize…";
+    private CancellationTokenSource? _pollCts;
+
+    protected override void OnParametersSet()
+    {
+        _strategy = AuthConfig.StrategyFor(Provider);
+        _config = AuthConfig.Get(Provider);
+
+        // I1: when the variant turns GITHUB_LOGIN off, suppress the GitHub SSO option and force token-only.
+        _gitHubSsoDisabled = !Features.Flags.GitHubLogin && Provider is OnboardingProviders.GitHub or OnboardingProviders.GitHubWiki;
+        if (_gitHubSsoDisabled && UseSso)
+        {
+            _ = SetModeAsync(false);
+        }
+    }
+
+    private string ProviderLabel => Provider switch
+    {
+        OnboardingProviders.GitHub or OnboardingProviders.GitHubWiki => "GitHub",
+        OnboardingProviders.AzureDevOps or OnboardingProviders.AzureDevOpsWiki => "Azure DevOps",
+        OnboardingProviders.Jira => "Jira",
+        OnboardingProviders.Confluence => "Confluence",
+        _ => Provider,
+    };
+
+    /// <summary>What the user is granting Fravashi access to, for the device-flow "grant access" line.</summary>
+    private string GrantNoun => Area switch
+    {
+        "source" => "your repositories",
+        "wiki" => "your wiki",
+        "board" => "your board",
+        _ => "your account",
+    };
+
+    /// <summary>
+    /// The honest end-user copy shown on the disabled sign-in button. A device-code provider whose vendor app
+    /// is not registered in this build is simply "not available yet" (never "register an app" - that is not the
+    /// user's job); Atlassian is gated behind an installation's own app registration (ADR 0004).
+    /// </summary>
+    private string UnavailableCopy => _strategy == AuthStrategy.AuthCode
+        ? $"{ProviderLabel} sign-in is available for installations with their own app registration - see advanced settings; otherwise use an API token below."
+        : $"Sign-in with {ProviderLabel} isn't available in this build yet - use an access token below.";
+
+    private string PollClass => _pollState switch
+    {
+        DevicePollState.Success => "ob-poll-ok",
+        DevicePollState.Denied or DevicePollState.Expired or DevicePollState.Error => "ob-poll-fail",
+        _ => "ob-poll-wait",
+    };
+
+    private async Task SetModeAsync(bool sso)
+    {
+        if (UseSso != sso)
+        {
+            UseSso = sso;
+            await UseSsoChanged.InvokeAsync(sso);
+        }
+    }
+
+    private async Task StartAsync()
+    {
+        _error = null;
+        if (_strategy == AuthStrategy.DeviceCode)
+        {
+            await StartDeviceAsync();
+        }
+        else if (_strategy == AuthStrategy.AuthCode)
+        {
+            StartAuthCode();
+        }
+    }
+
+    private async Task StartDeviceAsync()
+    {
+        var authenticator = Authenticators.DeviceCodeFor(Provider);
+        if (authenticator is null)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _start = await authenticator.StartAsync();
+            _pollState = DevicePollState.Pending;
+            _pollStatus = "Waiting for you to authorize…";
+            _pollCts = new CancellationTokenSource();
+            _ = PollAsync(authenticator, _start, _pollCts.Token);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            _start = null;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task PollAsync(IDeviceCodeAuthenticator authenticator, DeviceCodeStart start, CancellationToken token)
+    {
+        var result = await DeviceCodeDriver.RunAsync(
+            start,
+            (dc, ct) => authenticator.PollOnceAsync(dc, ct),
+            (secs, ct) => Task.Delay(TimeSpan.FromSeconds(secs), ct),
+            DateTimeOffset.UtcNow,
+            () => DateTimeOffset.UtcNow,
+            OnPoll,
+            token);
+
+        if (result.State == DevicePollState.Success && result.Credential is not null)
+        {
+            await InvokeAsync(async () =>
+            {
+                _signedIn = true;
+                _start = null;
+                await OnSignedIn.InvokeAsync(result.Credential);
+                StateHasChanged();
+            });
+        }
+    }
+
+    private void OnPoll(DevicePollResult result) => _ = InvokeAsync(() =>
+    {
+        _pollState = result.State;
+        _pollStatus = result.State switch
+        {
+            DevicePollState.Pending => "Waiting for you to authorize…",
+            DevicePollState.SlowDown => "Waiting for you to authorize…",
+            DevicePollState.Success => "Authorized - token acquired.",
+            DevicePollState.Denied => $"Sign-in was denied. {result.Detail}",
+            DevicePollState.Expired => result.Detail ?? "The sign-in request expired. Start it again.",
+            _ => $"Sign-in failed. {result.Detail}",
+        };
+        StateHasChanged();
+    });
+
+    private void StartAuthCode()
+    {
+        var redirectUri = new Uri(new Uri(Nav.BaseUri), "auth/callback/atlassian").ToString();
+        var url = AuthCodeStarter.Begin(Provider, Area, ConnectionId, CredentialRef, BaseUrl, redirectUri, ReturnMode);
+        if (url is null)
+        {
+            _error = "Sign-in is not available for this provider.";
+            return;
+        }
+
+        Nav.NavigateTo(url, forceLoad: true);
+    }
+
+    private async Task CopyCodeAsync()
+    {
+        if (_start is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", _start.UserCode);
+            _copied = true;
+        }
+        catch (Exception)
+        {
+            // Clipboard may be blocked; the code is shown regardless.
+        }
+    }
+
+    public void Dispose()
+    {
+        _pollCts?.Cancel();
+        _pollCts?.Dispose();
+    }
+}

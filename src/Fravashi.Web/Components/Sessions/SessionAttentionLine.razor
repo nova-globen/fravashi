@@ -1,0 +1,35 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.Sessions
+
+@* The operator's attention as the studio counted it (backlog 244): one line, the same text on the session pane, on a
+   work item's page and in the session_attention tool, because all three read SessionAttention.Line. The tooltip breaks
+   the asked approvals down by kind, and a count rebuilt from an old transcript says so rather than passing as whole. *@
+<div class="session-attention" data-testid="@TestId" title="@Title">
+    @if (!string.IsNullOrEmpty(Label))
+    {
+        <span class="session-usage-label">@Label</span>
+    }
+    <span class="session-attention-line" data-testid="@(TestId + "-line")">@Attention.Line</span>
+    @if (Attention.Reconstructed)
+    {
+        <span class="session-attention-note" data-testid="@(TestId + "-reconstructed")">(@SessionAttention.ReconstructedNote)</span>
+    }
+</div>
+
+@code {
+    /// <summary>The counts to show.</summary>
+    [Parameter, EditorRequired]
+    public SessionAttention Attention { get; set; } = SessionAttention.Empty;
+
+    /// <summary>A short label in front of the line, or none.</summary>
+    [Parameter]
+    public string? Label { get; set; } = "Attention";
+
+    /// <summary>The test id of the line, so one page can carry several.</summary>
+    [Parameter]
+    public string TestId { get; set; } = "session-attention";
+
+    private string Title => Attention.ByKind is { Length: > 0 } kinds
+        ? "Approvals asked, by kind: " + kinds
+        : "No approval was asked of a person.";
+}

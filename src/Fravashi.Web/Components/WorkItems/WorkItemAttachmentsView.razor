@@ -1,0 +1,213 @@
+@namespace Fravashi.Web.Components.WorkItems
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.WorkItems
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@implements IDisposable
+
+@* Work item #359: the files a work item carries, images first, as thumbnails; a click opens the image large over the
+   page. The bytes come from the studio's data directory through IWorkItemAttachments (never the repository), checked
+   again on every read, and are shown as data URIs, so nothing here is a route a browser could be pointed at. The item
+   page offers Attach image; the reference preview shows the same thumbnails without it. Resolved optionally: a wiring
+   without the store shows nothing at all. *@
+@if (_store is not null && (_attachments.Count > 0 || AllowAdd))
+{
+    <section class="@(Heading is null ? "work-item-attachments-wrap" : "work-item-section")" data-testid="work-item-attachments-section">
+    @if (Heading is { } heading)
+    {
+        <h3 class="work-item-section-title">@heading</h3>
+    }
+    <div class="work-item-attachments@(Compact ? " compact" : string.Empty)" data-testid="work-item-attachments">
+        @if (_attachments.Count == 0)
+        {
+            <div class="work-item-empty" data-testid="work-item-no-attachments">No images yet.</div>
+        }
+        else
+        {
+            <div class="work-item-attachment-grid">
+                @foreach (var shown in _thumbnails)
+                {
+                    var current = shown;
+                    <button type="button" class="work-item-attachment-thumb" data-testid="work-item-attachment"
+                            title="@current.Attachment.FileName" @onclick="() => _open = current">
+                        <img src="@current.DataUri" alt="@current.Attachment.FileName" loading="lazy" />
+                        @if (!Compact)
+                        {
+                            <span class="work-item-attachment-name">@current.Attachment.FileName</span>
+                        }
+                    </button>
+                }
+            </div>
+            @if (_unreadable > 0)
+            {
+                <div class="work-item-empty" data-testid="work-item-attachments-unreadable">
+                    @(_unreadable == 1 ? "1 attached file" : _unreadable + " attached files") could not be read.
+                </div>
+            }
+        }
+
+        @if (AllowAdd)
+        {
+            <label class="studio-btn studio-btn-alt work-item-attach-button" data-testid="work-item-attach">
+                Attach image
+                <InputFile accept="image/png,image/jpeg,image/gif,image/webp" multiple OnChange="AddAsync"
+                           data-testid="work-item-attach-file" />
+            </label>
+        }
+        @if (_error is { Length: > 0 } error)
+        {
+            <div class="work-item-attachments-error" role="alert" data-testid="work-item-attach-error">@error</div>
+        }
+    </div>
+    </section>
+
+    @if (_open is { } open)
+    {
+        <div class="work-item-attachment-viewer" data-testid="work-item-attachment-viewer" role="dialog"
+             aria-label="@open.Attachment.FileName" @onclick="() => _open = null">
+            <figure @onclick:stopPropagation="true">
+                <img src="@open.DataUri" alt="@open.Attachment.FileName" />
+                <figcaption>
+                    <span>@open.Attachment.FileName</span>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-attachment-close"
+                            @onclick="() => _open = null">Close</button>
+                </figcaption>
+            </figure>
+        </div>
+    }
+}
+
+@code {
+    /// <summary>The item whose files these are.</summary>
+    [Parameter, EditorRequired]
+    public WorkItemId Item { get; set; } = default!;
+
+    /// <summary>Offers Attach image (the item page). The reference preview leaves it off.</summary>
+    [Parameter]
+    public bool AllowAdd { get; set; }
+
+    /// <summary>A section heading (the item page); without one the thumbnails stand alone.</summary>
+    [Parameter]
+    public string? Heading { get; set; }
+
+    /// <summary>Smaller thumbnails without names (the reference preview).</summary>
+    [Parameter]
+    public bool Compact { get; set; }
+
+    private sealed record Shown(WorkItemAttachment Attachment, string DataUri);
+
+    private IWorkItemAttachments? _store;
+    private WorkItemId? _loadedFor;
+    private IReadOnlyList<WorkItemAttachment> _attachments = [];
+    private IReadOnlyList<Shown> _thumbnails = [];
+    private int _unreadable;
+    private Shown? _open;
+    private string? _error;
+
+    protected override void OnInitialized()
+    {
+        _store = Services.GetService<IWorkItemAttachments>();
+        if (_store is not null)
+        {
+            _store.Changed += OnChanged;
+        }
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (Item != _loadedFor)
+        {
+            _loadedFor = Item;
+            _open = null;
+            _error = null;
+            Load();
+        }
+    }
+
+    private void OnChanged(WorkItemId item)
+    {
+        if (item == Item)
+        {
+            _ = InvokeAsync(() =>
+            {
+                Load();
+                StateHasChanged();
+            });
+        }
+    }
+
+    private void Load()
+    {
+        if (_store is null || Item is null)
+        {
+            return;
+        }
+
+        _attachments = _store.For(Item);
+        var shown = new List<Shown>();
+        var unreadable = 0;
+        foreach (var attachment in _attachments.Where(a => a.IsImage))
+        {
+            if (_store.Read(Item, attachment.Id) is { } bytes)
+            {
+                shown.Add(new Shown(attachment, $"data:{attachment.MediaType};base64,{Convert.ToBase64String(bytes)}"));
+            }
+            else
+            {
+                unreadable++;
+            }
+        }
+
+        _thumbnails = shown;
+        _unreadable = unreadable;
+    }
+
+    private async Task AddAsync(InputFileChangeEventArgs e)
+    {
+        if (_store is null)
+        {
+            return;
+        }
+
+        _error = null;
+        foreach (var file in e.GetMultipleFiles(IWorkItemAttachments.MaxPerItem))
+        {
+            if (file.Size > AgentImageAttachment.MaxBytes)
+            {
+                _error = AgentImageAttachment.TooLarge(file.Size);
+                continue;
+            }
+
+            byte[] bytes;
+            try
+            {
+                await using var stream = file.OpenReadStream(AgentImageAttachment.MaxBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                bytes = buffer.ToArray();
+            }
+            catch (IOException)
+            {
+                _error = file.Name + " could not be read.";
+                continue;
+            }
+
+            if (_store.AddImage(Item, file.Name, bytes, "user").Refusal is { } refusal)
+            {
+                _error = refusal;
+            }
+        }
+
+        Load();
+    }
+
+    public void Dispose()
+    {
+        if (_store is not null)
+        {
+            _store.Changed -= OnChanged;
+        }
+    }
+}

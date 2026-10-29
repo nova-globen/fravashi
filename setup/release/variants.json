@@ -1,0 +1,55 @@
+{
+  "$comment": [
+    "Variant registry for the release pipeline (ADR 0006 ruling 3 / D03-3, ADR 0009 multi-arch).",
+    "The .github/workflows/release.yml 'prepare' job reads this file and fans out a build matrix of",
+    "variant x arch. Each variant is one named asset set within a single version tag; every variant is",
+    "built for every arch below so each host runs a native image.",
+    "",
+    "To add a variant (T7 / I1): append an object with its docker build-args. The pipeline needs no edit - ",
+    "it builds whatever is listed here. Keep names product-neutral and kebab-case. buildArgs are passed as",
+    "`--build-arg KEY=VALUE` to `docker buildx build`; the Dockerfile declares matching ARG lines (T7 wires",
+    "them to real compile-time + image feature switches; today 'full' is the baseline with no switches off)."
+  ],
+  "arches": [
+    { "arch": "amd64", "platform": "linux/amd64" },
+    { "arch": "arm64", "platform": "linux/arm64" }
+  ],
+  "launcherRids": ["win-x64", "linux-x64", "osx-arm64"],
+  "variants": [
+    {
+      "name": "full",
+      "displayName": "Fravashi (full)",
+      "buildArgs": {
+        "VARIANT": "full"
+      }
+    },
+    {
+      "name": "corp-vpn",
+      "displayName": "Fravashi (VPN-required, token-only)",
+      "buildArgs": {
+        "VARIANT": "corp-vpn",
+        "GITHUB_LOGIN": "false",
+        "VPN_REQUIRED": "true"
+      }
+    },
+    {
+      "name": "corp-broker",
+      "displayName": "Fravashi (broker-mediated credentials, BYOD)",
+      "$comment": [
+        "The BYOD tier (directive 2026-08-03): sign-in is mandatory AND the identity",
+        "provider is BAKED into the image, so users cannot repoint the gate. Users authenticate",
+        "against the org IdP only; agent credentials come from the broker; no org token ever",
+        "reaches the device. Register the BYOD client as PUBLIC at the IdP (PKCE protects the",
+        "flow) so no client secret needs baking. AUTH_REQUIRED=false on any variant publishes",
+        "the gate off; every variant defaults to auth required at compile time."
+      ],
+      "buildArgs": {
+        "VARIANT": "corp-broker",
+        "BROKER_REQUIRED": "true",
+        "AUTH_REQUIRED": "true",
+        "IDP_ISSUER": "https://nova-globen.se",
+        "IDP_CLIENT_ID": "fravashi-studio"
+      }
+    }
+  ]
+}

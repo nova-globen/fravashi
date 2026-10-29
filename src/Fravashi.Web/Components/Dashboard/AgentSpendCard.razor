@@ -1,0 +1,91 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using System.Globalization
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.Insights
+@using Fravashi.Web.Components.Sessions
+@inherits InsightCard
+@inject ISessionStore Sessions
+
+@* Backlog 36, card 1. Agent spend per day over the last thirty days, from the SAME per-session usage
+   summary the session strip and the spend ceilings read (backlog 19), so a bar here and the month's
+   total there are the same money. A session counts on the day it STARTED, which the card says out
+   loud rather than leaving the reader to assume it was spread. *@
+
+<section class="dash-panel insight-card" aria-label="Agent spend" data-testid="insight-spend">
+    <div class="dash-panel-head">
+        <span>Agent spend</span>
+        <span class="insight-period" data-testid="insight-spend-period">@Period</span>
+    </div>
+
+    @if (_days == 0)
+    {
+        <p class="studio-muted insight-empty" data-testid="insight-spend-empty">
+            Nothing yet: no agent session started in the last @DayCount days.
+        </p>
+    }
+    else
+    {
+        <p class="insight-headline" data-testid="insight-spend-total">
+            <span class="insight-value">@SessionUsageFormat.Cost(_total)</span>
+            <span class="insight-unit">
+                over @_days session@(_days == 1 ? "" : "s"),
+                busiest day @SessionUsageFormat.Cost(_peak)
+            </span>
+        </p>
+        <InsightBars Bars="_bars" Label="Agent spend per day" TestId="insight-spend-bars" />
+        <p class="studio-muted insight-note">
+            Each session counts on the day it started. Hover a bar for that day.
+        </p>
+    }
+</section>
+
+@code {
+    /// <summary>The window the item decided on.</summary>
+    public const int DayCount = 30;
+
+    private IReadOnlyList<InsightBars.Bar> _bars = [];
+    private decimal _total;
+    private decimal _peak;
+    private int _days;
+    private string _period = string.Empty;
+
+    private string Period => _period;
+
+    protected override Task LoadAsync()
+    {
+        var today = DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+        var from = today.AddDays(-(DayCount - 1));
+        _period = PeriodText(from, today);
+
+        var stored = Sessions.ReadSessionDays(from, today)
+            .ToDictionary(day => day.Day, day => day);
+
+        _total = stored.Values.Sum(d => d.CostUsd);
+        _peak = stored.Count == 0 ? 0m : stored.Values.Max(d => d.CostUsd);
+        _days = stored.Values.Sum(d => d.SessionsStarted);
+
+        // The store answers sparsely, so the gaps are filled HERE: a day with no session is a day with
+        // no bar, and it still has to occupy its slot or the chart would compress an idle week away and
+        // read as continuous work.
+        _bars = [.. Enumerable.Range(0, DayCount)
+            .Select(offset => from.AddDays(offset))
+            .Select(day => new InsightBars.Bar(
+                stored.TryGetValue(day, out var found) ? (double)found.CostUsd : 0,
+                0,
+                Title(day, stored.GetValueOrDefault(day))))];
+
+        return Task.CompletedTask;
+    }
+
+    private static string Title(DateOnly day, SessionDay? stored)
+    {
+        var date = day.ToString("d MMM", CultureInfo.InvariantCulture);
+        if (stored is null)
+        {
+            return $"{date}: no sessions";
+        }
+
+        var sessions = stored.SessionsStarted == 1 ? "1 session" : $"{stored.SessionsStarted} sessions";
+        return $"{date}: {SessionUsageFormat.Cost(stored.CostUsd)} over {sessions}";
+    }
+}

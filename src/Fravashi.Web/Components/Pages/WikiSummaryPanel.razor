@@ -1,0 +1,82 @@
+@using Fravashi.Application.Wiki
+@using Fravashi.Domain.Wiki
+@inject WikiSummariser Summariser
+
+@* Backlog 40, the other half (decided 2026-09-21: "a button to do so"). What this document is FOR, written
+   by an agent for other agents to search by. It is a button and never a side effect of saving, because every
+   summary is a paid agent call. Drawn only from classes the page already uses, like the Publication section
+   under it: there is no approved design for this section, so it takes no new look. *@
+<section class="work-item-section" data-testid="wiki-summary">
+    <h3 class="work-item-section-title">Summary for agents</h3>
+
+    @if (_summary is not null)
+    {
+        <p class="work-item-prose" data-testid="wiki-summary-text">@_summary.Text</p>
+    }
+
+    <div class="work-item-empty" data-testid="wiki-summary-state">@WikiSummary.Sentence(_summary, Item)</div>
+
+    @if (_refusal is { Length: > 0 } refusal)
+    {
+        <div class="session-error" data-testid="wiki-summary-refusal">
+            <span class="session-error-mark" aria-hidden="true">!</span>
+            <span class="session-error-text">@refusal</span>
+        </div>
+    }
+
+    <div class="work-item-form-actions">
+        <button type="button" class="studio-btn" disabled="@(_busy || _unavailable is not null)"
+                data-testid="wiki-summarise" @onclick="SummariseAsync">
+            @(_busy ? "Writing..." : _summary is null ? "Write a summary" : "Write it again")
+        </button>
+        @if (_unavailable is { Length: > 0 } why)
+        {
+            <span class="work-item-empty" data-testid="wiki-summary-unavailable">@why</span>
+        }
+    </div>
+</section>
+
+@code {
+    /// <summary>The document this panel is about.</summary>
+    [Parameter, EditorRequired]
+    public WikiItem Item { get; set; } = default!;
+
+    private WikiSummary? _summary;
+    private string? _refusal;
+    private string? _unavailable;
+    private string? _loadedFor;
+    private bool _busy;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        // Reading the row is local and cheap; an agent is only ever called when somebody presses the button.
+        _summary = await Summariser.GetAsync(Item.Id);
+        if (_loadedFor != Item.Id)
+        {
+            _loadedFor = Item.Id;
+            _refusal = null;
+            _unavailable = await Summariser.UnavailableBecauseAsync();
+        }
+    }
+
+    private async Task SummariseAsync()
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        _refusal = null;
+        try
+        {
+            var report = await Summariser.SummariseAsync(Item.Id);
+            _summary = report.Summary;
+            _refusal = report.Refusal;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+}

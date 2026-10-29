@@ -1,0 +1,637 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Domain.AgentSessions
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.JSInterop
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
+@* Where the user types. The model picker offers the CLI's catalog but defaults to the CLI's own
+   default (decision 7), so leaving it alone changes nothing about how the agent is run.
+
+   The picker is the house dropdown (backlog 24), not a native select. Two reasons, and both were the
+   reported defect: each model's one-line note is a real subtitle now instead of a title attribute nobody
+   hovers, and the control fits. It used to be a `select.studio-input`, and that class carries a 240px
+   minimum width for full-width form fields which the composer's own override never reset, so a 240px
+   control was wedged into a narrow composer.
+
+   Two things in this row are about Stop meaning what it says (backlog 18 and 21). Send is the primary
+   button and Stop is a quiet secondary one, because Stop used to be the loudest control on a panel that
+   offered no other action and therefore read as the way to begin. And Stop is rendered ONLY while a turn
+   is running, so it is never a button the user has to work out the meaning of. Starting fresh is a
+   header action, deliberately at the other end of the panel from this row. *@
+<div class="session-composer" data-testid="session-composer">
+    @* Backlog 26: what was pasted, visibly, before it is sent, each with its own way back out. *@
+    @if (Images.Count > 0)
+    {
+        <div class="session-composer-images" data-testid="composer-images">
+            @foreach (var (image, i) in Images.Select((im, i) => (im, i)))
+            {
+                var position = i;
+                <div class="session-composer-thumb" data-testid="composer-image">
+                    <img src="@image.DataUri" alt="Pasted image @(i + 1)" />
+                    <button type="button" class="session-composer-thumb-remove" data-testid="remove-image"
+                            title="Remove this image" aria-label="Remove pasted image @(i + 1)"
+                            @onclick="() => RemoveImageAsync(position)">&times;</button>
+                </div>
+            }
+        </div>
+    }
+    @* Work item #359: a long paste is a chip, with its reference typed where it was pasted; the whole text is sent
+       with the turn as a block under that reference. *@
+    @if (_pastedTexts.Count > 0)
+    {
+        <div class="session-composer-pastes" data-testid="composer-pasted-texts">
+            @foreach (var paste in _pastedTexts)
+            {
+                var chip = paste;
+                <span class="session-composer-paste-chip" data-testid="composer-pasted-text" title="@Preview(chip)">
+                    <span class="session-composer-paste-label">@chip.Reference.Trim('[', ']')</span>
+                    <button type="button" class="session-composer-thumb-remove" data-testid="remove-pasted-text"
+                            title="Remove this pasted text" aria-label="Remove pasted text @chip.Number"
+                            @onclick="() => RemovePastedTextAsync(chip)">&times;</button>
+                </span>
+            }
+        </div>
+    }
+    @if (_pasteError is { Length: > 0 } pasteError)
+    {
+        <div class="session-composer-paste-error" data-testid="paste-error">@pasteError</div>
+    }
+    <textarea class="session-composer-input" rows="3"
+              data-testid="composer-input"
+              placeholder="@Placeholder"
+              disabled="@Disabled"
+              value="@Text"
+              @ref="_input"
+              @oninput="OnInput"
+              @onkeydown="OnKeyDown"></textarea>
+    <div class="session-composer-actions">
+        @if (AllowAttach)
+        {
+            @* Work item #359: Home's box attaches an image through + as well as by pasting it. *@
+            <label class="fv-prompt-attach@(Disabled ? " is-disabled" : string.Empty)" title="Attach an image"
+                   data-testid="composer-attach">
+                <span aria-hidden="true">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                        <path d="M8 3v10M3 8h10" />
+                    </svg>
+                </span>
+                <span class="fv-visually-hidden">Attach an image</span>
+                <InputFile accept="image/png,image/jpeg,image/gif,image/webp" multiple disabled="@Disabled"
+                           OnChange="AttachFilesAsync" data-testid="composer-file" />
+            </label>
+        }
+        @if (ModelLocked)
+        {
+            @* Mid-turn the model cannot move: the child is busy answering, and ending it then would
+               throw the answer away. What the turn runs on is still worth stating, so it is stated.
+               Between turns the picker below is live even in a running conversation, because the
+               runner can restart the CLI child on the new model with the conversation resumed. *@
+            <span class="session-model-locked" data-testid="model-locked"
+                  title="The agent is answering on @LockedModelLabel. The model can change once this turn finishes.">
+                @LockedModelLabel
+            </span>
+            @if (RunningEffort is { } lockedEffort)
+            {
+                <span class="session-model-locked" data-testid="effort-locked"
+                      title="The agent is answering at @lockedEffort.CliValue() effort. The effort can change once this turn finishes.">
+                    @lockedEffort.CliValue() effort
+                </span>
+            }
+        }
+        else
+        {
+            <div class="session-model-picker">
+                <StudioDropdown TestId="model-picker"
+                                Options="@SessionModelOptions.For(AgentTool.Claude, Services.GetService<Fravashi.Application.AgentRuntimes.IAgentRuntimeCredentialStore>())"
+                                Value="@Model"
+                                ValueChanged="OnModelChosen"
+                                Disabled="@Disabled"
+                                Compact="true"
+                                DropUp="@DropUp"
+                                AriaLabel="Model for this session"
+                                Placeholder="Default" />
+            </div>
+            @if (ActualModelLabel is { } actual)
+            {
+                @* Backlog 126 (decided 2026-09-21). The picker offers aliases and a few pinned ids; the
+                   CLI reports the DATED id it is really running, which is usually not one of them, so after a
+                   reload the picker read "Default" for a conversation on Haiku. The picker stays a picker and
+                   the truth is said beside it, read-only, in the style the mid-turn label already has. *@
+                <span class="session-model-locked" data-testid="model-actual"
+                      title="This conversation is running on @actual. Pick another model to change it from the next turn.">
+                    on @actual
+                </span>
+            }
+            @* Requested 2026-10-22 (model and effort per work item): the effort beside the model, changed the same
+               way (between turns the registry restarts the CLI child at the new level with the conversation resumed,
+               and the model stays where it is). *@
+            <div class="session-model-picker">
+                <StudioDropdown TestId="effort-picker"
+                                Options="@SessionEffortOptions.All"
+                                Value="@SessionEffortOptions.ValueOf(Effort)"
+                                ValueChanged="OnEffortChosen"
+                                Disabled="@Disabled"
+                                Compact="true"
+                                DropUp="@DropUp"
+                                AriaLabel="Effort for this session"
+                                Placeholder="Effort" />
+            </div>
+            @if (ActualEffortLabel is { } actualEffort)
+            {
+                <span class="session-model-locked" data-testid="effort-actual"
+                      title="This conversation is running at @actualEffort. Pick another effort to change it from the next turn.">
+                    at @actualEffort
+                </span>
+            }
+        }
+        <span class="session-composer-spacer"></span>
+        @if (TurnInFlight)
+        {
+            <button type="button" class="studio-btn studio-btn-alt" data-testid="stop-session"
+                    title="Interrupt the turn the agent is running now"
+                    @onclick="() => Stop.InvokeAsync()">
+                Stop
+            </button>
+        }
+        <button type="button" class="studio-btn@(Busy ? " is-busy" : string.Empty)" data-testid="send-prompt"
+                disabled="@(Disabled || Busy || !HasSomethingToSend)" aria-busy="@(Busy ? "true" : "false")"
+                @onclick="SendAsync">
+            @if (Busy)
+            {
+                @* Work item #359: said at once, until the turn starts streaming. *@
+                <span class="session-composer-spinner" aria-hidden="true" data-testid="send-busy"></span>
+                @BusyLabel
+            }
+            else
+            {
+                @SendLabel
+            }
+        </button>
+    </div>
+    @* Short enough to stay on ONE line at the Code page panel's narrowest real width (280px): the
+       longer wording wrapped there and the second line was the first thing a tight pane cut.
+
+       The per-session ceiling (backlog 62) rides on the SAME line for the same reason: it belongs where
+       the user is about to spend money, and a second line here is the first thing a tight pane cuts.
+       It is rendered only when one is set, so a studio with no limits looks exactly as it did. *@
+    <div class="session-composer-hint">
+        @(HintText ?? "Ctrl+Enter sends. Paste an image to attach it. Changes ask first unless you trusted edits for this folder.")
+        @if (SessionLimitUsd is { } limit)
+        {
+            <span class="session-composer-limit" data-testid="composer-session-limit"
+                  title="This session stops itself once it has spent @AgentSpendRefusal.Money(limit). Set in Settings > Agents > Spending and limits.">
+                Limit @AgentSpendRefusal.Money(limit) / session.
+            </span>
+        }
+    </div>
+</div>
+
+@code {
+    [Parameter]
+    public string Text { get; set; } = string.Empty;
+
+    [Parameter]
+    public EventCallback<string> TextChanged { get; set; }
+
+    [Parameter]
+    public string? Model { get; set; }
+
+    /// <summary>
+    /// Images pasted into the turn being written (backlog 26). The parent owns the list, exactly as it owns
+    /// the text, so it can send them with the turn and clear them once the turn is accepted.
+    /// </summary>
+    [Parameter]
+    public IReadOnlyList<AgentImageAttachment> Images { get; set; } = [];
+
+    [Parameter]
+    public EventCallback<IReadOnlyList<AgentImageAttachment>> ImagesChanged { get; set; }
+
+    [Parameter]
+    public EventCallback<string?> ModelChanged { get; set; }
+
+    /// <summary>The effort picked for this session (requested 2026-10-22), null for Default.</summary>
+    [Parameter]
+    public AgentEffort? Effort { get; set; }
+
+    [Parameter]
+    public EventCallback<AgentEffort?> EffortChanged { get; set; }
+
+    /// <summary>The effort the running session's process was started or moved at, as the studio recorded it.</summary>
+    [Parameter]
+    public AgentEffort? RunningEffort { get; set; }
+
+    /// <summary>Raised with the text to send; the parent clears it once accepted.</summary>
+    [Parameter]
+    public EventCallback<string> Send { get; set; }
+
+    [Parameter]
+    public EventCallback Stop { get; set; }
+
+    /// <summary>True while a session is running: the composer continues it instead of starting one.</summary>
+    [Parameter]
+    public bool Running { get; set; }
+
+    /// <summary>
+    /// True while the agent is answering a turn, which is NOT the same as <see cref="Running"/>: one CLI
+    /// process serves a whole conversation, so a session stays running between turns. Stop hangs off this
+    /// one because it says it interrupts a turn, and it used to hang off the other, so it sat beside Send
+    /// on an idle conversation where pressing it would have ended the process instead (backlog 21).
+    /// </summary>
+    [Parameter]
+    public bool TurnInFlight { get; set; }
+
+    [Parameter]
+    public bool Disabled { get; set; }
+
+    /// <summary>
+    /// True while a turn is in flight: the model cannot change under an answer being written, so the
+    /// composer states what the turn runs on instead of offering a control it would have to refuse.
+    /// Between turns the picker is live even in a running conversation (the parent moves the session
+    /// through the registry, which restarts the CLI child on the new model).
+    /// </summary>
+    [Parameter]
+    public bool ModelLocked { get; set; }
+
+    /// <summary>What the running session is actually served by, as the CLI reported it.</summary>
+    [Parameter]
+    public string? RunningModel { get; set; }
+
+    /// <summary>
+    /// The per-session spend ceiling in USD (backlog 62), or null when none is configured. Stated here
+    /// because this is where the next dollar is about to be spent: the item's acceptance is that spend
+    /// does not surprise the user, and a ceiling nobody is shown is one that surprises them when it bites.
+    /// </summary>
+    [Parameter]
+    public decimal? SessionLimitUsd { get; set; }
+
+    /// <summary>
+    /// Work item #359: how many images the conversation already carries, so a pasted image is referenced by its number
+    /// in the whole conversation ("[Image 3]"), which is what <c>work_item_attach_image</c> counts.
+    /// </summary>
+    [Parameter]
+    public int ImageOffset { get; set; }
+
+    /// <summary>Whether the pickers open upwards (the session pane) or downwards (Home's box, at the top of the page).</summary>
+    [Parameter]
+    public bool DropUp { get; set; } = true;
+
+    /// <summary>
+    /// Work item #359: true from the moment a send is pressed until the turn starts streaming. The button disables and
+    /// shows <see cref="BusyLabel"/> with a spinner at once.
+    /// </summary>
+    [Parameter]
+    public bool Busy { get; set; }
+
+    /// <summary>The send button's words.</summary>
+    [Parameter]
+    public string SendLabel { get; set; } = "Send";
+
+    /// <summary>The send button's words while <see cref="Busy"/>.</summary>
+    [Parameter]
+    public string BusyLabel { get; set; } = "Sending ...";
+
+    /// <summary>A placeholder for the box instead of the session pane's own.</summary>
+    [Parameter]
+    public string? PlaceholderText { get; set; }
+
+    /// <summary>The line under the box instead of the session pane's own.</summary>
+    [Parameter]
+    public string? HintText { get; set; }
+
+    /// <summary>Work item #359: offers a + that attaches image files (Home's box).</summary>
+    [Parameter]
+    public bool AllowAttach { get; set; }
+
+    /// <summary>Work item #359: the long texts pasted into the turn being written, as chips.</summary>
+    private List<PastedText> _pastedTexts = [];
+
+    private ElementReference _input;
+    private DotNetObjectReference<SessionComposer>? _selfRef;
+    private string? _pasteError;
+
+    private bool HasSomethingToSend => !string.IsNullOrWhiteSpace(Text) || Images.Count > 0;
+
+    /// <summary>
+    /// The model the conversation is really on, when saying it adds something: it is known, and the picker is
+    /// not already showing exactly that (backlog 126).
+    /// </summary>
+    private string? ActualModelLabel =>
+        RunningModel is { Length: > 0 } running && !string.Equals(running, Model, StringComparison.Ordinal)
+            ? running
+            : null;
+
+    /// <summary>The effort the conversation is really at, when the picker is not already showing it (as for the model).</summary>
+    private string? ActualEffortLabel =>
+        RunningEffort is { } running && running != Effort ? running.CliValue() + " effort" : null;
+
+    private string LockedModelLabel => RunningModel is { Length: > 0 } model ? model : "the CLI's default model";
+
+    private string Placeholder => PlaceholderText ?? (Running
+        ? "Send a follow-up to the agent (Ctrl+Enter)"
+        : "What should the agent do in this workspace? (Ctrl+Enter)");
+
+    /// <summary>The pasted texts sent with the turn (work item #359), for a parent that wants to show or test them.</summary>
+    public IReadOnlyList<PastedText> PastedTexts => _pastedTexts;
+
+    protected override void OnParametersSet()
+    {
+        // Work item #359: the parent clears the text once it accepted the turn, and the chips that turn carried go with it.
+        if (string.IsNullOrEmpty(Text) && _pastedTexts.Count > 0)
+        {
+            _pastedTexts = [];
+        }
+    }
+
+    private static string Preview(PastedText paste)
+    {
+        var flat = string.Join(' ', paste.Text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return flat.Length <= 200 ? flat : flat[..200] + " ...";
+    }
+
+    /// <summary>Puts the cursor here, for the empty state's primary action.</summary>
+    public ValueTask FocusAsync() => _input.FocusAsync();
+
+    private Task OnInput(ChangeEventArgs e) => TextChanged.InvokeAsync(e.Value?.ToString() ?? string.Empty);
+
+    /// <summary>
+    /// The dropdown reports the option's raw value; the empty string is the CLI-default option and the
+    /// session runner's contract is that a null model passes no flag at all, so the mapping happens here.
+    /// </summary>
+    private Task OnModelChosen(string value) =>
+        ModelChanged.InvokeAsync(string.IsNullOrWhiteSpace(value) ? null : value);
+
+    /// <summary>The empty string is Default (null); any other value is read back through the closed set only.</summary>
+    private Task OnEffortChosen(string value) => EffortChanged.InvokeAsync(SessionEffortOptions.Parse(value));
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.CtrlKey && e.Key == "Enter")
+        {
+            await SendAsync();
+        }
+    }
+
+    private async Task SendAsync()
+    {
+        if (Disabled || Busy || !HasSomethingToSend)
+        {
+            return;
+        }
+
+        _pasteError = null;
+
+        // Work item #359: the person's words, then each pasted text whose reference is still in them, as a block.
+        await Send.InvokeAsync(ComposerPastes.Compose(Text.Trim(), _pastedTexts));
+    }
+
+    // ---- pasted images (backlog 26) ---------------------------------------------------------
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender)
+        {
+            return;
+        }
+
+        _selfRef = DotNetObjectReference.Create(this);
+        try
+        {
+            // Work item #359: images and long texts become references typed where they were pasted.
+            await JS.InvokeVoidAsync(
+                "fravashiImagePaste.attachComposerReferences", _input, _selfRef,
+                ComposerPastes.LargeCharacters, ComposerPastes.LargeLines);
+        }
+        catch (JSException)
+        {
+            // The script is missing (a stale cached page): pasting text still works, images just do not.
+        }
+    }
+
+    /// <summary>
+    /// The page saw an image pasted into the textarea. The size is checked BEFORE any bytes cross, so an
+    /// oversized screenshot is refused without streaming megabytes the studio is about to throw away.
+    /// </summary>
+    [JSInvokable]
+    public Task ImagePasted(string id, long size) => ImagePastedAt(id, size);
+
+    /// <summary>
+    /// Work item #359: the same, answering the attached image's reference ("[Image 3]") for the page to type where it
+    /// was pasted, or null when nothing was attached (and the reason is shown).
+    /// </summary>
+    [JSInvokable]
+    public async Task<string?> ImagePastedAt(string id, long size)
+    {
+        if (size > AgentImageAttachment.MaxBytes)
+        {
+            await InvokeAsync(() =>
+            {
+                _pasteError = AgentImageAttachment.TooLarge(size);
+                StateHasChanged();
+            });
+            return null;
+        }
+
+        byte[] bytes;
+        try
+        {
+            await using var reference = await JS.InvokeAsync<IJSStreamReference?>("fravashiImagePaste.take", id);
+            if (reference is null)
+            {
+                return null;
+            }
+
+            await using var stream = await reference.OpenReadStreamAsync(maxAllowedSize: AgentImageAttachment.MaxBytes);
+            using var buffer = new MemoryStream();
+            await stream.CopyToAsync(buffer);
+            bytes = buffer.ToArray();
+        }
+        catch (Exception ex) when (ex is JSException or IOException or InvalidOperationException)
+        {
+            await InvokeAsync(() =>
+            {
+                _pasteError = "The pasted image could not be read.";
+                StateHasChanged();
+            });
+            return null;
+        }
+
+        string? label = null;
+        await InvokeAsync(async () => label = await AddImageAsync(bytes));
+        return label;
+    }
+
+    /// <summary>
+    /// Work item #359: a long text was pasted. It is pulled the streamed way (a big paste would not fit an interop
+    /// call), kept as a chip, and its reference is answered for the page to type instead of the text.
+    /// </summary>
+    [JSInvokable]
+    public async Task<string?> TextPasted(string id, long length)
+    {
+        if (length > ComposerPastes.MaxCharacters)
+        {
+            await InvokeAsync(() =>
+            {
+                _pasteError = "The pasted text is " + length.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)
+                    + " characters and the most one paste may carry is "
+                    + ComposerPastes.MaxCharacters.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + ".";
+                StateHasChanged();
+            });
+            return null;
+        }
+
+        string text;
+        try
+        {
+            await using var reference = await JS.InvokeAsync<IJSStreamReference?>("fravashiImagePaste.take", id);
+            if (reference is null)
+            {
+                return null;
+            }
+
+            await using var stream = await reference.OpenReadStreamAsync(maxAllowedSize: (ComposerPastes.MaxCharacters * 4L) + 16);
+            using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+            text = await reader.ReadToEndAsync();
+        }
+        catch (Exception ex) when (ex is JSException or IOException or InvalidOperationException)
+        {
+            await InvokeAsync(() =>
+            {
+                _pasteError = "The pasted text could not be read.";
+                StateHasChanged();
+            });
+            return null;
+        }
+
+        string? label = null;
+        await InvokeAsync(() => label = AddPastedText(text));
+        return label;
+    }
+
+    /// <summary>Keeps a long pasted text as a chip and answers its reference; a short one is not a chip (null).</summary>
+    internal string? AddPastedText(string text)
+    {
+        if (!ComposerPastes.IsLarge(text))
+        {
+            return null;
+        }
+
+        var paste = new PastedText(_pastedTexts.Count == 0 ? 1 : _pastedTexts.Max(p => p.Number) + 1, text);
+        _pastedTexts = [.. _pastedTexts, paste];
+        _pasteError = null;
+        StateHasChanged();
+        return paste.Reference;
+    }
+
+    private async Task RemovePastedTextAsync(PastedText paste)
+    {
+        _pastedTexts = [.. _pastedTexts.Where(p => p != paste)];
+        await TextChanged.InvokeAsync(ComposerPastes.RemoveText(Text, paste));
+    }
+
+    /// <summary>Work item #359: image files chosen through +, each attached with its reference added to the text.</summary>
+    private async Task AttachFilesAsync(InputFileChangeEventArgs e)
+    {
+        _pasteError = null;
+        foreach (var file in e.GetMultipleFiles(AgentImageAttachment.MaxPerTurn))
+        {
+            if (file.Size > AgentImageAttachment.MaxBytes)
+            {
+                _pasteError = AgentImageAttachment.TooLarge(file.Size);
+                continue;
+            }
+
+            byte[] bytes;
+            try
+            {
+                await using var stream = file.OpenReadStream(AgentImageAttachment.MaxBytes);
+                using var buffer = new MemoryStream();
+                await stream.CopyToAsync(buffer);
+                bytes = buffer.ToArray();
+            }
+            catch (IOException)
+            {
+                _pasteError = file.Name + " could not be read.";
+                continue;
+            }
+
+            if (await AddImageAsync(bytes) is { } label)
+            {
+                var text = Text ?? string.Empty;
+                await TextChanged.InvokeAsync(text.Length == 0 || char.IsWhiteSpace(text[^1]) ? text + label : text + " " + label);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Attaches pasted bytes, or says why it will not: an unreadable format, an image over the limit, or a
+    /// turn that already carries as many images as one may.
+    /// </summary>
+    internal async Task<string?> AddImageAsync(byte[] bytes)
+    {
+        if (Images.Count >= AgentImageAttachment.MaxPerTurn)
+        {
+            _pasteError = $"A turn can carry at most {AgentImageAttachment.MaxPerTurn} images.";
+            StateHasChanged();
+            return null;
+        }
+
+        if (AgentImageAttachment.TryCreate(bytes, out var error) is not { } image)
+        {
+            _pasteError = error;
+            StateHasChanged();
+            return null;
+        }
+
+        _pasteError = null;
+
+        // Work item #359: numbered in the whole conversation, so the reference names the same image a tool counts.
+        var label = ComposerPastes.ImageReference(ImageOffset + Images.Count + 1);
+        await ImagesChanged.InvokeAsync([.. Images, image]);
+        StateHasChanged();
+        return label;
+    }
+
+    private async Task RemoveImageAsync(int position)
+    {
+        if (position < 0 || position >= Images.Count)
+        {
+            return;
+        }
+
+        _pasteError = null;
+        await ImagesChanged.InvokeAsync([.. Images.Where((_, i) => i != position)]);
+
+        // Work item #359: its reference goes with it, and later references of this turn move down by one.
+        var after = ComposerPastes.RemoveImage(Text ?? string.Empty, ImageOffset + position + 1);
+        if (!string.Equals(after, Text, StringComparison.Ordinal))
+        {
+            await TextChanged.InvokeAsync(after);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        try
+        {
+            if (_selfRef is not null)
+            {
+                await JS.InvokeVoidAsync("fravashiImagePaste.detach", _input);
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit is gone, and the listener with it.
+        }
+        catch (InvalidOperationException)
+        {
+            // Prerendering: nothing was ever attached.
+        }
+        finally
+        {
+            _selfRef?.Dispose();
+        }
+    }
+}

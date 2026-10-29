@@ -1,0 +1,24 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+
+@* Dispatches the Hooks CRUD routes under Settings › Framework › Hooks. *@
+
+@switch (Action?.ToLowerInvariant())
+{
+    case "new":
+        <HookForm />
+        break;
+    case "edit":
+        <HookForm Id="@Id" />
+        break;
+    case "view":
+        <HookView Id="@Id" />
+        break;
+    default:
+        <HookList />
+        break;
+}
+
+@code {
+    [Parameter] public string? Action { get; set; }
+    [Parameter] public string? Id { get; set; }
+}

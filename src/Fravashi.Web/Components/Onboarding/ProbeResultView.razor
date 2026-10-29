@@ -1,0 +1,51 @@
+@using Fravashi.Application.Onboarding
+
+@* Renders an access-probe result honestly. This component is the enforcement point for the wizard's
+   honesty rule: a "Verified" badge appears ONLY for a check that a real probe passed. Every other outcome
+   is labelled for what it is - failed, recorded-not-verified, or not-yet-supported - and every row names the
+   exact mechanism that produced it. There is no code path that renders success for a check that did not run. *@
+
+@if (Result is null)
+{
+    <p class="ob-probe-idle">Not tested yet.</p>
+}
+else if (!Result.AnyRan)
+{
+    <p class="ob-probe-idle">No checks ran.</p>
+}
+else
+{
+    <ul class="ob-probe-list">
+        @foreach (var check in Result.Checks)
+        {
+            <li class="ob-probe-row ob-probe-@CssFor(check.Outcome)" data-capability="@check.Capability" data-outcome="@check.Outcome">
+                <span class="ob-probe-badge">@BadgeFor(check.Outcome)</span>
+                <span class="ob-probe-capability">@check.Capability</span>
+                <span class="ob-probe-detail">@check.Detail</span>
+                <span class="ob-probe-mechanism">via @check.Mechanism</span>
+            </li>
+        }
+    </ul>
+}
+
+@code {
+    [Parameter] public AccessProbeResult? Result { get; set; }
+
+    private static string BadgeFor(AccessProbeOutcome outcome) => outcome switch
+    {
+        AccessProbeOutcome.Passed => "✓ Verified",
+        AccessProbeOutcome.Failed => "✗ Failed",
+        AccessProbeOutcome.NotVerifiable => "Recorded, not verified",
+        AccessProbeOutcome.NotSupported => "Not yet supported",
+        _ => outcome.ToString(),
+    };
+
+    private static string CssFor(AccessProbeOutcome outcome) => outcome switch
+    {
+        AccessProbeOutcome.Passed => "pass",
+        AccessProbeOutcome.Failed => "fail",
+        AccessProbeOutcome.NotVerifiable => "unverified",
+        AccessProbeOutcome.NotSupported => "unsupported",
+        _ => "unverified",
+    };
+}

@@ -1,0 +1,134 @@
+@namespace Fravashi.Web.Components.Settings
+@using Fravashi.Application.Persistence
+@using Fravashi.Application.Updates
+@using Fravashi.Infrastructure.Onboarding.Auth
+@using Fravashi.Infrastructure.Persistence
+@using Fravashi.Web.Components.Onboarding
+@using Microsoft.Extensions.DependencyInjection
+@inject IGitHostStore GitHosts
+@inject IdpSessionState IdpSession
+@inject IdpAuthService Idp
+@inject NavigationManager Nav
+@inject IServiceProvider Services
+
+@* Settings > General > Overview (work item #357; it was the Environment tab's Overview). The summary of the
+   install: its version, who is signed in, the host bridge, the stored git hosts, connection and agent-runtime
+   status (S17), the re-run-onboarding entry point, the sandbox posture, the integrity self-check and the advanced
+   identity-provider overrides. The credential broker moved to Connections > Credential broker. *@
+
+<div class="page-body-content" data-testid="settings-overview">
+    <h2 class="settings-body-title">Overview</h2>
+    <p class="studio-muted">
+        A summary of this install and everything onboarding configured. The sections in the sidebar re-open each
+        part of setup with your existing choices pre-filled; nothing is cleared until you save over it.
+    </p>
+
+    <dl class="studio-detail">
+        <dt>Product</dt>
+        <dd data-testid="settings-product">@ProductName.Full <span class="studio-muted">(formerly @ProductName.Former)</span></dd>
+        @if (_dataMove is { } dataMove)
+        {
+            @* The rename's data-folder move, as the launcher left it (DataMoveNotice): shown only while it applies. *@
+            <dt>Data folder</dt>
+            <dd data-testid="settings-data-move"><span class="studio-error">@dataMove</span></dd>
+        }
+        @if (Product is { } product)
+        {
+            <dt>Version</dt>
+            <dd data-testid="settings-version"><code>@product.Version</code> (@product.Variant)</dd>
+        }
+        @if (IdpSession.Required)
+        {
+            <dt>Signed in</dt>
+            <dd data-testid="idp-session-row">
+                @if (IdpSession.Usable)
+                {
+                    <span>@(IdpSession.DisplayName ?? "(unknown identity)")</span>
+                    <button type="button" class="studio-btn studio-btn-alt studio-btn-sm"
+                            data-testid="idp-sign-out" @onclick="SignOutAsync">Sign out</button>
+                    @if (IdpSession.Grace is { } grace)
+                    {
+                        @* Backlog 234: the refresh cannot reach the identity provider. *@
+                        <div class="studio-muted"><Fravashi.Web.Components.Auth.SignInGraceWords Grace="grace" /></div>
+                    }
+                }
+                else
+                {
+                    <span class="studio-muted">Session expired; the sign-in gate will ask again.</span>
+                }
+            </dd>
+        }
+        <BridgeReachRow />
+        <dt>Git hosts</dt>
+        <dd>
+            @if (_gitHosts.Count > 0)
+            {
+                <code>@string.Join(", ", _gitHosts)</code>
+            }
+            else
+            {
+                <span class="studio-muted">
+                    None stored yet; add one under Git hosts so the PR panel can authenticate.
+                </span>
+            }
+        </dd>
+    </dl>
+
+    <h2>Onboarding &amp; connections</h2>
+    <OnboardingConnectionsPanel />
+    <a class="studio-button" href="/onboarding?mode=settings" data-testid="settings-onboarding">Re-run full onboarding</a>
+
+    <h2>Sandbox posture</h2>
+    <p class="studio-muted">
+        The container hardening actually applied on the runtime this install is running under. Protections a
+        runtime cannot enforce are shown honestly as unavailable - never a false "hardened".
+    </p>
+    <SandboxPostureCard />
+
+    <h2>Integrity self-check</h2>
+    <p class="studio-muted">
+        @(ProductName.Short)'s tamper-evidence check (ADR 0007). The <code>@(ProductName.Command)</code> launcher records the shape it created -
+        the pinned image digest, runtime, mounts, environment and non-root user - and the app continuously verifies
+        it is still running that shape. Each row is a real comparison; inside a launcher-run container a genuine
+        mismatch fails the app closed. This is evidence, not prevention: it detects tampering, not a machine
+        administrator who controls the runtime.
+    </p>
+    <IntegrityStatusCard />
+
+    <h2>Advanced: identity-provider overrides</h2>
+    <p class="studio-muted">
+        "Sign in with &lt;provider&gt;" works out of the box - the @(ProductName.Short) OAuth apps ship with the product and
+        you only grant them access. These overrides are for <strong>advanced</strong> installations only:
+        GitHub Enterprise, a sovereign Entra cloud, a fork, or an installation registering its own Atlassian
+        app to enable Atlassian sign-in (which is off by default). Leave them blank to use the shipped defaults.
+        See <code>docs/sso-setup.md</code>.
+    </p>
+    <SignInConfigPanel BaseUri="@Nav.BaseUri" />
+</div>
+
+@code {
+    private IReadOnlyList<string> _gitHosts = [];
+    private string? _dataMove;
+
+    /// <summary>The running product's version, resolved optionally so a wiring without it simply shows no row.</summary>
+    private IProductInfo? Product { get; set; }
+
+    protected override void OnInitialized()
+    {
+        _gitHosts = GitHosts.GetAll().Select(h => h.Host).ToList();
+        Product = Services.GetService<IProductInfo>();
+        _dataMove = Services.GetService<DataDirectory>() is { } data ? DataMoveNotice.Read(data) : null;
+    }
+
+    /// <summary>
+    /// Plan Phase 3: clear the local session (including the broker mint proof), then visit the
+    /// IdP's end-session endpoint so the provider-side session dies too; its post-logout redirect
+    /// lands back on the studio, where the gate now asks for a fresh sign-in.
+    /// </summary>
+    private async Task SignOutAsync()
+    {
+        var endSession = await Idp.BuildEndSessionUrlAsync(Nav.BaseUri, CancellationToken.None);
+        Idp.ClearSession();
+        Nav.NavigateTo(endSession ?? "/", forceLoad: true);
+    }
+}

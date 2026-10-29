@@ -1,0 +1,116 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using Fravashi.Application.Sessions
+@using Fravashi.Application.Telemetry
+@using Fravashi.Domain.Insights
+@using Fravashi.Domain.Telemetry
+@using Fravashi.Web.Components.Settings
+@inherits InsightCard
+@inject ISessionStore Sessions
+@inject IProductEventStore Events
+@inject IProductEventRecorder Telemetry
+
+@* Backlog 36, card 3. Where the time goes over the last thirty days: how long a session lasts, and how
+   long a parked tool call waits for an answer.
+
+   The two halves have different evidence behind them and the card never pretends otherwise. Session
+   duration is a stamp pair on a row the studio always writes, so it is here unconditionally. Approval
+   WAIT is a product event (backlog 74), whose recording is an opt-in that defaults OFF; with the switch
+   off there is no measurement, and the card says the switch is off rather than showing a zero or a
+   figure derived from something else. *@
+
+<section class="dash-panel insight-card" aria-label="Where time goes" data-testid="insight-time">
+    <div class="dash-panel-head">
+        <span>Where time goes</span>
+        <span class="insight-period" data-testid="insight-time-period">@_period</span>
+    </div>
+
+    @if (!_durations.HasAny)
+    {
+        <p class="studio-muted insight-empty" data-testid="insight-time-empty">
+            Nothing yet: no session finished in the last @DayCount days.
+        </p>
+    }
+    else
+    {
+        <dl class="insight-figures" data-testid="insight-time-sessions">
+            <div class="insight-figure">
+                <dt>Median session</dt>
+                <dd><span class="insight-value">@Duration(_durations.Median)</span></dd>
+            </div>
+            <div class="insight-figure">
+                <dt>Longest session</dt>
+                <dd><span class="insight-value">@Duration(_durations.Longest)</span></dd>
+            </div>
+        </dl>
+        <p class="studio-muted insight-note">
+            Across @Number(_durations.Count) finished session@(_durations.Count == 1 ? "" : "s").
+            A session still running has no duration yet and is not counted.
+        </p>
+    }
+
+    @if (!Telemetry.IsEnabled)
+    {
+        <p class="studio-muted insight-note" data-testid="insight-time-approvals-off">
+            Approval wait is not measured: product events are switched off. Switch them on in
+            <a href="@DiagnosticsPath" data-testid="insight-time-diagnostics-link">Settings &rsaquo; Advanced &rsaquo; Diagnostics</a>
+            and it appears here from then on.
+        </p>
+    }
+    else if (!_approvals.HasAny)
+    {
+        <p class="studio-muted insight-note" data-testid="insight-time-approvals-empty">
+            Nothing yet: no tool call was answered in the last @DayCount days.
+        </p>
+    }
+    else
+    {
+        <dl class="insight-figures" data-testid="insight-time-approvals">
+            <div class="insight-figure">
+                <dt>Median approval wait</dt>
+                <dd><span class="insight-value">@Duration(_approvals.Median)</span></dd>
+            </div>
+            <div class="insight-figure">
+                <dt>Longest wait</dt>
+                <dd><span class="insight-value">@Duration(_approvals.Longest)</span></dd>
+            </div>
+        </dl>
+        <p class="studio-muted insight-note">
+            Across @Number(_approvals.Count) answered tool call@(_approvals.Count == 1 ? "" : "s"),
+            request to answer.
+        </p>
+    }
+</section>
+
+@code {
+    /// <summary>The window the item decided on.</summary>
+    public const int DayCount = 30;
+
+    /// <summary>Where the product-events switch lives (work item #357 moved it under Advanced; #361).</summary>
+    private static string DiagnosticsPath => SettingsSections.Path(SettingsSections.Diagnostics);
+
+    private DurationStats _durations = DurationStats.None;
+    private DurationStats _approvals = DurationStats.None;
+    private string _period = string.Empty;
+
+    protected override Task LoadAsync()
+    {
+        var now = Clock.GetUtcNow();
+        var from = now.AddDays(-DayCount);
+        _period = PeriodText(
+            DateOnly.FromDateTime(from.UtcDateTime), DateOnly.FromDateTime(now.UtcDateTime));
+
+        _durations = Sessions.ReadSessionDurations(from);
+
+        // Asked only while the switch is on. An install that never opted in has no rows to read, and
+        // reading them anyway would make the card's honest "not measured" depend on an empty table
+        // rather than on the switch it is actually talking about.
+        _approvals = Telemetry.IsEnabled
+            ? DurationStats.From(Events
+                .Since(ProductEventKind.ApprovalResolved, from)
+                .Where(e => e.DurationMs is not null)
+                .Select(e => TimeSpan.FromMilliseconds(e.DurationMs!.Value)))
+            : DurationStats.None;
+
+        return Task.CompletedTask;
+    }
+}

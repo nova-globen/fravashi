@@ -1,0 +1,241 @@
+@namespace Fravashi.Web.Components.Setup
+@using Fravashi.Application
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Setup
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+
+@* Step 1, Project (item #373, docs/plans/first-open-setup.md section 3.1): the one decision the setup exists for, so
+   it has no Skip; "Start empty" is the quick way through. Radio cards are real radios in a fieldset, so the arrow keys
+   move between them. *@
+<h2 class="setup-title" id="setup-step-heading" tabindex="-1" @ref="_heading">Which project is @Page.FolderName part of?</h2>
+<p class="setup-helper">
+    A project holds a board of work items and a wiki of documents. Agents in this folder record their work there.
+</p>
+
+@if (Page.WasInDefault && Page.DefaultRecord is not null)
+{
+    <div class="setup-note" role="note" data-testid="setup-default-note">
+        <p>
+            Earlier versions of @ProductName.Short put every new folder in one shared project, Default. Its work items and
+            documents are still there. Join Default to keep using them, or start a project of its own for @Page.FolderName.
+        </p>
+    </div>
+}
+
+<fieldset class="setup-choices">
+    <legend class="fv-visually-hidden">The project</legend>
+
+    <div class="setup-choice @(IsNew ? "is-selected" : null)" data-testid="setup-choice-new">
+        <label class="setup-choice-head">
+            <input type="radio" name="setup-project-mode" value="new" checked="@IsNew" data-testid="setup-mode-new"
+                   @onchange="() => Choose(SetupProjectMode.New)" />
+            <span class="setup-choice-text">
+                <span class="setup-choice-title">Start a new project</span>
+                <span class="setup-choice-sub">Only this folder's work, on a board and wiki of its own.</span>
+            </span>
+        </label>
+        <div class="setup-choice-body">
+            <label class="setup-field-label" for="setup-project-name">Name</label>
+            <input id="setup-project-name" class="studio-input setup-input" type="text" spellcheck="false" autocomplete="off"
+                   maxlength="120" data-testid="setup-project-name" value="@Page.Draft.NewName" @ref="_name"
+                   aria-invalid="@(NameError is not null ? "true" : null)"
+                   aria-describedby="@(NameError is not null ? "setup-name-error" : (Collision ? "setup-name-collision" : null))"
+                   @onfocus="() => Choose(SetupProjectMode.New)"
+                   @oninput="OnName" @onkeydown="OnNameKey" />
+            @if (NameError is { } error)
+            {
+                <p class="setup-field-error" id="setup-name-error" role="alert" data-testid="setup-name-error">@error</p>
+            }
+            else if (Collision)
+            {
+                <p class="setup-field-hint" id="setup-name-collision" data-testid="setup-name-collision">
+                    A project called @Page.FolderName already exists. Join it below instead, or keep a new one with this name.
+                </p>
+            }
+        </div>
+    </div>
+
+    <div class="setup-choice @(IsJoin ? "is-selected" : null) @(Others.Count == 0 ? "is-disabled" : null)" data-testid="setup-choice-join">
+        <label class="setup-choice-head">
+            <input type="radio" name="setup-project-mode" value="join" checked="@IsJoin" disabled="@(Others.Count == 0)"
+                   data-testid="setup-mode-join" @onchange="() => Choose(SetupProjectMode.Join)" />
+            <span class="setup-choice-text">
+                <span class="setup-choice-title">Join an existing project</span>
+                <span class="setup-choice-sub">
+                    @(Others.Count == 0 ? "There are no other projects yet." : "Share its board and wiki with the folders already in it.")
+                </span>
+            </span>
+        </label>
+        @if (Others.Count > 0 && IsJoin)
+        {
+            <fieldset class="setup-choice-body setup-join-list" aria-describedby="@(JoinError is not null ? "setup-join-error" : null)">
+                <legend class="fv-visually-hidden">The project to join</legend>
+                @foreach (var project in Others)
+                {
+                    var contents = ContentsOf(project);
+                    <label class="setup-join-row @(Page.Draft.JoinProjectId == project.Id.Value ? "is-selected" : null)" data-testid="setup-join-row" data-project="@project.Id.Value">
+                        <input type="radio" name="setup-join" value="@project.Id.Value" checked="@(Page.Draft.JoinProjectId == project.Id.Value)"
+                               @onchange="() => Join(project.Id.Value)" />
+                        <span class="setup-join-text">
+                            <span class="setup-join-name">@Label(project)</span>
+                            <span class="setup-join-meta">@Plural(contents.WorkItems, "work item"), @Plural(contents.Documents, "document"), @Plural(FoldersOf(project), "folder")</span>
+                        </span>
+                    </label>
+                }
+                @if (JoinError is { } joinError)
+                {
+                    <p class="setup-field-error" id="setup-join-error" role="alert" data-testid="setup-join-error">@joinError</p>
+                }
+            </fieldset>
+        }
+    </div>
+</fieldset>
+
+<div class="setup-start-empty">
+    <button type="button" class="studio-btn studio-btn-alt" data-testid="setup-start-empty" disabled="@Page.Busy"
+            aria-describedby="setup-start-empty-caption" @onclick="Page.StartEmptyAsync">Start empty</button>
+    <span class="setup-field-hint" id="setup-start-empty-caption">
+        A new project named @Page.FolderName, a local board and wiki, nothing imported. You can change any of it later in
+        Settings.
+    </span>
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public SetupPage Page { get; set; } = default!;
+
+    private ElementReference _heading;
+    private ElementReference _name;
+    private string? _focusAfter;
+    private readonly Dictionary<string, ProjectContents> _contents = new(StringComparer.Ordinal);
+    private Dictionary<string, int>? _folders;
+
+    private bool IsNew => Page.Draft.ProjectMode == SetupProjectMode.New;
+
+    private bool IsJoin => Page.Draft.ProjectMode == SetupProjectMode.Join;
+
+    private IReadOnlyList<ProjectRecord> Others => Page.Projects;
+
+    private string? NameError => IsNew ? Page.ProjectError : null;
+
+    private string? JoinError => IsJoin ? Page.ProjectError : null;
+
+    private bool Collision =>
+        IsNew && Page.Projects.Any(p => string.Equals(p.Name, Page.FolderName, StringComparison.OrdinalIgnoreCase))
+        && !string.Equals(Page.Draft.NewName?.Trim(), Page.FolderName, StringComparison.OrdinalIgnoreCase);
+
+    private static string Label(ProjectRecord project) =>
+        DefaultProject.Is(project.Id.Value) ? "Default (the shared project earlier versions used)" : project.Name;
+
+    private static string Plural(int n, string noun) => n == 1 ? $"1 {noun}" : $"{n:N0} {noun}s";
+
+    private ProjectContents ContentsOf(ProjectRecord project)
+    {
+        if (!_contents.TryGetValue(project.Id.Value, out var contents))
+        {
+            contents = Services.GetService<IProjectContents>()?.Of(project.Id) ?? ProjectContents.Empty;
+            _contents[project.Id.Value] = contents;
+        }
+
+        return contents;
+    }
+
+    private int FoldersOf(ProjectRecord project)
+    {
+        if (_folders is null)
+        {
+            _folders = new Dictionary<string, int>(StringComparer.Ordinal);
+            if (Services.GetService<IProjectStore>() is { } store)
+            {
+                foreach (var p in Page.Projects)
+                {
+                    _folders[p.Id.Value] = store.WorkspacesOf(p.Id).Count(w => !Application.Persistence.RepositoryFolder.IsWorktree(w));
+                }
+            }
+        }
+
+        return _folders.GetValueOrDefault(project.Id.Value);
+    }
+
+    private void Choose(SetupProjectMode mode)
+    {
+        if (Page.Draft.ProjectMode == mode)
+        {
+            return;
+        }
+
+        Page.Draft.ProjectMode = mode;
+        Page.ProjectError = null;
+        if (mode == SetupProjectMode.Join && Page.Draft.JoinProjectId is null && Others.Count == 1)
+        {
+            Page.Draft.JoinProjectId = Others[0].Id.Value;
+        }
+
+        Page.Changed();
+    }
+
+    private void Join(string projectId)
+    {
+        Page.Draft.ProjectMode = SetupProjectMode.Join;
+        Page.Draft.JoinProjectId = projectId;
+        Page.ProjectError = null;
+        Page.Changed();
+    }
+
+    private void OnName(ChangeEventArgs e)
+    {
+        Page.Draft.NewName = e.Value?.ToString();
+        Page.Draft.ProjectMode = SetupProjectMode.New;
+        if (Page.ProjectError is not null && FolderSetup.NameProblem(Page.Draft.NewName) is null)
+        {
+            Page.ProjectError = null;
+        }
+
+        Page.Changed();
+    }
+
+    /// <summary>Enter in the name presses the primary button (section 8).</summary>
+    private async Task OnNameKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            if (Page.ValidateProject())
+            {
+                await Page.GoAsync(SetupSteps.Source);
+            }
+            else
+            {
+                _focusAfter = "name";
+            }
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            // Arriving back from a refused "Set up" lands on the field the refusal is about.
+            if (Page.ProjectError is not null && IsNew)
+            {
+                await SetupFocus.ElementAsync(_name);
+            }
+            else
+            {
+                await SetupFocus.HeadingAsync(_heading);
+            }
+
+            return;
+        }
+
+        if (_focusAfter == "name" || (NameError is not null && _lastError != NameError))
+        {
+            _focusAfter = null;
+            await SetupFocus.ElementAsync(_name);
+        }
+
+        _lastError = NameError;
+    }
+
+    private string? _lastError;
+}

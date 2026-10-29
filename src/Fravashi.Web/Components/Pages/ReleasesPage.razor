@@ -1,0 +1,224 @@
+@page "/releases"
+@using Fravashi.Application.Releases
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.Releases
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Infrastructure.Rendering
+@using Fravashi.Infrastructure.Wiki
+@using Fravashi.Web.Services
+@inject IReleaseStores Releases
+@inject ITrackerResolver Trackers
+@inject IWorkItemChanges Changes
+@inject WikiReferenceResolver References
+@inject WikiMarkdownRenderer Renderer
+@inject NavigationManager Nav
+@inject Fravashi.Application.Projects.ICurrentProject CurrentProject
+@inject Fravashi.Application.Projects.IProjectStore ProjectStore
+@implements IDisposable
+
+<PageTitle>@(ProductName.Short) · Releases</PageTitle>
+
+@* Work item #368: this project's releases, reachable from the board's side panel and from Home's Updates card. The
+   list is on the left, newest first; the chosen release is on the right with its tag, its commit, its notes and every
+   item it carried (archived off the board, still opening by number). New release opens the same dialog the board does. *@
+<div class="studio-workitems releases-page">
+    <PageBar Title="@BarTitle">
+        <Actions>
+            @if (CurrentProject.IsSetUp())
+            {
+                <button type="button" class="studio-btn" data-testid="releases-new" @onclick="@(() => _dialogOpen = true)">
+                    New release
+                </button>
+            }
+        </Actions>
+    </PageBar>
+
+    @if (!CurrentProject.IsSetUp())
+    {
+        <FolderNotSetUp Surface="releases" />
+    }
+    else
+    {
+    <PageSplit SidebarLabel="Releases" SidebarTestId="releases-sidebar" BodyTestId="releases-body">
+        <Sidebar>
+            <div class="page-sidebar-heading">Releases</div>
+            @if (_releases.Count == 0)
+            {
+                <div class="page-sidebar-empty" data-testid="releases-empty">
+                    No releases yet. New release takes the Done items and tags a version.
+                </div>
+            }
+            @foreach (var release in _releases)
+            {
+                <a class="page-sidebar-item @(_selected?.Id == release.Id ? "active" : string.Empty)"
+                   data-testid="releases-item" href="@Link(release.Version)">
+                    <span class="page-sidebar-label">@release.Version</span>
+                    <span class="release-list-meta">
+                        <LocalTime At="release.ReleasedUtc" Style="LocalTimeStyle.Short" TestId="@($"release-date-{release.Version}")" />
+                        · @release.ItemNumbers.Count item@(release.ItemNumbers.Count == 1 ? string.Empty : "s")
+                    </span>
+                </a>
+            }
+            <a class="page-sidebar-item" href="/board" data-testid="releases-to-board">
+                <span class="page-sidebar-label">Back to the board</span>
+            </a>
+        </Sidebar>
+        <Body>
+            @if (_said is { Length: > 0 } said)
+            {
+                <p class="release-saved" role="status" data-testid="releases-said">@said</p>
+            }
+
+            @if (_selected is { } selected)
+            {
+                <div class="page-body-content release-detail" data-testid="release-detail">
+                    <h2 class="release-detail-title">@selected.Title</h2>
+                    <div class="work-item-chips">
+                        <span class="work-item-chip" data-testid="release-detail-tag">Tag @selected.Tag</span>
+                        @if (selected.Commit is { Length: > 0 } commit)
+                        {
+                            <span class="work-item-chip" data-testid="release-detail-commit">@(commit.Length > 10 ? commit[..10] : commit)</span>
+                        }
+                        <span class="work-item-chip">@(selected.TagCreated ? "Tag created here" : "Existing tag")</span>
+                        <span class="work-item-chip"><LocalTime At="selected.ReleasedUtc" TestId="release-detail-date" /></span>
+                        @if (selected.WikiNumber is { } wiki)
+                        {
+                            <a class="work-item-chip work-item-chip-link" data-testid="release-detail-wiki" href="@($"/wiki/{wiki}")">Notes @@@wiki</a>
+                        }
+                    </div>
+
+                    @if (selected.WikiNumber is not null)
+                    {
+                        <p class="studio-muted release-hint">
+                            The notes are kept as a Release document in the wiki. Publishing it to a provider is done from
+                            that document's page, and never happens by itself.
+                        </p>
+                    }
+
+                    <section class="work-item-section">
+                        <h3 class="work-item-section-title">Notes</h3>
+                        <div class="work-item-prose markdown-body" data-testid="release-detail-notes">@((MarkupString)_notesHtml)</div>
+                    </section>
+
+                    <section class="work-item-section">
+                        <h3 class="work-item-section-title">Work items (@_items.Count)</h3>
+                        <ul class="release-items" data-testid="release-detail-items">
+                            @foreach (var item in _items)
+                            {
+                                <li>
+                                    <a class="release-item" href="@($"/workitems/{item.Number}")" data-testid="release-detail-item">
+                                        <span class="release-item-number">#@item.Number</span>
+                                        <span class="release-item-title">@item.Title</span>
+                                        <span class="release-item-group">@ReleaseNotes.Classify(item).ToString().ToLowerInvariant()</span>
+                                    </a>
+                                </li>
+                            }
+                        </ul>
+                    </section>
+                </div>
+            }
+            else if (Version is { Length: > 0 })
+            {
+                <div class="page-body-empty" data-testid="release-missing">This project has no release @Version.</div>
+            }
+            else if (_releases.Count > 0)
+            {
+                <div class="page-body-empty">Choose a release on the left.</div>
+            }
+        </Body>
+    </PageSplit>
+    }
+</div>
+
+@if (_dialogOpen)
+{
+    <NewReleaseDialog Close="@(() => _dialogOpen = false)" Saved="OnSavedAsync" />
+}
+
+@code {
+    /// <summary>The release being read, from <c>?version=</c>.</summary>
+    [SupplyParameterFromQuery(Name = "version")]
+    public string? Version { get; set; }
+
+    private IReadOnlyList<Release> _releases = [];
+    private Release? _selected;
+    private IReadOnlyList<WorkItem> _items = [];
+    private string _notesHtml = string.Empty;
+    private bool _dialogOpen;
+    private string? _said;
+
+    private string BarTitle => Fravashi.Application.Projects.ProjectTitle.With("Releases", ProjectStore, CurrentProject.Id);
+
+    private static string Link(string version) => "/releases?version=" + Uri.EscapeDataString(version);
+
+    protected override void OnInitialized() => Changes.Changed += OnChanged;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    /// <inheritdoc />
+    public void Dispose() => Changes.Changed -= OnChanged;
+
+    private void OnChanged(Fravashi.Domain.Projects.ProjectId project)
+    {
+        if (project != CurrentProject.Id)
+        {
+            return;
+        }
+
+        _ = InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+    }
+
+    private async Task LoadAsync()
+    {
+        // Item #373: a folder that is not set up shows the "not set up" state and reads no project.
+        if (!CurrentProject.IsSetUp())
+        {
+            return;
+        }
+
+        var project = CurrentProject.Require();
+        _releases = await Releases.For(project).ListAsync();
+        _selected = Version is { Length: > 0 } version
+            ? _releases.FirstOrDefault(r => string.Equals(r.Version, version, StringComparison.Ordinal))
+            : _releases.FirstOrDefault();
+        _items = [];
+        _notesHtml = string.Empty;
+        if (_selected is not { } selected)
+        {
+            return;
+        }
+
+        var tracker = Trackers.For(project);
+        var items = new List<WorkItem>();
+        foreach (var number in selected.ItemNumbers)
+        {
+            if (await tracker.GetByNumberAsync(number) is { } item)
+            {
+                items.Add(item);
+            }
+        }
+
+        _items = items;
+        _notesHtml = Renderer.ToHtml(selected.Notes, await References.ResolveAsync(project, selected.Notes));
+    }
+
+    private async Task OnSavedAsync(ReleaseSaved saved)
+    {
+        _dialogOpen = false;
+        var release = saved.Result.Value!;
+        _said = $"Saved {release.Title}: {release.ItemNumbers.Count} item(s) archived off the board."
+            + (saved.WikiProblem is { } problem ? " " + problem : string.Empty);
+        if (string.Equals(Version, release.Version, StringComparison.Ordinal))
+        {
+            await LoadAsync();
+        }
+        else
+        {
+            Nav.NavigateTo(Link(release.Version));
+        }
+    }
+}

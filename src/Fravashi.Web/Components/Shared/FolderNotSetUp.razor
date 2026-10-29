@@ -1,0 +1,131 @@
+@namespace Fravashi.Web.Components.Shared
+@using Fravashi.Application.Persistence
+@using Fravashi.Infrastructure.Bridge
+@using Microsoft.Extensions.DependencyInjection
+@inject IServiceProvider Services
+
+@* Item #373 (docs/plans/first-open-setup.md section 6): NO SHARED BUCKET. A folder opened for the first time belongs to
+   no project, and every surface that would show a project's data shows this calm state instead, with one way forward:
+   the Set up button. Two sizes: Page, the body of a page that has nothing else to show; Inline, one line inside a pane
+   that keeps its other content (the session pane's composer). The heading is an h2, because a page's own h1 is its page
+   bar's (docs/layout.md). *@
+@if (Inline)
+{
+    <div class="folder-setup folder-setup-inline" role="note" data-testid="folder-not-set-up" data-surface="@Surface">
+        <p class="folder-setup-inline-text">
+            <strong>@FolderName is not set up yet.</strong>
+            @if (SurfaceLine(Surface) is { } line)
+            {
+                <span> @line</span>
+            }
+        </p>
+        <a class="studio-btn folder-setup-btn" href="@SetupHref" data-testid="folder-set-up">@ButtonText</a>
+    </div>
+}
+else
+{
+    <section class="folder-setup folder-setup-page" aria-labelledby="@_headingId" data-testid="folder-not-set-up"
+             data-surface="@Surface">
+        <h2 class="folder-setup-title" id="@_headingId">This folder is not set up yet</h2>
+        <p class="folder-setup-lede" data-testid="folder-not-set-up-lede">
+            @FolderName is not part of a project yet, so it has no board, wiki or autopilot of its own. Setting it up takes
+            a minute, and every step can be skipped.
+        </p>
+        @if (SurfaceLine(Surface) is { } line)
+        {
+            <p class="folder-setup-surface" data-testid="folder-not-set-up-surface">@line</p>
+        }
+        <a class="studio-btn folder-setup-btn" href="@SetupHref" data-testid="folder-set-up">@ButtonText</a>
+    </section>
+}
+
+@code {
+    /// <summary>The route the Set up button goes to (a placeholder until the setup itself is built, slice 2).</summary>
+    public const string SetupPath = "/setup";
+
+    /// <summary>The surfaces with a line of their own; anything else draws none.</summary>
+    public static class Surfaces
+    {
+        public const string Home = "home";
+        public const string Board = "board";
+        public const string Wiki = "wiki";
+        public const string Sessions = "sessions";
+        public const string Autopilot = "autopilot";
+        public const string Releases = "releases";
+        public const string ProviderSync = "provider-sync";
+        public const string Import = "import";
+        public const string Design = "design";
+        public const string Settings = "settings";
+    }
+
+    /// <summary>Which surface this is drawn on: picks its one extra line and names it for tests.</summary>
+    [Parameter]
+    public string Surface { get; set; } = Surfaces.Home;
+
+    /// <summary>One line inside a pane, rather than the body of a page.</summary>
+    [Parameter]
+    public bool Inline { get; set; }
+
+    /// <summary>The folder, when it is not the window's own (a session pane names the one it runs in).</summary>
+    [Parameter]
+    public string? WorkspaceId { get; set; }
+
+    private readonly string _headingId = "folder-setup-" + Guid.NewGuid().ToString("N")[..8];
+
+    private string FolderName
+    {
+        get
+        {
+            var id = WorkspaceId ?? Services.GetService<BridgeWorkspaceContext>()?.ActiveWorkspaceId;
+            return id is { Length: > 0 } && Services.GetService<IWorkspaceStore>()?.Get(id) is { } record
+                ? record.Name
+                : "This folder";
+        }
+    }
+
+    /// <summary>
+    /// "Continue setting up" once a setup has been started for this folder (item #373, section 5), else "Set up {Folder}".
+    /// </summary>
+    private string ButtonText =>
+        HasDraft ? "Continue setting up"
+        : FolderName == "This folder" ? "Set up this folder" : $"Set up {FolderName}";
+
+    private string? FolderId => WorkspaceId ?? Services.GetService<BridgeWorkspaceContext>()?.ActiveWorkspaceId;
+
+    private bool HasDraft =>
+        FolderId is { Length: > 0 } id
+        && Services.GetService<Fravashi.Application.Setup.ISetupDraftStore>()?.Get(id) is { IsStarted: true, Outcome: null };
+
+    /// <summary>The setup, told where the person came from, so its "Not now" goes back there.</summary>
+    private string SetupHref
+    {
+        get
+        {
+            var nav = Services.GetService<NavigationManager>();
+            if (nav is null)
+            {
+                return SetupPath;
+            }
+
+            var path = "/" + nav.ToBaseRelativePath(nav.Uri).Split('?', '#')[0];
+            return path.Length > 1 && !path.StartsWith("/setup", StringComparison.OrdinalIgnoreCase)
+                ? $"{SetupPath}?from={Uri.EscapeDataString(path)}"
+                : SetupPath;
+        }
+    }
+
+    /// <summary>The one line a surface adds: why that surface in particular has nothing to show.</summary>
+    public static string? SurfaceLine(string surface) => surface switch
+    {
+        Surfaces.Board => "Work items live in a project.",
+        Surfaces.Wiki => "Documents live in a project.",
+        Surfaces.Design => "Designs are documents, and documents live in a project.",
+        Surfaces.Sessions => "Its earlier conversations are still here to read. A new one needs a project, because an agent records its work as work items and plans.",
+        Surfaces.Autopilot => "The autopilot builds a project's Ready items.",
+        Surfaces.Releases => "Releases are a project's.",
+        Surfaces.ProviderSync => "Provider sync sends a project's board and wiki.",
+        Surfaces.Import => "Importing copies the files into a project.",
+        Surfaces.Settings => "The setup gives it one step by step, or put it in a project below.",
+        _ => null,
+    };
+}

@@ -1,0 +1,202 @@
+@namespace Fravashi.Web.Components.Git
+@using Fravashi.Application.Git
+@using Fravashi.Domain.Git
+@using Fravashi.Web.Components.Code
+
+@* The Branches section of the Git page's side panel (work item #367): local branches first (a prefix tree, each
+   with its publish and ahead/behind state and a visible Checkout), then the remote branches (Checkout makes a local
+   tracking branch, Switch when one exists), then the remotes themselves. Switching always confirms on the page. *@
+<div class="git-branches" data-testid="git-branches">
+    <div class="git-group-header">
+        <span>Local</span>
+        <span class="code-search-count">@Branches.Count</span>
+    </div>
+    @foreach (var branch in _tree.Branches)
+    {
+        @BranchRow((branch, branch.Name))
+    }
+    @foreach (var group in _tree.Groups)
+    {
+        @GroupBlock(group)
+    }
+
+    <div class="git-group-header">
+        <span>Remote</span>
+        <span class="code-search-count">@RemoteBranches.Count</span>
+    </div>
+    @if (RemoteBranches.Count == 0)
+    {
+        <p class="git-side-empty" data-testid="git-remote-branches-empty">
+            @(Remotes.Count == 0 ? "No remote is configured." : "No remote branches fetched yet.")
+        </p>
+    }
+    @foreach (var remoteBranch in RemoteBranches)
+    {
+        var hasLocal = Branches.Any(b => b.Name == remoteBranch.Name);
+        <div class="code-row git-remote-branch-row" data-testid="git-remote-branch"
+             title="@(hasLocal ? $"{remoteBranch.FullName}: a local {remoteBranch.Name} exists" : GitBranchDisplay.RemoteOnlyText(remoteBranch))">
+            <span class="git-branch-glyph" aria-hidden="true">⎇</span>
+            <span class="code-name">@remoteBranch.FullName</span>
+            <button type="button" class="code-section-action git-stash-op git-row-action"
+                    data-testid="git-remote-checkout" disabled="@Busy"
+                    title="@(hasLocal ? $"Switch to {remoteBranch.Name}" : $"Create a local {remoteBranch.Name} tracking {remoteBranch.FullName} and switch to it")"
+                    @onclick="() => OnCheckoutRemote.InvokeAsync(remoteBranch)">
+                @(hasLocal ? "Switch" : "Checkout")
+            </button>
+        </div>
+    }
+
+    @if (Remotes.Count > 0)
+    {
+        <div class="git-group-header">
+            <span>Remotes</span>
+            <span class="code-search-count">@Remotes.Count</span>
+        </div>
+        @foreach (var remote in Remotes)
+        {
+            <div class="git-remote-row" data-testid="git-remote-row">
+                <span class="git-remote-name">@remote.Name</span>
+                <span class="git-remote-url">@remote.FetchUrl</span>
+            </div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public IReadOnlyList<GitBranch> Branches { get; set; } = [];
+
+    [Parameter]
+    public IReadOnlyList<GitRemoteBranch> RemoteBranches { get; set; } = [];
+
+    [Parameter]
+    public IReadOnlyList<GitRemote> Remotes { get; set; } = [];
+
+    [Parameter]
+    public bool Busy { get; set; }
+
+    /// <summary>Asks to switch to a local branch; the page confirms first.</summary>
+    [Parameter]
+    public EventCallback<GitBranch> OnCheckout { get; set; }
+
+    [Parameter]
+    public EventCallback<GitRemoteBranch> OnCheckoutRemote { get; set; }
+
+    private BranchTreeNode _tree = new();
+    private readonly HashSet<string> _collapsedGroups = [];
+
+    protected override void OnParametersSet() => _tree = BuildTree(Branches);
+
+    private void ToggleGroup(string key)
+    {
+        if (!_collapsedGroups.Remove(key))
+        {
+            _collapsedGroups.Add(key);
+        }
+    }
+
+    // One local branch, coloured by its publish/sync state (shared with the title bar's dropdown, backlog 31).
+    private RenderFragment<(GitBranch Branch, string Label)> BranchRow => item =>
+        @<div class="code-row git-branch-row @(item.Branch.IsCurrent ? "active" : string.Empty) @GitBranchDisplay.StateClass(item.Branch)"
+              title="@GitBranchDisplay.StateTitle(item.Branch)" data-testid="git-branch-row"
+              @onclick="() => RequestCheckout(item.Branch)">
+            <span class="git-branch-glyph" aria-hidden="true">⎇</span>
+            <span class="code-name">@item.Label</span>
+            <span class="git-branch-status">@GitBranchDisplay.StateText(item.Branch)</span>
+            @if (item.Branch.IsCurrent)
+            {
+                <span class="git-branch-current" data-testid="git-branch-current">current</span>
+            }
+            else
+            {
+                <button type="button" class="code-section-action git-stash-op git-row-action" data-testid="git-branch-checkout"
+                        disabled="@Busy" title="@($"Switch to {item.Branch.Name}")"
+                        @onclick="() => RequestCheckout(item.Branch)" @onclick:stopPropagation="true">Checkout</button>
+            }
+        </div>;
+
+    private RenderFragment<BranchTreeNode> GroupBlock => group =>
+        @<div class="git-branch-group">
+            <div class="code-row git-branch-group-row" @onclick="() => ToggleGroup(group.Key)">
+                <span class="code-twisty @(_collapsedGroups.Contains(group.Key) ? string.Empty : "expanded")"><CodeIcon Kind="CodeIcon.IconKind.Chevron" /></span>
+                <span class="code-name">@group.Label</span>
+                <span class="code-search-count">@group.Count</span>
+            </div>
+            @if (!_collapsedGroups.Contains(group.Key))
+            {
+                <div class="git-tree-children">
+                    @foreach (var branch in group.Branches)
+                    {
+                        @BranchRow((branch, GitPaths.NameOf(branch.Name)))
+                    }
+                    @foreach (var child in group.Groups)
+                    {
+                        @GroupBlock(child)
+                    }
+                </div>
+            }
+        </div>;
+
+    private async Task RequestCheckout(GitBranch branch)
+    {
+        if (!branch.IsCurrent)
+        {
+            await OnCheckout.InvokeAsync(branch);
+        }
+    }
+
+    private sealed class BranchTreeNode
+    {
+        public string Label = string.Empty;
+        public string Key = string.Empty;
+        public List<BranchTreeNode> Groups { get; } = [];
+        public List<GitBranch> Branches { get; } = [];
+
+        public int Count => Branches.Count + Groups.Sum(g => g.Count);
+    }
+
+    private static BranchTreeNode BuildTree(IReadOnlyList<GitBranch> branches)
+    {
+        var root = new BranchTreeNode();
+        var byPath = new Dictionary<string, BranchTreeNode> { [string.Empty] = root };
+        foreach (var branch in branches)
+        {
+            EnsureGroup(byPath, GitPaths.DirectoryOf(branch.Name)).Branches.Add(branch);
+        }
+
+        Compress(root);
+        return root;
+    }
+
+    private static BranchTreeNode EnsureGroup(Dictionary<string, BranchTreeNode> byPath, string path)
+    {
+        if (byPath.TryGetValue(path, out var existing))
+        {
+            return existing;
+        }
+
+        var parent = EnsureGroup(byPath, GitPaths.DirectoryOf(path));
+        var node = new BranchTreeNode { Label = GitPaths.NameOf(path), Key = path };
+        parent.Groups.Add(node);
+        byPath[path] = node;
+        return node;
+    }
+
+    private static void Compress(BranchTreeNode node)
+    {
+        foreach (var child in node.Groups)
+        {
+            while (child.Branches.Count == 0 && child.Groups.Count == 1)
+            {
+                var only = child.Groups[0];
+                child.Label = $"{child.Label}/{only.Label}";
+                child.Key = only.Key;
+                child.Branches.AddRange(only.Branches);
+                child.Groups.Clear();
+                child.Groups.AddRange(only.Groups);
+            }
+
+            Compress(child);
+        }
+    }
+}

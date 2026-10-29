@@ -1,0 +1,116 @@
+@namespace Fravashi.Web.Components.Settings.Framework
+@using Fravashi.Application.Framework
+@using Fravashi.Domain.Framework
+@inject IFrameworkArtifactStore Store
+@inject NavigationManager Nav
+
+@* Read-only plugin view (UI11): the rendered manifest + its plugin.json preview. Delete confirmed. *@
+
+@if (_plugin is null)
+{
+    <div class="page-body-empty" data-testid="plugin-view-missing">
+        <p class="studio-muted">That plugin no longer exists.</p>
+        <a class="studio-btn studio-btn-alt" href="/settings/framework/plugins">Back to plugins</a>
+    </div>
+}
+else
+{
+    <div class="skill-view" data-testid="plugin-view">
+        <div class="skill-view-header">
+            <div class="skill-view-heading">
+                <h2 data-testid="plugin-view-title">@Title</h2>
+                <div class="skill-view-name">@_plugin.Name@(string.IsNullOrWhiteSpace(_plugin.Version) ? "" : $" · v{_plugin.Version}")</div>
+                @if (!string.IsNullOrWhiteSpace(_plugin.Description))
+                {
+                    <div class="studio-muted">@_plugin.Description</div>
+                }
+            </div>
+            <div class="skill-view-actions">
+                <a class="studio-btn" href="@($"/settings/framework/plugins/edit/{Id}")" data-testid="plugin-edit">Edit</a>
+                <button class="studio-btn studio-btn-danger" @onclick="() => _confirmDelete = true"
+                        data-testid="plugin-delete">Delete</button>
+            </div>
+        </div>
+
+        <dl class="skill-view-meta">
+            @if (_plugin.Author.IsSet)
+            {
+                <dt>Author</dt>
+                <dd data-testid="plugin-view-author">@AuthorLine</dd>
+            }
+            @if (!string.IsNullOrWhiteSpace(_plugin.License))
+            {
+                <dt>License</dt>
+                <dd>@_plugin.License</dd>
+            }
+            @if (_plugin.Keywords.Count > 0)
+            {
+                <dt>Keywords</dt>
+                <dd data-testid="plugin-view-keywords">@string.Join(", ", _plugin.Keywords)</dd>
+            }
+            @if (_plugin.Components.Any)
+            {
+                <dt>Components (metadata)</dt>
+                <dd class="studio-muted" data-testid="plugin-view-components">Declared paths only - no file sync this version.</dd>
+            }
+        </dl>
+
+        <section class="skill-view-section">
+            <h2>plugin.json preview</h2>
+            <p class="ob-field-hint">Read-only. The <code>.claude-plugin/plugin.json</code> manifest. Not written to disk (no file sync).</p>
+            <pre class="skill-view-skillmd" data-testid="plugin-view-json">@_json</pre>
+        </section>
+    </div>
+
+    @if (_confirmDelete)
+    {
+        <div class="studio-modal-backdrop" @onclick="() => _confirmDelete = false">
+            <div class="studio-modal" style="width:420px;" @onclick:stopPropagation>
+                <h2 style="margin:0 0 10px;">Delete plugin</h2>
+                <p>Delete <strong>@Title</strong>? This cannot be undone.</p>
+                <div class="studio-modal-actions" style="margin-top:14px;">
+                    <button class="studio-btn studio-btn-danger" @onclick="DeleteAsync" data-testid="plugin-delete-confirm">Delete</button>
+                    <button class="studio-btn studio-btn-alt" @onclick="() => _confirmDelete = false"
+                            data-testid="plugin-delete-cancel">Cancel</button>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private PluginDefinition? _plugin;
+    private string _json = string.Empty;
+    private bool _confirmDelete;
+
+    private string Title =>
+        _plugin is null ? string.Empty
+        : string.IsNullOrWhiteSpace(_plugin.DisplayName) ? _plugin.Name : _plugin.DisplayName;
+
+    private string AuthorLine =>
+        _plugin is null ? string.Empty
+        : string.Join(" · ", new[] { _plugin.Author.Name, _plugin.Author.Email, _plugin.Author.Url }
+            .Where(s => !string.IsNullOrWhiteSpace(s)));
+
+    protected override void OnParametersSet()
+    {
+        _plugin = null;
+        if (!string.IsNullOrWhiteSpace(Id) && Store.Get(Id) is { } artifact)
+        {
+            _plugin = FrameworkPayload<PluginDefinition>.From(artifact);
+            _json = PluginDocument.ToPluginJson(_plugin);
+        }
+    }
+
+    private void DeleteAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(Id))
+        {
+            Store.Remove(Id);
+        }
+
+        Nav.NavigateTo("/settings/framework/plugins");
+    }
+}

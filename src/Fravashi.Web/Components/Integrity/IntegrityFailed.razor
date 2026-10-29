@@ -1,0 +1,10 @@
+@page "/integrity-failed"
+@layout Fravashi.Web.Components.Layout.MinimalWindowLayout
+@namespace Fravashi.Web.Components.Integrity
+
+@* Backlog 282: MinimalWindowLayout, not MainLayout: from this page a rail click once rendered /wiki in-app with no
+   request, past the lock (measured on v0.9.74). *@
+
+<PageTitle>@(ProductName.Short) · Integrity check failed</PageTitle>
+
+<IntegrityFailedPanel />

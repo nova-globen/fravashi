@@ -1,0 +1,15 @@
+{
+  "$comment": [
+    "Release-wide policy the pipeline stamps into the manifest (ADR 0006). Committed so a release's",
+    "criticality is a reviewed change, not an ad-hoc button. 'critical' can also be overridden per run via",
+    "the workflow_dispatch 'critical' input; a plain tag push uses the value here.",
+    "",
+    "criticality (ruling 2 / D03-2): ONLY this manifest can declare a product update critical. A",
+    "critical update locks the app until taken. Leave false unless a release genuinely must be forced.",
+    "minSupportedVersion: any install below this floor is treated as critical even when 'critical' is false",
+    "(a security floor without flagging every release). Empty = no floor."
+  ],
+  "product": "fravashi",
+  "critical": false,
+  "minSupportedVersion": ""
+}

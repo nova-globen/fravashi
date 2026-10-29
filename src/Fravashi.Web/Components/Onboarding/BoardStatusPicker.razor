@@ -1,0 +1,101 @@
+@namespace Fravashi.Web.Components.Onboarding
+
+@* O15 / F7 - a closed-by-default multi-select for mapping one canonical status to the board's native
+   states (replaces the always-open native `select multiple`, which hid the selection state and exploded the
+   row height on a board with 13+ states). Closed, it shows the mapped states as removable chips (or an
+   explicit empty-state); opening reveals a keyboard-accessible checkbox list of the board's states. A state
+   already mapped to another canonical status is dimmed and labelled "mapped to X"; checking it here reassigns
+   it (exclusivity is enforced by the parent - one canonical per native state). No JavaScript: the open state
+   is component-tracked and an invisible backdrop closes it on an outside click, so it works in SSR and
+   interactive server rendering alike. *@
+
+<div class="ob-picker @(_open ? "is-open" : string.Empty)" data-testid="@TestId" @onkeydown="OnKeyDown">
+    <button type="button" class="ob-picker-trigger" aria-haspopup="listbox" aria-expanded="@_open.ToString().ToLowerInvariant()"
+            @onclick="Toggle" data-testid="@($"{TestId}-trigger")">
+        @if (Selected.Count == 0)
+        {
+            <span class="ob-picker-empty" data-testid="@($"{TestId}-empty")">No states mapped</span>
+        }
+        else
+        {
+            <span class="ob-picker-chips">
+                @foreach (var state in Selected)
+                {
+                    <span class="ob-picker-chip" data-testid="@($"{TestId}-chip-{Slug(state)}")">
+                        <span class="ob-picker-chip-label">@state</span>
+                        <button type="button" class="ob-picker-chip-x" aria-label="@($"Remove {state}")"
+                                @onclick="() => RemoveAsync(state)" @onclick:stopPropagation="true"
+                                data-testid="@($"{TestId}-chip-remove-{Slug(state)}")">×</button>
+                    </span>
+                }
+            </span>
+        }
+        <span class="ob-picker-caret" aria-hidden="true">▾</span>
+    </button>
+
+    @if (_open)
+    {
+        <div class="ob-picker-backdrop" @onclick="Close"></div>
+        <div class="ob-picker-panel" role="listbox" aria-multiselectable="true" data-testid="@($"{TestId}-panel")">
+            @if (AllStates.Count == 0)
+            {
+                <p class="ob-picker-none">No board states to choose from.</p>
+            }
+            else
+            {
+                @foreach (var state in AllStates)
+                {
+                    var here = Selected.Contains(state, StringComparer.OrdinalIgnoreCase);
+                    var elsewhere = here ? null : AssignedElsewhere(state);
+                    <label class="ob-picker-option @(elsewhere is not null ? "is-elsewhere" : string.Empty)"
+                           data-testid="@($"{TestId}-opt-{Slug(state)}")">
+                        <input type="checkbox" checked="@here" @onchange="() => ToggleAsync(state)" />
+                        <span class="ob-picker-opt-name">@state</span>
+                        @if (elsewhere is not null)
+                        {
+                            <span class="ob-picker-opt-note" data-testid="@($"{TestId}-opt-elsewhere-{Slug(state)}")">mapped to @elsewhere</span>
+                        }
+                    </label>
+                }
+            }
+        </div>
+    }
+</div>
+
+@code {
+    /// <summary>Stable test id / DOM key prefix for this picker (e.g. <c>map-InProgress</c>).</summary>
+    [Parameter, EditorRequired] public string TestId { get; set; } = string.Empty;
+
+    /// <summary>Every native board state the user can choose from.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<string> AllStates { get; set; } = [];
+
+    /// <summary>The native states currently mapped to this canonical status.</summary>
+    [Parameter, EditorRequired] public IReadOnlyList<string> Selected { get; set; } = [];
+
+    /// <summary>Given a native state, the OTHER canonical status it is mapped to, or null when it is free.</summary>
+    [Parameter, EditorRequired] public Func<string, string?> AssignedElsewhere { get; set; } = _ => null;
+
+    /// <summary>Raised when a state is toggled; the parent applies exclusivity and re-maps.</summary>
+    [Parameter] public EventCallback<string> OnToggle { get; set; }
+
+    /// <summary>Raised when a chip's remove button is clicked.</summary>
+    [Parameter] public EventCallback<string> OnRemove { get; set; }
+
+    private bool _open;
+
+    private void Toggle() => _open = !_open;
+    private void Close() => _open = false;
+
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape")
+        {
+            _open = false;
+        }
+    }
+
+    private async Task ToggleAsync(string state) => await OnToggle.InvokeAsync(state);
+    private async Task RemoveAsync(string state) => await OnRemove.InvokeAsync(state);
+
+    private static string Slug(string value) => value.Replace(" ", string.Empty, StringComparison.Ordinal);
+}

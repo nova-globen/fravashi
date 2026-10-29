@@ -1,0 +1,76 @@
+@page "/onboarding/review"
+@layout OnboardingLayout
+@using Fravashi.Application.Persistence
+@inject IProviderConnectionStore Connections
+@inject IConfigurationStore Config
+
+@* Final review - what was configured, and what was verified vs. merely recorded. The wizard's Done button
+   (in the layout footer) marks onboarding complete. This step only summarises; it asserts nothing the stored
+   records do not support. *@
+
+<div class="ob-step">
+    <h2>Review &amp; finish</h2>
+    <p>Here is what onboarding will save. "Verified" means a real access probe passed; "Recorded" means the
+       choice is stored but not proven.</p>
+
+    <table class="ob-review" data-testid="review-table">
+        <thead><tr><th>Area</th><th>Provider</th><th>Status</th></tr></thead>
+        <tbody>
+            <tr><td>Data directory</td><td> - </td><td>@(DataConfirmed ? "Confirmed" : "Not confirmed")</td></tr>
+            @foreach (var (label, connection, provider) in Rows())
+            {
+                <tr data-testid="review-row">
+                    <td>@label</td>
+                    <td>@(provider ?? " - ")</td>
+                    <td>@(connection?.Status ?? "Not configured")</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    @if (RestartWillHappen)
+    {
+        <div class="ob-warning" role="alert" data-testid="review-restart">
+            <strong>The app will restart.</strong> You selected an external board, which changes a
+            registration-time setting (<code>Tracker:Provider</code>). Finishing restarts the app so it takes
+            effect; your browser tab will reconnect in a moment.
+        </div>
+    }
+
+    <p class="ob-note">
+        Press <strong>Done</strong> to complete onboarding. You can revisit any of these later from
+        <strong>Settings → Onboarding</strong>.
+    </p>
+</div>
+
+@code {
+    /// <summary>
+    /// The Tracker:Provider value captured when the wizard opened, to detect a registration-time change. When
+    /// null (the routed case), it falls back to the persisted <c>Onboarding:InitialTrackerProvider</c> baseline
+    /// the layout stamps at wizard start.
+    /// </summary>
+    [Parameter] public string? InitialTrackerProvider { get; set; }
+
+    private bool DataConfirmed =>
+        string.Equals(Config.Get("Onboarding:DataLocationConfirmed"), "true", StringComparison.OrdinalIgnoreCase);
+
+    private string? EffectiveInitial => InitialTrackerProvider ?? Config.Get("Onboarding:InitialTrackerProvider");
+
+    private bool RestartWillHappen
+    {
+        get
+        {
+            var current = Config.Get("Tracker:Provider");
+            // Only a real, non-empty provider selection that differs from the start needs a restart. A local
+            // or unconfigured board leaves Tracker:Provider unset, so no restart is due.
+            return !string.IsNullOrEmpty(current)
+                && !string.Equals(current, EffectiveInitial, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private IEnumerable<(string Label, ProviderConnection? Connection, string? Provider)> Rows()
+    {
+        yield return ("Wiki", Connections.Get("wiki"), Config.Get("Onboarding:Wiki:Provider"));
+        yield return ("Board", Connections.Get("board"), Config.Get("Onboarding:Board:Provider"));
+    }
+}

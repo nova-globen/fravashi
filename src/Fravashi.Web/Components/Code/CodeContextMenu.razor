@@ -1,0 +1,49 @@
+@namespace Fravashi.Web.Components.Code
+
+@* A lightweight right-click menu: a full-viewport backdrop (dismisses on any click, including another
+   right-click) plus the item list positioned at the cursor. The page owns which items to show. *@
+<div class="code-context-backdrop" @onclick="Dismiss" @oncontextmenu="Dismiss" @oncontextmenu:preventDefault="true"></div>
+<div class="code-context-menu" style="left: @(X)px; top: @(Y)px;" data-testid="code-context-menu">
+    @foreach (var item in Items)
+    {
+        @if (item.IsSeparator)
+        {
+            <div class="code-context-separator"></div>
+        }
+        else
+        {
+            <button type="button" class="code-context-item" disabled="@item.Disabled"
+                    @onclick="() => RunAsync(item)">@item.Label</button>
+        }
+    }
+</div>
+
+@code {
+    public sealed record MenuItem(string Label, Func<Task>? Action = null, bool Disabled = false, bool IsSeparator = false)
+    {
+        public static MenuItem Separator { get; } = new(string.Empty, IsSeparator: true);
+    }
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<MenuItem> Items { get; set; } = [];
+
+    [Parameter]
+    public double X { get; set; }
+
+    [Parameter]
+    public double Y { get; set; }
+
+    [Parameter]
+    public EventCallback OnDismiss { get; set; }
+
+    private Task Dismiss() => OnDismiss.InvokeAsync();
+
+    private async Task RunAsync(MenuItem item)
+    {
+        await OnDismiss.InvokeAsync();
+        if (item.Action is not null)
+        {
+            await item.Action();
+        }
+    }
+}

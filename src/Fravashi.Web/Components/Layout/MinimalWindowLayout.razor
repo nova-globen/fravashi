@@ -1,0 +1,69 @@
+@namespace Fravashi.Web.Components.Layout
+@inherits LayoutComponentBase
+@using Fravashi.Web.Components.Shell
+
+@* Backlog 281: a minimal shell for a page that must stay reachable while a gate is closed (the studio's own Error
+   page, exempted from every redirecting gate so it can render instead of looping back to a page that just threw,
+   and since backlog 282 the lock pages /sign-in, /integrity-failed and /secure-connection). The app is one
+   persistent interactive circuit: once a circuit is live, clicking a link in MainLayout's activity rail or sidebar
+   is a client-side route change on that SAME circuit, with no new HTTP request, so no gate ever runs again for it.
+   This layout drops the rail and the sidebar, and (backlog 282) the title bar's branch switcher, which is a git
+   checkout on the host folder that navigates nowhere, so no gate and no navigation guard would ever see it. What
+   the title bar still offers: history back/forward, which are navigations, and any in-app navigation a closed gate
+   would refuse is turned into a full page load by Components/GateGuard.razor; and the workspace switcher, which
+   switches through the host and falls back to forced page loads, both of which the middleware answers.
+   WindowTitleBar also reads the workspace store and asks git for the current branch during its own
+   initialisation, either of which can throw, possibly for the very reason a request landed on this layout in
+   the first place. The ErrorBoundary below means that failure degrades to a bare caption strip (still able to
+   minimize, maximize and close the window) instead of taking the whole page down with it. *@
+
+<div class="studio-window-root">
+    <ErrorBoundary>
+        <ChildContent>
+            <WindowTitleBar ShowBranchSwitcher="false" />
+        </ChildContent>
+        <ErrorContent>
+            <div class="studio-titlebar" data-testid="window-titlebar-fallback">
+                <div class="studio-titlebar-nav"></div>
+                <div class="studio-titlebar-center"></div>
+                <div class="studio-titlebar-controls">
+                    <button type="button" class="studio-caption-btn" title="Minimize" aria-label="Minimize"
+                            data-window-action="minimize">
+                        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">
+                            <path d="M1 6h10" />
+                        </svg>
+                    </button>
+                    <button type="button" class="studio-caption-btn" title="Maximize" aria-label="Maximize or restore"
+                            data-window-action="maximize">
+                        <svg class="studio-caption-max" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                             stroke-width="1" aria-hidden="true">
+                            <rect x="1.5" y="1.5" width="9" height="9" />
+                        </svg>
+                        <svg class="studio-caption-restore" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                             stroke-width="1" aria-hidden="true">
+                            <rect x="1.5" y="3.5" width="7" height="7" />
+                            <path d="M3.5 3.5v-2h7v7h-2" />
+                        </svg>
+                    </button>
+                    <button type="button" class="studio-caption-btn studio-caption-close" title="Close" aria-label="Close"
+                            data-window-action="close">
+                        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">
+                            <path d="m1.5 1.5 9 9M10.5 1.5l-9 9" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </ErrorContent>
+    </ErrorBoundary>
+    @* Work item #350: the title bar's workspace button opens the start dialog here too, but never in place of the
+       page: these pages must stay reachable whatever the window shows, so the dialog can always be closed. *@
+    <StartDialogHost Enforce="false">
+        <div class="studio-shell no-sidebar studio-shell-minimal">
+            <main class="studio-main">
+                <div class="studio-main-body">
+                    @Body
+                </div>
+            </main>
+        </div>
+    </StartDialogHost>
+</div>

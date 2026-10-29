@@ -1,0 +1,298 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using Fravashi.Application.Projects
+@using Fravashi.Application.Wiki
+@using Fravashi.Application.WorkItems
+@using Fravashi.Domain.Wiki
+@using Fravashi.Domain.WorkItems
+@using Microsoft.Extensions.DependencyInjection
+@inject IWikiSyncService Wiki
+@inject IServiceProvider Services
+@inject ILogger<WikiSyncCard> Logger
+@implements IDisposable
+
+@* Home's Wiki card. Its top half is the wiki MIRROR's sync (Confluence or GitHub wiki into the local wiki, as it
+   was). Work item #358 replaced the "N page(s) in the local wiki." line (#354: it repeated the sync message) with
+   insights into THIS project's authored documents, read through the wiki library and the tracker the wiki and board
+   pages read: a small bar chart of the documents by type, the drafts, the documents not yet on the configured wiki
+   (only when this project publishes to one), and the open work items with no linked plan. Every figure and bar is a
+   link to where it is acted on: the wiki filtered to that type, the board, or the item itself. *@
+
+@* Item #373: a project's card, drawn only for a folder that is set up (Home leads with the "not set up" state). *@
+@if (CurrentProject.IsSetUp())
+{
+<section class="dash-panel wiki-sync-card" aria-label="Wiki">
+    <div class="dash-panel-head">
+        <span>Wiki</span>
+        @if (Wiki.IsConfigured)
+        {
+            <button type="button" class="studio-link-btn"
+                    disabled="@(_state.Phase == WikiSyncPhase.Running)"
+                    @onclick="SyncNow">
+                @(_state.Phase == WikiSyncPhase.Running ? "Syncing…" : "Sync now")
+            </button>
+        }
+    </div>
+
+    @switch (_state.Phase)
+    {
+        case WikiSyncPhase.Skipped:
+            <p class="studio-muted wiki-sync-empty">@_state.Message</p>
+            break;
+
+        case WikiSyncPhase.Running:
+            <div class="wiki-sync-running">
+                <div class="studio-progress-track">
+                    <div class="studio-progress-fill"
+                         style="width:@PercentOf(_state.Fetched, _state.Total)%"></div>
+                </div>
+                <p class="studio-muted wiki-sync-msg">@_state.Message</p>
+                @if (_state.CurrentTitle is { Length: > 0 } title)
+                {
+                    <p class="studio-muted wiki-sync-current">@title</p>
+                }
+            </div>
+            break;
+
+        case WikiSyncPhase.Failed:
+            <p class="wiki-sync-failed" role="alert">@_state.Message</p>
+            break;
+
+        case WikiSyncPhase.Succeeded:
+            <p class="wiki-sync-done">@_state.Message</p>
+            @if (_state.Conflicts > 0)
+            {
+                <p class="wiki-sync-conflicts" role="alert">
+                    @_state.Conflicts conflict(s) detected - the site is authoritative, but a local edit
+                    diverged. Conflict resolution is coming soon; the site copy is kept for now.
+                </p>
+            }
+            break;
+
+        default:
+            <p class="studio-muted wiki-sync-empty">
+                @(Wiki.IsConfigured ? "Ready to sync the configured wiki." : "Using the local wiki - nothing to sync.")
+            </p>
+            break;
+    }
+
+    @if (_state.Provider is { Length: > 0 } provider && _state.Phase is WikiSyncPhase.Running or WikiSyncPhase.Succeeded)
+    {
+        <p class="studio-muted wiki-sync-provider">Source: @provider (site authoritative).</p>
+    }
+
+    @if (_state.LastRunUtc is { } last)
+    {
+        <p class="wiki-sync-checked studio-muted">Last synced <LocalTime At="last" Style="Fravashi.Web.Services.LocalTimeStyle.DateTime" />.</p>
+    }
+
+    @if (_insights is { } insights)
+    {
+        <div class="wiki-insights" data-testid="wiki-insights">
+            <dl class="insight-figures wiki-insight-figures">
+                <div class="insight-figure">
+                    <dt>Documents</dt>
+                    <dd><a class="insight-value" href="/wiki" data-testid="wiki-insight-documents">@insights.Documents</a></dd>
+                </div>
+                <div class="insight-figure">
+                    <dt>Drafts</dt>
+                    <dd><a class="insight-value" href="/wiki?type=draft" data-testid="wiki-insight-drafts">@insights.Drafts</a></dd>
+                </div>
+                @if (insights.Unpublished is { } unpublished)
+                {
+                    <div class="insight-figure">
+                        <dt>Not on @insights.Provider</dt>
+                        <dd>
+                            <a class="insight-value" href="/wiki" data-testid="wiki-insight-unpublished"
+                               title="@($"Documents never published to {insights.Provider}, or changed here since they were")">@unpublished</a>
+                        </dd>
+                    </div>
+                }
+                @if (insights.Unplanned is { } unplanned)
+                {
+                    <div class="insight-figure">
+                        <dt>Unplanned</dt>
+                        <dd>
+                            <a class="insight-value@(unplanned.Count > 0 ? " wiki-insight-attention" : string.Empty)" href="/board"
+                               data-testid="wiki-insight-unplanned" title="Open work items with no linked plan">@unplanned.Count</a>
+                        </dd>
+                    </div>
+                }
+            </dl>
+
+            @if (insights.ByType.Count > 0)
+            {
+                var max = insights.ByType.Max(t => t.Count);
+                <ul class="progress-bars wiki-type-bars" data-testid="wiki-insight-by-type" aria-label="Documents by type">
+                    @foreach (var type in insights.ByType)
+                    {
+                        <li data-testid="@($"wiki-type-{type.Name}")" data-count="@type.Count">
+                            <a class="progress-bar-row wiki-type-row" href="@($"/wiki?type={type.Name}")"
+                               title="@($"Open the wiki filtered to {type.Label}")">
+                                <span class="progress-bar-label">@type.Label</span>
+                                <span class="progress-bar-track" aria-hidden="true">
+                                    <span class="progress-bar-fill wiki-type-fill" style="width: @Share(type.Count, max)"></span>
+                                </span>
+                                <span class="progress-bar-count">@type.Count</span>
+                            </a>
+                        </li>
+                    }
+                </ul>
+            }
+            else
+            {
+                <p class="studio-muted insight-empty" data-testid="wiki-insight-empty">
+                    No documents in this project's wiki yet. Write the first on the <a href="/wiki">wiki</a>.
+                </p>
+            }
+
+            @if (insights.Unplanned is { Count: > 0 } open)
+            {
+                <p class="studio-muted wiki-unplanned-head">Open work items with no linked plan:</p>
+                <ul class="wiki-unplanned-list" data-testid="wiki-unplanned-list">
+                    @foreach (var item in open.Take(UnplannedShown))
+                    {
+                        <li><a href="@($"/workitems/{item.Number}")" data-testid="wiki-unplanned-item">#@item.Number @item.Title</a></li>
+                    }
+                </ul>
+                @if (open.Count > UnplannedShown)
+                {
+                    <p class="studio-muted wiki-unplanned-more">And @(open.Count - UnplannedShown) more on the <a href="/board">board</a>.</p>
+                }
+            }
+        </div>
+    }
+</section>
+}
+
+@code {
+    /// <summary>What the insights half shows; null where the wiki library is not wired (a narrow page test).</summary>
+    /// <param name="Unpublished">Null when this project publishes to no wiki, so there is nothing to be missing from.</param>
+    /// <param name="Unplanned">Null when no tracker is wired.</param>
+    private sealed record Insights(
+        int Documents,
+        int Drafts,
+        IReadOnlyList<WikiInsights.TypeCount> ByType,
+        int? Unpublished,
+        string? Provider,
+        IReadOnlyList<WorkItem>? Unplanned);
+
+    /// <summary>How many unplanned items are named on the card before "and N more".</summary>
+    private const int UnplannedShown = 5;
+
+    private WikiSyncState _state = WikiSyncState.Empty;
+    private Insights? _insights;
+    private WikiSyncPhase _insightsAt;
+
+    private static int PercentOf(int fetched, int? total) =>
+        total is > 0 ? (int)Math.Clamp(fetched * 100.0 / total.Value, 0, 100) : 0;
+
+    private static string Share(int count, int max) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{(max == 0 ? 0 : 100.0 * count / max):0.#}%");
+
+    private ICurrentProject CurrentProject => Services.GetService<ICurrentProject>() ?? SingleProject.Instance;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Wiki.Changed += OnChanged;
+        _state = Wiki.State;
+        _insightsAt = _state.Phase;
+        _ = StartIfPendingAsync();
+        await LoadInsightsAsync();
+    }
+
+    // Auto-start the initial sync when the dashboard opens (post-onboarding). Idempotent - no-ops once done.
+    private async Task StartIfPendingAsync()
+    {
+        try
+        {
+            await Wiki.EnsureStartedAsync();
+        }
+        catch
+        {
+            // Recorded in State; never surfaced from the fire-and-forget starter.
+        }
+    }
+
+    /// <summary>
+    /// Reads this window's project's documents and work items. Everything is resolved optionally, the Progress card's
+    /// posture: a wiring without the library shows the sync half alone, and one without a tracker leaves out Unplanned.
+    /// </summary>
+    private async Task LoadInsightsAsync()
+    {
+        if (Services.GetService<IWikiLibraries>() is not { } libraries)
+        {
+            _insights = null;
+            return;
+        }
+
+        // Item #373: a folder that is not set up reads no project's documents.
+        if (CurrentProject.Id is not { } project)
+        {
+            _insights = null;
+            return;
+        }
+
+        try
+        {
+            var documents = await libraries.For(project).ListAsync(new WikiItemQuery { Limit = 1000 });
+
+            int? unpublished = null;
+            string? provider = null;
+            if (Services.GetService<WikiPublisher>() is { } publisher && publisher.CanPublishFor(project))
+            {
+                provider = publisher.Provider;
+                var missing = 0;
+                foreach (var document in documents)
+                {
+                    if (await publisher.GetAsync(document.Id) is not { State: WikiPublicationState.Published } row
+                        || row.LocalMovedSince(document))
+                    {
+                        missing++;
+                    }
+                }
+
+                unpublished = missing;
+            }
+
+            IReadOnlyList<WorkItem>? unplanned = null;
+            if (Services.GetService<ITrackerResolver>() is { } trackers)
+            {
+                unplanned = WikiInsights.Unplanned(await TrackerReads.AllAsync(trackers.For(project)), documents);
+            }
+
+            _insights = new Insights(
+                documents.Count,
+                documents.Count(d => d.Type == WikiItemType.Draft),
+                WikiInsights.ByType(documents),
+                unpublished,
+                provider,
+                unplanned);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.Data.Common.DbException or HttpRequestException)
+        {
+            Logger.LogWarning(ex, "The Wiki card could not read this project's documents or work items.");
+            _insights = null;
+        }
+    }
+
+    private async Task SyncNow() => await Wiki.SyncNowAsync();
+
+    private void OnChanged() => InvokeAsync(async () =>
+    {
+        _state = Wiki.State;
+
+        // A finished sync can have brought documents in: the insights are read again once the phase moves to done.
+        if (_state.Phase != _insightsAt)
+        {
+            _insightsAt = _state.Phase;
+            if (_state.Phase == WikiSyncPhase.Succeeded)
+            {
+                await LoadInsightsAsync();
+            }
+        }
+
+        StateHasChanged();
+    });
+
+    public void Dispose() => Wiki.Changed -= OnChanged;
+}

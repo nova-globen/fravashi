@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# commit-msg: reject AI/agent self-attribution in commit messages, and enforce Conventional Commits.
+#
+# Hard rule (see CLAUDE.md "Commit conventions"), not advisory: a commit made in this repository must
+# never carry a trace of the tool that helped write it -- no Co-Authored-By trailer naming an
+# assistant, no "Generated with ..." marker, no session/tool link, no vendor name as a standalone word
+# in the subject. This repo's product domain legitimately talks about the Claude/Copilot/Codex CLIs,
+# so describe that by ROLE, not vendor (e.g. "add the agent-CLI adapter", not "add the claude
+# adapter") -- the subject check below still rejects the vendor name either way.
+
+msg_file="$1"
+msg="$(cat "${msg_file}")"
+subject="$(head -n1 "${msg_file}")"
+
+vendor_pattern='(claude|anthropic|chatgpt|openai|gpt|copilot|codex|gemini|llm|agentic)'
+
+fail() {
+  echo "commit-msg: $1" >&2
+  exit 1
+}
+
+# 1. Subject line: no standalone AI/tool vendor name.
+if echo "${subject}" | grep -qiE "\b${vendor_pattern}\b"; then
+  fail "no AI/tool vendor name in the commit subject -- name the role, not the vendor (e.g. 'add the agent-CLI adapter')."
+fi
+
+# 2. Anywhere in the message: no trailer-shaped line ("Key: value") naming an AI vendor or tool --
+#    catches Co-Authored-By, Claude-Session, Generated-By, and any future variant of the same idea.
+if echo "${msg}" | grep -qiE "^[A-Za-z][A-Za-z0-9 _-]*:.*${vendor_pattern}"; then
+  fail "no trailer (Co-Authored-By, session link, etc.) naming an AI assistant is allowed, ever."
+fi
+
+# 3. Anywhere in the message: no free-text "generated with/by" marker or known AI-tool link.
+if echo "${msg}" | grep -qiE 'generated (with|by)|🤖|claude\.ai|chatgpt\.com|copilot\.microsoft\.com'; then
+  fail "no AI-tool 'generated with/by' marker or tool link is allowed in a commit message."
+fi
+
+# 4. Conventional Commits subject format.
+if ! echo "${subject}" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert)(\([^)]+\))?: .+'; then
+  fail "subject must follow Conventional Commits: type(scope): subject"
+fi
+
+# 5. No em dash / en dash anywhere in the message -- use a plain hyphen, comma, colon, or parentheses.
+if grep -qP '[\x{2013}\x{2014}]' "${msg_file}"; then
+  fail "no em dash or en dash (U+2014 / U+2013) in a commit message -- use a plain hyphen (-), comma, colon, or parentheses instead."
+fi

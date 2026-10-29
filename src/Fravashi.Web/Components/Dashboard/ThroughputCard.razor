@@ -1,0 +1,83 @@
+@namespace Fravashi.Web.Components.Dashboard
+@using System.Globalization
+@using Fravashi.Application.Sessions
+@using Fravashi.Domain.Insights
+@inherits InsightCard
+@inject ISessionStore Sessions
+
+@* Backlog 36, card 2. Two counts a day for a fortnight: sessions STARTED (the session store's own
+   rows) and turns COMPLETED (a persisted TurnCompleted event, which is the CLI's result line and so a
+   turn that actually finished, not one that was merely asked for). They are deliberately separate
+   series: a day of many sessions and few turns and a day of one session and many turns are different
+   days, and a single "activity" number would hide which one happened. *@
+
+<section class="dash-panel insight-card" aria-label="Throughput" data-testid="insight-throughput">
+    <div class="dash-panel-head">
+        <span>Throughput</span>
+        <span class="insight-period" data-testid="insight-throughput-period">@_period</span>
+    </div>
+
+    @if (_sessions == 0 && _turns == 0)
+    {
+        <p class="studio-muted insight-empty" data-testid="insight-throughput-empty">
+            Nothing yet: no sessions started and no turns completed in the last @DayCount days.
+        </p>
+    }
+    else
+    {
+        <p class="insight-headline" data-testid="insight-throughput-total">
+            <span class="insight-value">@Number(_sessions)</span>
+            <span class="insight-unit">session@(_sessions == 1 ? "" : "s") started</span>
+            <span class="insight-value">@Number(_turns)</span>
+            <span class="insight-unit">turn@(_turns == 1 ? "" : "s") completed</span>
+        </p>
+        <InsightBars Bars="_bars" Label="Sessions started and turns completed per day"
+                     Secondary="turns" TestId="insight-throughput-bars" />
+        <p class="studio-muted insight-note insight-legend">
+            <span class="insight-swatch insight-swatch-primary" aria-hidden="true"></span> sessions started
+            <span class="insight-swatch insight-swatch-secondary" aria-hidden="true"></span> turns completed
+        </p>
+    }
+</section>
+
+@code {
+    /// <summary>The window the item decided on.</summary>
+    public const int DayCount = 14;
+
+    private IReadOnlyList<InsightBars.Bar> _bars = [];
+    private int _sessions;
+    private int _turns;
+    private string _period = string.Empty;
+
+    protected override Task LoadAsync()
+    {
+        var today = DateOnly.FromDateTime(Clock.GetUtcNow().UtcDateTime);
+        var from = today.AddDays(-(DayCount - 1));
+        _period = PeriodText(from, today);
+
+        var started = Sessions.ReadSessionDays(from, today)
+            .ToDictionary(day => day.Day, day => day.SessionsStarted);
+        var turns = Sessions.ReadTurnDays(from, today)
+            .ToDictionary(day => day.Day, day => day.Count);
+
+        _sessions = started.Values.Sum();
+        _turns = turns.Values.Sum();
+
+        _bars = [.. Enumerable.Range(0, DayCount)
+            .Select(offset => from.AddDays(offset))
+            .Select(day => new InsightBars.Bar(
+                started.GetValueOrDefault(day),
+                turns.GetValueOrDefault(day),
+                Title(day, started.GetValueOrDefault(day), turns.GetValueOrDefault(day))))];
+
+        return Task.CompletedTask;
+    }
+
+    private static string Title(DateOnly day, int started, int turns)
+    {
+        var date = day.ToString("d MMM", CultureInfo.InvariantCulture);
+        return started == 0 && turns == 0
+            ? $"{date}: nothing"
+            : $"{date}: {started} started, {turns} turn{(turns == 1 ? "" : "s")} completed";
+    }
+}

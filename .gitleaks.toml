@@ -1,0 +1,12 @@
+# The secret scan of the public repository's CI (.github/workflows/ci.yml) reads this file from the tree's root.
+# It keeps every default rule. Test values that only LOOK like keys are written as concatenated pieces in the tests,
+# so no rule sees a key shape there; the one thing that cannot be rewritten is listed here.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Recorded agent CLI output: its bytes are evidence (ADR 0023), never edited."
+paths = [
+    '''tests/Fravashi\.Infrastructure\.Tests/Sessions/Fixtures/''',
+]

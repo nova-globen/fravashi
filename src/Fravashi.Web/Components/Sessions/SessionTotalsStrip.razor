@@ -1,0 +1,92 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Domain.AgentSessions
+
+@* Running totals across every session and every workspace (backlog 19): today, the current month and
+   all time, cost and billed tokens. It lives at the foot of the sessions list because that is where the
+   reader is already thinking about sessions, and it is labelled "all workspaces" because it deliberately
+   counts past the one this page is scoped to. The numbers are the sum of the same per-session figures
+   each session's strip shows, so a reader can add them up and get this.
+
+   Backlog 62 added the day row and the "of $X" suffixes. Spend the user cannot see until it stops a run
+   is the whole defect that item is about, so a configured ceiling is stated NEXT TO the spend it governs
+   rather than only on the settings page, and the row that has reached one says so in a word a reader
+   does not have to compare two numbers to get. UTC is named because the boundary is UTC and a reader in
+   any other offset would otherwise read the wrong day. *@
+<div class="session-totals" data-testid="session-totals">
+    <div class="session-totals-head">All workspaces</div>
+
+    <div class="session-totals-row @(Reached(AgentSpendPeriod.Day) ? "at-limit" : string.Empty)"
+         data-testid="session-totals-today">
+        <span class="session-totals-label">Today (UTC)</span>
+        <span class="session-totals-cost" data-testid="session-totals-today-cost">@SessionUsageFormat.Cost(Totals.Today.CostUsd)</span>
+        @if (Limits.PerDayUsd is { } day)
+        {
+            <span class="session-totals-limit" data-testid="session-totals-today-limit"
+                  title="@LimitTitle(Totals.Today.CostUsd, day, "today")">
+                of @AgentSpendRefusal.Money(day)@(Reached(AgentSpendPeriod.Day) ? " - reached" : string.Empty)
+            </span>
+        }
+        <span class="session-totals-sep" aria-hidden="true">&middot;</span>
+        <span class="session-totals-tokens" data-testid="session-totals-today-tokens"
+              title="@Tokens(Totals.Today) billed tokens across @Sessions(Totals.Today.Sessions) today">
+            @SessionUsageFormat.Tokens(Totals.Today.TotalTokens) tokens
+        </span>
+    </div>
+
+    <div class="session-totals-row @(Reached(AgentSpendPeriod.Month) ? "at-limit" : string.Empty)"
+         data-testid="session-totals-month">
+        <span class="session-totals-label">This month (UTC)</span>
+        <span class="session-totals-cost" data-testid="session-totals-month-cost">@SessionUsageFormat.Cost(Totals.Month.CostUsd)</span>
+        @if (Limits.PerMonthUsd is { } month)
+        {
+            <span class="session-totals-limit" data-testid="session-totals-month-limit"
+                  title="@LimitTitle(Totals.Month.CostUsd, month, "this month")">
+                of @AgentSpendRefusal.Money(month)@(Reached(AgentSpendPeriod.Month) ? " - reached" : string.Empty)
+            </span>
+        }
+        <span class="session-totals-sep" aria-hidden="true">&middot;</span>
+        <span class="session-totals-tokens" data-testid="session-totals-month-tokens"
+              title="@Tokens(Totals.Month) billed tokens across @Sessions(Totals.Month.Sessions) this month">
+            @SessionUsageFormat.Tokens(Totals.Month.TotalTokens) tokens
+        </span>
+    </div>
+
+    <div class="session-totals-row" data-testid="session-totals-alltime">
+        <span class="session-totals-label">All time</span>
+        <span class="session-totals-cost" data-testid="session-totals-alltime-cost">@SessionUsageFormat.Cost(Totals.AllTime.CostUsd)</span>
+        <span class="session-totals-sep" aria-hidden="true">&middot;</span>
+        <span class="session-totals-tokens" data-testid="session-totals-alltime-tokens"
+              title="@Tokens(Totals.AllTime) billed tokens across @Sessions(Totals.AllTime.Sessions) all time">
+            @SessionUsageFormat.Tokens(Totals.AllTime.TotalTokens) tokens
+        </span>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public SessionUsageTotals Totals { get; set; } = SessionUsageTotals.Empty;
+
+    /// <summary>
+    /// The ceilings to show these figures against (backlog 62), or none. Absent by default so a surface
+    /// that has no limits to show renders exactly what it rendered before.
+    /// </summary>
+    [Parameter]
+    public AgentSpendLimits Limits { get; set; } = AgentSpendLimits.None;
+
+    /// <summary>
+    /// Asked of the SAME guard that refuses a run, never of a comparison written again here: a strip
+    /// that said "reached" on a different rule from the one that stops the agent would be worse than a
+    /// strip that said nothing.
+    /// </summary>
+    private bool Reached(AgentSpendPeriod period) =>
+        AgentSpendGuard.Refuse(Totals, Limits)?.Period == period;
+
+    private static string LimitTitle(decimal spent, decimal limit, string when) =>
+        $"{AgentSpendRefusal.Money(spent)} spent {when} against a {AgentSpendRefusal.Money(limit)} limit. "
+        + "Set in Settings > Agents > Spending and limits; days and months are counted in UTC.";
+
+    private static string Tokens(UsageTotal total) =>
+        total.TotalTokens.ToString("N0", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string Sessions(int count) => count == 1 ? "1 session" : $"{count} sessions";
+}

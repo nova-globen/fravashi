@@ -1,0 +1,8 @@
+@page "/onboarding"
+@layout OnboardingLayout
+
+@* The bare /onboarding route. It carries no content of its own - OnboardingLayout's guard resolves where the
+   user should be (the furthest first-run step, or a Settings re-entry, or the studio when already complete) and
+   redirects. This page exists only so the route matches; the layout does the work. *@
+
+<PageTitle>@(ProductName.Short) · Setup</PageTitle>

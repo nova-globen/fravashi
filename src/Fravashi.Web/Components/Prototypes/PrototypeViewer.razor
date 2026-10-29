@@ -1,0 +1,867 @@
+@using System.Globalization
+@using Fravashi.Application.Mockups
+@using Fravashi.Application.Prototypes
+@using Fravashi.Application.Verification
+@using Fravashi.Application.Wiki
+@using Fravashi.Domain.Wiki
+@using Microsoft.JSInterop
+@implements IAsyncDisposable
+@inject IWikiDocuments Wiki
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+
+@* Backlog 213 (plan @38): a prototype's page, rendered from its pinned design and its overlay, shown in a frame that
+   is a security boundary of its own. The guard on an overlay's fragments is a pattern list and can be passed, so the
+   frame holds whatever reaches the page: sandboxed with scripts only (an opaque origin, so nothing in it reaches the
+   studio; no navigation of the window, no popups, no forms, no modals), and the page's content security policy given
+   to the frame as well, which also refuses any document the frame might be navigated to. The frame cannot be scripted
+   from out here, which is the point, so choosing a screen renders the page again starting on it.
+
+   Backlog 214 (plan @39): Edit mode. The page is rendered as an EDIT render (the same script, hash and policy; the
+   root says edit), so a click in it selects instead of acting and the page posts the anchor it hit. That message is
+   heard by prototypeEdit.js only while Edit is on, only from this frame, only in its one shape, and SelectFromPage
+   takes only an anchor the current render emitted. The panel turns each change into ONE overlay operation
+   (PrototypeEdits), kept with undo and redo by a PrototypeEditSession, and Save writes against the version opened.
+
+   Backlog 216 (plan @41): Regenerate, offered when the design has a newer version, renders from it, reapplies the
+   overlay and moves the pin (PrototypeRegenerate), keeping every operation. What no longer places is listed with Drop
+   and Re-anchor, both session edits; Re-anchor takes its new element from the page's same one selection message. *@
+
+@if (_editing && _session is not null)
+{
+    <NavigationLock OnBeforeInternalNavigation="OnNavigating" />
+}
+
+<div class="prototype-viewer" data-testid="prototype-viewer">
+    @if (Problem is { } problem)
+    {
+        <div class="work-item-empty" data-testid="prototype-viewer-problem">@problem</div>
+    }
+    else if (Design is { } design && _result is { } result)
+    {
+        <div class="mk-controls">
+            <label class="mk-control">
+                <span>Screen</span>
+                <select class="studio-input" data-testid="prototype-viewer-screen" @onchange="ChooseScreen">
+                    @for (var i = 0; i < design.Screens.Count; i++)
+                    {
+                        <option value="@i" selected="@(i == _screen)">@ScreenName(design.Screens[i], i)</option>
+                    }
+                </select>
+            </label>
+            <label class="mk-control">
+                <span>Viewport</span>
+                <select class="studio-input" data-testid="prototype-viewer-viewport" @onchange="ChooseViewport">
+                    <option value="" selected="@(_viewport is null)">Full width</option>
+                    @foreach (var viewport in design.Viewports)
+                    {
+                        <option value="@viewport.Name" selected="@(viewport.Name == _viewport)">
+                            @($"{viewport.Name} ({viewport.Width.ToString(CultureInfo.InvariantCulture)} px)")
+                        </option>
+                    }
+                </select>
+            </label>
+            @if (!_editing)
+            {
+                <button type="button" class="studio-btn" data-testid="prototype-viewer-reload" @onclick="ReloadAsync">
+                    Reload from the design
+                </button>
+                @if (Item is not null && Document is not null)
+                {
+                    <button type="button" class="studio-btn" data-testid="prototype-edit" @onclick="BeginEdit">Edit</button>
+                    @if (Latest is { } latest && latest.Version > Document.Design.Version)
+                    {
+                        <button type="button" class="studio-btn" data-testid="prototype-regenerate" disabled="@_regenerating"
+                                title="Render the page from the design's newest version, keeping every direct edit" @onclick="RegenerateAsync">
+                            @($"Regenerate from version {latest.Version.ToString(CultureInfo.InvariantCulture)}")
+                        </button>
+                    }
+                }
+            }
+        </div>
+
+        @if (_notice is { } notice)
+        {
+            <div class="work-item-approved-design-changed" role="status" data-testid="prototype-regenerate-status">@notice</div>
+        }
+
+        @if (_editing && _session is { } session)
+        {
+            <div class="mk-editor-bar" role="toolbar" aria-label="Prototype edits" data-mockup-editor @onkeydown="OnEditorKey">
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-edit-done" @onclick="Done">Done</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-undo" disabled="@(!session.CanUndo)"
+                        title="Undo (Ctrl+Z)" @onclick="Undo">Undo</button>
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-redo" disabled="@(!session.CanRedo)"
+                        title="Redo (Ctrl+Y)" @onclick="Redo">Redo</button>
+                <button type="button" class="studio-btn" data-testid="prototype-save" disabled="@_saving" title="Save (Ctrl+S)"
+                        @onclick="SaveAsync">Save</button>
+                <span class="mk-editor-status" data-testid="prototype-edit-status">
+                    @(_status ?? (session.IsDirty ? "Unsaved edits" : $"Version {_opened!.Version.ToString(CultureInfo.InvariantCulture)}, no edits"))
+                </span>
+            </div>
+
+            @if (_leaving is not null)
+            {
+                <div class="mk-editor-banner" role="alertdialog" aria-label="Unsaved edits" data-testid="prototype-leave">
+                    <span>This prototype has edits that are not saved. Leaving Edit now loses them.</span>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-leave-discard" @onclick="DiscardAndLeave">Leave without saving</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-leave-stay" @onclick="() => _leaving = null">Stay</button>
+                </div>
+            }
+
+            @if (_stale is { } stale)
+            {
+                <div class="mk-editor-banner" role="alert" data-testid="prototype-stale">
+                    <span>@stale</span>
+                    <button type="button" class="studio-btn" data-testid="prototype-reload-discard" @onclick="ReloadDiscardingAsync">Reload, discarding my edits</button>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-keep" @onclick="() => _stale = null">Keep editing</button>
+                </div>
+            }
+
+            @if (_reanchoring is { } moving)
+            {
+                <div class="mk-editor-banner" role="status" data-testid="prototype-reanchor-pick">
+                    <span>@($"Click the element in the page this edit should apply to: {PrototypeOverlayDescription.Describe(moving)}")</span>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-reanchor-cancel" @onclick="() => _reanchoring = null">Cancel</button>
+                </div>
+            }
+
+            @if (_refusal is { } refusal)
+            {
+                <div class="session-error" role="alert" data-testid="prototype-edit-refusal">
+                    <span class="session-error-mark" aria-hidden="true">!</span>
+                    <span class="session-error-text">@refusal</span>
+                </div>
+            }
+
+            <div class="prototype-edit">
+                <div class="prototype-stage">
+                    <iframe @ref="_frame" class="prototype-frame" data-testid="prototype-frame" title="The prototype"
+                            sandbox="@Sandbox" csp="@PrototypeRenderer.ContentSecurityPolicy" referrerpolicy="no-referrer"
+                            style="@FrameStyle(design)" srcdoc="@result.Html"></iframe>
+                </div>
+
+                <aside class="prototype-panel" aria-label="Edit the page" data-testid="prototype-panel" data-mockup-editor @onkeydown="OnEditorKey">
+                    @if (Selected(result) is { } node)
+                    {
+                        <h3 class="work-item-section-title" data-testid="prototype-selected">@SelectedName(node)</h3>
+                        <label class="mk-inspector-label" @key="@($"text:{SelectedName(node)}:{_edits}")">
+                            <span>Text</span>
+                            <input class="studio-input" data-testid="prototype-edit-text" value="@node.Text"
+                                   @onchange="e => Edit(PrototypeEdits.SetText(node.Anchor, Text(e)))" />
+                        </label>
+                        <div class="prototype-panel-styles">
+                            @foreach (var property in PrototypeEdits.Styles)
+                            {
+                                var name = property;
+                                var current = CurrentStyle(session, node, name);
+                                <label class="mk-inspector-label" @key="@($"{name}:{SelectedName(node)}:{_edits}")">
+                                    <span>@StyleLabel(name)</span>
+                                    @if (Choices(name) is { } choices)
+                                    {
+                                        <select class="studio-input" data-testid="prototype-edit-style" data-property="@name"
+                                                @onchange="e => Edit(PrototypeEdits.SetStyle(node.Anchor, name, Text(e)))">
+                                            <option value="" selected="@(current is null)">(as designed)</option>
+                                            @foreach (var choice in choices)
+                                            {
+                                                <option value="@choice" selected="@(current == choice)">@choice</option>
+                                            }
+                                            @if (current is { } odd && !choices.Contains(odd))
+                                            {
+                                                <option value="@odd" selected>@odd</option>
+                                            }
+                                        </select>
+                                    }
+                                    else
+                                    {
+                                        <input class="studio-input" data-testid="prototype-edit-style" data-property="@name" value="@current"
+                                               spellcheck="false" placeholder="(as designed)"
+                                               @onchange="e => Edit(PrototypeEdits.SetStyle(node.Anchor, name, Text(e)))" />
+                                    }
+                                </label>
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <p class="studio-muted" data-testid="prototype-select-hint">Click an element in the page to edit it.</p>
+                    }
+
+                    <label class="mk-inspector-label">
+                        <span>A rule for the whole page</span>
+                        <textarea class="studio-input" data-testid="prototype-page-rule" spellcheck="false"
+                                  placeholder=".mk-button { border-radius: 1rem; }" @bind="_rule"></textarea>
+                    </label>
+                    <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-page-rule-add" @onclick="AddRule">Add the rule</button>
+                    <p class="mk-inspector-note">Each change is one direct edit kept on top of the design. Undo takes the last one back.</p>
+                </aside>
+            </div>
+        }
+        else
+        {
+            <div class="prototype-stage">
+                <iframe class="prototype-frame" data-testid="prototype-frame" title="The prototype"
+                        sandbox="@Sandbox" csp="@PrototypeRenderer.ContentSecurityPolicy" referrerpolicy="no-referrer"
+                        style="@FrameStyle(design)" srcdoc="@result.Html"></iframe>
+            </div>
+        }
+
+        <h3 class="work-item-section-title">Not placed</h3>
+        @if (result.Unplaced.Count == 0)
+        {
+            <div class="work-item-empty" data-testid="prototype-unplaced-none">Every direct edit found its place.</div>
+        }
+        else
+        {
+            @* Backlog 216 (plan @41): each is kept in the prototype until a person drops it or re-anchors it, and both
+               are edits of the session, undone like any other and stored only by Save. *@
+            <ul class="work-item-list" data-testid="prototype-unplaced">
+                @foreach (var operation in result.Unplaced)
+                {
+                    var unplaced = operation;
+                    <li data-testid="prototype-unplaced-item">
+                        <span>@PrototypeOverlayDescription.Describe(unplaced)</span>
+                        @if (Item is not null && Document is not null)
+                        {
+                            @if (unplaced is not PrototypePageCssOperation)
+                            {
+                                <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-unplaced-reanchor"
+                                        @onclick="() => BeginReanchor(unplaced)">Re-anchor</button>
+                            }
+                            <button type="button" class="studio-btn studio-btn-alt" data-testid="prototype-unplaced-drop"
+                                    @onclick="() => DropUnplaced(unplaced)">Drop</button>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+
+        <h3 class="work-item-section-title">Not shown by the page</h3>
+        @if (result.UnexpressedOverrides.Count == 0)
+        {
+            <div class="work-item-empty" data-testid="prototype-unexpressed-none">
+                The page shows every override the design describes.
+            </div>
+        }
+        else
+        {
+            <ul class="work-item-list" data-testid="prototype-unexpressed">
+                @foreach (var unexpressed in result.UnexpressedOverrides)
+                {
+                    <li data-testid="prototype-unexpressed-item">@Describe(unexpressed)</li>
+                }
+            </ul>
+        }
+    }
+</div>
+
+@code {
+    /// <summary>
+    /// The frame's sandbox: scripts only, for the page's own wiring. No allow-same-origin (an opaque origin), no
+    /// allow-top-navigation, no allow-popups, no allow-forms, no allow-modals.
+    /// </summary>
+    public const string Sandbox = "allow-scripts";
+
+    /// <summary>The design at the version the prototype pins, or null when there is none to render.</summary>
+    [Parameter] public MockupDocument? Design { get; set; }
+
+    /// <summary>Why nothing can be rendered, in words; shown instead of the frame.</summary>
+    [Parameter] public string? Problem { get; set; }
+
+    /// <summary>The prototype's overlay.</summary>
+    [Parameter] public IReadOnlyList<PrototypeOperation> Overlay { get; set; } = [];
+
+    /// <summary>The prototype as stored, which an edit is saved against; Edit is offered only with it and <see cref="Document"/>.</summary>
+    [Parameter] public WikiItem? Item { get; set; }
+
+    /// <summary>The prototype's document as read from <see cref="Item"/>.</summary>
+    [Parameter] public PrototypeDocument? Document { get; set; }
+
+    /// <summary>
+    /// The design as it is now (backlog 216); Regenerate is offered when its version is newer than the pin. The page's
+    /// own lookup for its "changed since" banner, so there is one notion of newer.
+    /// </summary>
+    [Parameter] public WikiItem? Latest { get; set; }
+
+    /// <summary>Reads the prototype and its pinned design again; the page renders anew from what it finds.</summary>
+    [Parameter] public EventCallback OnReload { get; set; }
+
+    private MockupDocument? _rendered;
+    private object? _renderedOverlay;
+    private int _renderedScreen = -1;
+    private bool _renderedEdit;
+    private (string?, DesignPart, string?) _renderedSelected;
+    private int _renderedEdits = -1;
+    private PrototypeRenderResult? _result;
+    private int _screen;
+    private string? _viewport;
+
+    // ---- Edit mode (backlog 214) ----
+    private bool _editing;
+    private PrototypeEditSession? _session;
+    private WikiItem? _opened;
+    private string? _selected;
+    private DesignPart _selectedPart;
+    private string? _selectedColumn;
+    private int _edits;
+    private string? _status;
+    private string? _stale;
+    private string? _refusal;
+    private string? _leaving;
+    private bool _saving;
+    private string _rule = string.Empty;
+    private ElementReference _frame;
+    private DotNetObjectReference<PrototypeViewer>? _self;
+    private int? _listener;
+
+    // ---- Regenerate and settling (backlog 216) ----
+    private bool _regenerating;
+    private string? _notice;
+    private PrototypeOperation? _reanchoring;
+
+    private bool Dirty => _editing && _session?.IsDirty == true;
+
+    protected override void OnParametersSet()
+    {
+        if (Design is not { } design)
+        {
+            _result = null;
+            _rendered = null;
+            return;
+        }
+
+        _screen = Math.Min(_screen, design.Screens.Count - 1);
+        if (_viewport is not null && design.Viewports.All(v => v.Name != _viewport))
+        {
+            _viewport = null;
+        }
+
+        if (_reopen && _editing)
+        {
+            Reopen();
+        }
+
+        Render();
+    }
+
+    private void Render()
+    {
+        // While editing the frame shows the session's overlay, which changes in place, so an edit is counted rather
+        // than compared by reference.
+        var overlay = _editing && _session is { } session ? (object)session : Overlay;
+        if (Design is not { } design
+            || (ReferenceEquals(design, _rendered) && ReferenceEquals(overlay, _renderedOverlay) && _screen == _renderedScreen
+                && _editing == _renderedEdit && Selection == _renderedSelected && _edits == _renderedEdits))
+        {
+            return;
+        }
+
+        _result = PrototypeRenderer.Render(
+            design,
+            _editing && _session is { } editing ? editing.Overlay : Overlay,
+            new PrototypeRenderOptions(_screen, _editing, _editing ? _selected : null, _selectedPart, _selectedColumn));
+        _rendered = design;
+        _renderedOverlay = overlay;
+        _renderedScreen = _screen;
+        _renderedEdit = _editing;
+        _renderedSelected = Selection;
+        _renderedEdits = _edits;
+    }
+
+    /// <summary>What is selected, node and part together, as the render last outlined it.</summary>
+    private (string?, DesignPart, string?) Selection => (_selected, _selectedPart, _selectedColumn);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        try
+        {
+            // The page's messages are heard only while Edit is on: one listener per viewer, added once the frame
+            // is drawn and removed as soon as Edit is off (and in DisposeAsync).
+            if (_editing && _listener is null && _result is not null)
+            {
+                _self ??= DotNetObjectReference.Create(this);
+                _listener = await JS.InvokeAsync<int>("fravashiPrototypeEdit.attach", _frame, _self);
+            }
+            else if (!_editing && _listener is { } handle)
+            {
+                _listener = null;
+                await JS.InvokeVoidAsync("fravashiPrototypeEdit.detach", handle);
+            }
+        }
+        catch (JSDisconnectedException)
+        {
+            // The circuit is gone, and the page's window with it, so there is no listener left to remove.
+        }
+    }
+
+    /// <summary>
+    /// The page's selection, as prototypeEdit.js hands it over after checking the message's source and shape. Taken
+    /// only while editing and only for an anchor the CURRENT render emitted; the anchor is used as a key, nothing more.
+    /// Backlog 238 (plan @52): a click on a node's PART carries the part's name, and a column header's column. It is
+    /// taken only when the current render emitted that very part, so a part the page did not draw selects nothing.
+    /// </summary>
+    [JSInvokable]
+    public Task SelectFromPage(string? anchor, string? part = null, string? column = null) => InvokeAsync(() =>
+    {
+        var named = DesignPart.Node;
+        if (!_editing || anchor is null || _result is not { } result
+            || (part is not null && !PrototypeVocabulary.TryParsePart(part, out named))
+            || result.Find(anchor, named, column) is not { } node)
+        {
+            return;
+        }
+
+        // Re-anchoring (backlog 216): the element picked is the operation's new anchor. The operation is found by
+        // reference, so one an undo has taken out in between is not there to move and the click only selects.
+        if (_reanchoring is { } moving && _session is { } session)
+        {
+            _reanchoring = null;
+            var index = IndexOf(session, moving);
+            if (index >= 0 && session.Reanchor(index, node.Anchor))
+            {
+                _status = null;
+                _edits++;
+            }
+        }
+
+        _selected = anchor;
+        _selectedPart = named;
+        _selectedColumn = column;
+        _refusal = null;
+        Render();
+        StateHasChanged();
+    });
+
+    private PrototypeRenderedAnchor? Selected(PrototypeRenderResult result) =>
+        _selected is { } key ? result.Find(key, _selectedPart, _selectedColumn) : null;
+
+    /// <summary>The selection in words: "screen directory", or for a part "title of screen directory".</summary>
+    private static string SelectedName(PrototypeRenderedAnchor node) => node.Anchor.Part switch
+    {
+        DesignPart.Node => $"{node.Type} {node.Key}",
+        DesignPart.ColumnHeader => $"column header {node.Anchor.Column} of {node.Type} {node.Key}",
+        var part => $"{PrototypeVocabulary.Words(part)} of {node.Type} {node.Key}",
+    };
+
+    private void ChooseScreen(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
+        {
+            _screen = index;
+            Render();
+        }
+    }
+
+    private void ChooseViewport(ChangeEventArgs e)
+    {
+        var name = e.Value?.ToString();
+        _viewport = string.IsNullOrEmpty(name) ? null : name;
+    }
+
+    private async Task ReloadAsync()
+    {
+        // Rendered anew even when the page hands back equal objects: reloading is asking for a fresh page.
+        _rendered = null;
+        await OnReload.InvokeAsync();
+        Render();
+    }
+
+    // ---- editing ---------------------------------------------------------------------------------------------
+
+    private void BeginEdit()
+    {
+        if (Item is not { } item || Document is not { } document)
+        {
+            return;
+        }
+
+        _session = PrototypeEditSession.Open(document);
+        _opened = item;
+        _editing = true;
+        _selected = null;
+        _selectedPart = DesignPart.Node;
+        _selectedColumn = null;
+        _status = null;
+        _stale = null;
+        _refusal = null;
+        _leaving = null;
+        _edits++;
+        Render();
+    }
+
+    private void Done()
+    {
+        if (Dirty)
+        {
+            _leaving = "done";
+            return;
+        }
+
+        StopEditing();
+    }
+
+    private void DiscardAndLeave()
+    {
+        var target = _leaving;
+        StopEditing();
+        if (target is not null && target != "done")
+        {
+            Nav.NavigateTo(target);
+        }
+    }
+
+    private void StopEditing()
+    {
+        _editing = false;
+        _session = null;
+        _opened = null;
+        _selected = null;
+        _selectedPart = DesignPart.Node;
+        _selectedColumn = null;
+        _status = null;
+        _stale = null;
+        _refusal = null;
+        _leaving = null;
+        _reanchoring = null;
+        _edits++;
+        Render();
+    }
+
+    private void OnNavigating(LocationChangingContext context)
+    {
+        if (!Dirty)
+        {
+            return;
+        }
+
+        context.PreventNavigation();
+        _leaving = context.TargetLocation;
+        StateHasChanged();
+    }
+
+    private void Edit(PrototypeEditResult edit)
+    {
+        if (_session is not { } session)
+        {
+            return;
+        }
+
+        if (edit.Operation is not { } operation)
+        {
+            _refusal = edit.Refusal;
+            return;
+        }
+
+        session.Apply(operation);
+        _refusal = null;
+        _status = null;
+        _edits++;
+        Render();
+    }
+
+    private void AddRule()
+    {
+        var edit = PrototypeEdits.PageRule(_rule);
+        Edit(edit);
+        if (edit.Operation is not null)
+        {
+            _rule = string.Empty;
+        }
+    }
+
+    private void Undo()
+    {
+        if (_session?.Undo() == true)
+        {
+            _reanchoring = null;
+            _status = null;
+            _refusal = null;
+            _edits++;
+            Render();
+        }
+    }
+
+    private void Redo()
+    {
+        if (_session?.Redo() == true)
+        {
+            _reanchoring = null;
+            _status = null;
+            _refusal = null;
+            _edits++;
+            Render();
+        }
+    }
+
+    // ---- regenerating and settling (backlog 216, plan @41) ----------------------------------------------------
+
+    /// <summary>
+    /// Renders from the design's newer version, reapplies the overlay and moves the pin against the version read,
+    /// keeping every operation; the page then reads again and lists what no longer places.
+    /// </summary>
+    private async Task RegenerateAsync()
+    {
+        if (_editing || _regenerating || Item is not { } item || Document is not { } document)
+        {
+            return;
+        }
+
+        _regenerating = true;
+        try
+        {
+            var result = await PrototypeRegenerate.RunAsync(Wiki, item, document, Latest);
+            switch (result.Outcome)
+            {
+                case PrototypeRegenerateOutcome.Regenerated:
+                    var pinned = Latest!.Version.ToString(CultureInfo.InvariantCulture);
+                    _notice = result.Unplaced.Count switch
+                    {
+                        0 => $"Regenerated from version {pinned} of the design. Every direct edit found its place.",
+                        1 => $"Regenerated from version {pinned} of the design. 1 direct edit no longer finds its place: it is kept, listed under Not placed, until you drop it or re-anchor it.",
+                        var n => $"Regenerated from version {pinned} of the design. {n.ToString(CultureInfo.InvariantCulture)} direct edits no longer find their place: they are kept, listed under Not placed, until you drop or re-anchor each.",
+                    };
+                    _rendered = null;
+                    await OnReload.InvokeAsync();
+                    break;
+                case PrototypeRegenerateOutcome.Current:
+                    _notice = "The prototype is already pinned to the design's newest version. Nothing was written.";
+                    break;
+                default:
+                    _notice = result.Problem;
+                    break;
+            }
+        }
+        finally
+        {
+            _regenerating = false;
+        }
+    }
+
+    /// <summary>Starts picking the element an unplaced operation should move to; the page's next selection is it.</summary>
+    private void BeginReanchor(PrototypeOperation operation)
+    {
+        if (!EnsureEditing(operation))
+        {
+            return;
+        }
+
+        _reanchoring = operation;
+        _refusal = null;
+    }
+
+    /// <summary>Takes an unplaced operation out of the session's overlay; Undo puts it back, Save stores it.</summary>
+    private void DropUnplaced(PrototypeOperation operation)
+    {
+        if (!EnsureEditing(operation) || _session is not { } session)
+        {
+            return;
+        }
+
+        var index = IndexOf(session, operation);
+        if (index >= 0 && session.Drop(index))
+        {
+            if (ReferenceEquals(_reanchoring, operation))
+            {
+                _reanchoring = null;
+            }
+
+            _status = null;
+            _refusal = null;
+            _edits++;
+            Render();
+        }
+    }
+
+    /// <summary>
+    /// Settling is an edit, so it starts Edit when it is off. The session opens from the same document the view
+    /// rendered, so the operation is the same instance in it.
+    /// </summary>
+    private bool EnsureEditing(PrototypeOperation operation)
+    {
+        if (!_editing)
+        {
+            BeginEdit();
+        }
+
+        return _editing && _session is { } session && IndexOf(session, operation) >= 0;
+    }
+
+    private static int IndexOf(PrototypeEditSession session, PrototypeOperation operation)
+    {
+        for (var i = 0; i < session.Overlay.Count; i++)
+        {
+            if (ReferenceEquals(session.Overlay[i], operation))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>The panel's keys, as the mockup editor's: undo, redo and save.</summary>
+    private async Task OnEditorKey(KeyboardEventArgs e)
+    {
+        if (!(e.CtrlKey || e.MetaKey) || _session is null)
+        {
+            return;
+        }
+
+        switch (e.Key.ToLowerInvariant())
+        {
+            case "z" when e.ShiftKey:
+            case "y":
+                Redo();
+                break;
+            case "z":
+                Undo();
+                break;
+            case "s":
+                await SaveAsync();
+                break;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_session is not { } session || _opened is not { } opened || _saving)
+        {
+            return;
+        }
+
+        _saving = true;
+        try
+        {
+            var result = await PrototypeSave.SaveAsync(Wiki, opened, session);
+            switch (result.Outcome)
+            {
+                case PrototypeSaveOutcome.Unchanged:
+                    _status = "Nothing to save: the prototype is the one that was opened.";
+                    break;
+                case PrototypeSaveOutcome.Saved:
+                    _opened = result.Item;
+                    _stale = null;
+                    _status = $"Saved as version {result.Item!.Version.ToString(CultureInfo.InvariantCulture)}.";
+                    // The page around the viewer lists the overlay as stored; it reads it again.
+                    await OnReload.InvokeAsync();
+                    break;
+                case PrototypeSaveOutcome.Stale:
+                    var now = await Wiki.GetAsync(opened.Id);
+                    _stale = now is null
+                        ? "This prototype was deleted since it was opened. Nothing was written."
+                        : $"Somebody saved this prototype since it was opened (you opened version {opened.Version.ToString(CultureInfo.InvariantCulture)}, it is now version {now.Version.ToString(CultureInfo.InvariantCulture)}). Nothing was written.";
+                    break;
+                default:
+                    _refusal = string.Join(" ", result.Errors.Select(e => e.Message));
+                    break;
+            }
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    /// <summary>
+    /// Drops the edits and opens the prototype again as it is stored now. The page reads it again, and what it read
+    /// arrives as this viewer's next parameters, which is where the session is opened anew (<see cref="Reopen"/>).
+    /// </summary>
+    private async Task ReloadDiscardingAsync()
+    {
+        _reopen = true;
+        await OnReload.InvokeAsync();
+    }
+
+    private bool _reopen;
+
+    private void Reopen()
+    {
+        _reopen = false;
+        if (Item is not { } item || Document is not { } document)
+        {
+            StopEditing();
+            return;
+        }
+
+        _session = PrototypeEditSession.Open(document);
+        _opened = item;
+        _stale = null;
+        _refusal = null;
+        _status = "Reloaded the prototype as it is stored now.";
+        _edits++;
+    }
+
+    // ---- words -----------------------------------------------------------------------------------------------
+
+    /// <summary>The last value this session's overlay sets for <paramref name="property"/> on the node, if any.</summary>
+    private static string? CurrentStyle(PrototypeEditSession session, PrototypeRenderedAnchor node, string property)
+    {
+        string? value = null;
+        foreach (var operation in session.Overlay)
+        {
+            if (operation is PrototypeSetCssOperation css && Same(css.Anchor, node.Anchor)
+                && css.Properties.TryGetValue(property, out var set))
+            {
+                value = set;
+            }
+        }
+
+        return value;
+    }
+
+    private static bool Same(PrototypeAnchor a, PrototypeAnchor b) =>
+        a.Part == b.Part && a.Column == b.Column
+        && ((a.Id is not null && a.Id == b.Id) || (a.Path is not null && a.Path == b.Path));
+
+    private static IReadOnlyList<string>? Choices(string property) => property switch
+    {
+        "font-weight" => ["normal", "bold", "300", "400", "500", "600", "700", "800"],
+        "text-align" => ["left", "center", "right", "justify"],
+        _ => null,
+    };
+
+    private static string StyleLabel(string property) => property switch
+    {
+        "color" => "Colour",
+        "background-color" => "Background",
+        "font-size" => "Font size",
+        "font-weight" => "Font weight",
+        "padding" => "Padding",
+        "margin" => "Margin",
+        "text-align" => "Alignment",
+        _ => property,
+    };
+
+    private static string Text(ChangeEventArgs e) => e.Value?.ToString() ?? string.Empty;
+
+    private string FrameStyle(MockupDocument design) =>
+        design.Viewports.FirstOrDefault(v => v.Name == _viewport) is { } viewport
+            ? $"width: {viewport.Width.ToString(CultureInfo.InvariantCulture)}px"
+            : "width: 100%";
+
+    private static string ScreenName(MockupNode screen, int index) =>
+        screen.Text ?? screen.Id ?? $"Screen {(index + 1).ToString(CultureInfo.InvariantCulture)}";
+
+    private static string Describe(PrototypeUnexpressedOverride unexpressed) =>
+        unexpressed.State is { } state
+            ? $"{unexpressed.Anchor}: {unexpressed.Property} in the {state} state"
+            : $"{unexpressed.Anchor}: {unexpressed.Property} at the {unexpressed.Viewport} viewport";
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_listener is { } handle)
+        {
+            _listener = null;
+            try
+            {
+                await JS.InvokeVoidAsync("fravashiPrototypeEdit.detach", handle);
+            }
+            catch (JSDisconnectedException)
+            {
+                // The circuit is gone, and so is the window the listener was on.
+            }
+        }
+
+        _self?.Dispose();
+    }
+}

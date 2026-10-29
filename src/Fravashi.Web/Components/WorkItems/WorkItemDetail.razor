@@ -1,0 +1,542 @@
+@namespace Fravashi.Web.Components.WorkItems
+@using Fravashi.Application.Wiki
+@using Fravashi.Domain.AgentSessions
+@using Fravashi.Domain.WorkItems
+@using Fravashi.Domain.WorkItems.AgentLayer
+
+@* Backlog 38: one item, whole. Every field the model carries is on this page INCLUDING the agent layer,
+   because the acceptance criteria and the guardrails are what an unattended session is held to, and a field
+   a person cannot see is a field nobody can correct. Links are navigable from both ends: each edge is read
+   from THIS item (WorkItemLink.ReadingFrom), so the same stored edge says "blocks" here and "blocked by"
+   on the other item, and either row opens the other end. The links and the linked conversations are in the
+   related-items sidebar (WorkItemRelated); the full evidence records stay here and the sidebar jumps to them. *@
+@* Requested 2026-10-22 (related items sidebar): the item on the left and everything related to it in a column on
+   the right, which stacks under the item when the body pane is narrow (a container query on .work-item-page, so it
+   follows the pane and not the window, whatever width the board's own sidebar is dragged to). *@
+<div class="work-item-page" data-testid="work-item-page">
+<div class="work-item-page-grid">
+<div class="work-item-detail" data-testid="work-item-detail">
+    <div class="work-item-detail-head">
+        <div class="work-item-detail-heading">
+            <span class="work-item-detail-number">#@Item.Number</span>
+            <span class="work-item-detail-title">@Item.Title</span>
+        </div>
+        <div class="work-item-detail-actions">
+            <select class="studio-input" data-testid="work-item-transition" @onchange="OnTransition">
+                @foreach (var status in Statuses)
+                {
+                    <option value="@StableNames.ToName(status)" selected="@(status == Item.Status)">
+                        @Label(status)
+                    </option>
+                }
+            </select>
+            @if (Item.MarkedForAutopilot)
+            {
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-unmark-autopilot"
+                        @onclick="OnUnmarkAutopilot">Unmark</button>
+            }
+            else
+            {
+                <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-mark-autopilot"
+                        disabled="@(Item.Status != WorkItemStatus.Ready)"
+                        title="@(Item.Status != WorkItemStatus.Ready ? "Only a Ready item can be marked for autopilot." : null)"
+                        @onclick="OnMarkAutopilot">Mark for autopilot</button>
+            }
+            <button type="button" class="studio-btn" data-testid="work-item-edit" @onclick="OnEdit">Edit</button>
+        </div>
+    </div>
+
+    <div class="work-item-chips">
+        <span class="work-item-chip" data-testid="work-item-status">@Label(Item.Status)</span>
+        <span class="work-item-chip">@Item.Level</span>
+        <span class="work-item-chip">@Item.Kind</span>
+        @if (Item.Priority is { } priority)
+        {
+            <span class="work-item-chip">@priority</span>
+        }
+        @if (Item.Resolution is { } resolution)
+        {
+            <span class="work-item-chip">@resolution</span>
+        }
+        @if (Item.Assignee is { Length: > 0 } assignee)
+        {
+            <span class="work-item-chip">@assignee</span>
+        }
+        @if (Item.MarkedForAutopilot)
+        {
+            <span class="work-item-chip" data-testid="work-item-autopilot-marked">Marked for autopilot</span>
+        }
+        @if (Item.ReleasedIn is { Length: > 0 } releasedIn)
+        {
+            @* Work item #368: the release that carried it. An archived item is off the board's Done column, and this is
+               where it says so and links to the release. *@
+            <a class="work-item-chip work-item-chip-link" data-testid="work-item-released-in"
+               href="@($"/releases?version={Uri.EscapeDataString(releasedIn)}")">Released in @releasedIn</a>
+        }
+        @* v@(...) not v@..., or Razor reads "v@Item" as an email literal (seen in v0.9.31: the chip said "v@Item.Version"). *@
+        <span class="work-item-chip" data-testid="work-item-version">v@(Item.Version)</span>
+    </div>
+
+    @* The startability verdict is stated here in the domain's own sentences, so what a board card shows and
+       what the detail page explains cannot drift apart. It is asked only of an item that has not started: a Done
+       item said "It is not Ready yet." on every page of the imported backlog (v0.9.33). *@
+    @if (Item.Status is WorkItemStatus.Triage or WorkItemStatus.Backlog or WorkItemStatus.Ready)
+    {
+        <div class="work-item-verdict @(Verdict.CanStart ? "can" : "held")" data-testid="work-item-verdict">
+            @if (Verdict.CanStart)
+            {
+                <span class="work-item-verdict-line">This can start now.</span>
+            }
+            else
+            {
+                @foreach (var reason in Verdict.Reasons)
+                {
+                    <span class="work-item-verdict-line">@Startability.Describe(reason)</span>
+                }
+            }
+            @foreach (var advisory in Verdict.Advisories)
+            {
+                <span class="work-item-verdict-line advisory">@Startability.Describe(advisory)</span>
+            }
+        </div>
+    }
+
+    <section class="work-item-section">
+        <h3 class="work-item-section-title">Description</h3>
+        @* Backlog 39: a description is markdown like a wiki body, and its references are links like a wiki
+           body's. A reference has to work wherever it is written, or it is a syntax people learn in one
+           place and are surprised by in the other. *@
+        @if (Item.Description.Length == 0)
+        {
+            <p class="work-item-prose" data-testid="work-item-description-text">No description.</p>
+        }
+        else
+        {
+            <div class="work-item-prose markdown-body" data-testid="work-item-description-text">
+                @((MarkupString)Description)
+            </div>
+        }
+    </section>
+
+    @* Work item #359: the files the item carries (a report's screenshots), from the studio's data directory. *@
+    <WorkItemAttachmentsView Item="Item.Id" AllowAdd="true" Heading="Images" />
+
+    @if (Item.Flags.Blocked || Item.Flags.Deferred)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Flags</h3>
+            @if (Item.Flags.Blocked)
+            {
+                <div data-testid="work-item-blocked">Blocked: @Item.Flags.BlockedReason</div>
+            }
+            @if (Item.Flags.Deferred)
+            {
+                <div data-testid="work-item-deferred">Deferred: @Item.Flags.DeferredReason</div>
+            }
+        </section>
+    }
+
+    @if (Item.NextAction is { Length: > 0 } next)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Next action</h3>
+            <p class="work-item-prose" data-testid="work-item-next-action-text">@next</p>
+        </section>
+    }
+
+    @* Requested 2026-10-22 (model and effort per work item): always shown, Default included, because a field a
+       person cannot see is a field nobody can correct; Edit is where it changes. *@
+    <section class="work-item-section" data-testid="work-item-suggested-run">
+        <h3 class="work-item-section-title">Suggested model and effort</h3>
+        @* Work item #356: two label and value rows. The sentence form sat in a pre-wrap paragraph, so its source line
+           breaks and indentation showed as stray indented lines. *@
+        <dl class="work-item-pairs" data-testid="work-item-suggested-pairs">
+            <dt>Model</dt>
+            <dd data-testid="work-item-suggested-model-text">@(Item.SuggestedModel?.CliId() ?? "Default")</dd>
+            <dt>Effort</dt>
+            <dd data-testid="work-item-suggested-effort-text">@(Item.SuggestedEffort?.CliValue() ?? "Default")</dd>
+        </dl>
+        <p class="work-item-empty">A conversation the autopilot starts for this item starts with these; Default leaves the usual choice.</p>
+    </section>
+
+    <section class="work-item-section">
+        <h3 class="work-item-section-title">Acceptance criteria</h3>
+        @if (Item.AcceptanceCriteria.Count == 0)
+        {
+            <div class="work-item-empty" data-testid="work-item-no-criteria">
+                None yet, so there is no done-test to verify against.
+            </div>
+        }
+        else
+        {
+            @* Follow-up filed 2026-10-22 (record evidence against a criterion): each criterion says whether evidence
+               points at it, which is what a move to Done asks for, and offers the person's way to record some. The
+               text stays alone in its own element, so a reader of the criterion reads only the criterion. *@
+            <ul class="work-item-list">
+                @foreach (var criterion in Item.AcceptanceCriteria)
+                {
+                    var proof = Evidence.Where(e => e.Kind != EvidenceKind.NoEvidenceReason && e.Criterion == criterion.Id).ToList();
+                    <li class="work-item-criterion-row" data-testid="work-item-criterion-row">
+                        <span data-testid="work-item-criterion">@criterion.Text</span>
+                        @if (proof.Count > 0)
+                        {
+                            <span class="work-item-chip work-item-criterion-proof" data-testid="work-item-criterion-evidence">
+                                Evidence: @(proof[^1].Result.ToString().ToLowerInvariant())@(proof.Count > 1 ? $" ({proof.Count} records)" : string.Empty)
+                            </span>
+                        }
+                        @if (RecordEvidence is not null && _recordingFor != criterion.Id)
+                        {
+                            <button type="button" class="studio-link-btn work-item-criterion-record"
+                                    data-testid="work-item-criterion-record"
+                                    @onclick="@(() => BeginEvidence(criterion.Id))">Record evidence</button>
+                        }
+                        @if (_recordingFor == criterion.Id)
+                        {
+                            <div class="work-item-evidence-form" data-testid="work-item-evidence-form">
+                                <select class="studio-input" data-testid="work-item-evidence-result" @bind="_evidenceResult">
+                                    <option value="@EvidenceResult.Pass">Pass</option>
+                                    <option value="@EvidenceResult.Fail">Fail</option>
+                                </select>
+                                <textarea class="studio-input" rows="2" data-testid="work-item-evidence-summary"
+                                          placeholder="How it was checked and what was seen"
+                                          @bind="_evidenceSummary" @bind:event="oninput"></textarea>
+                                <input class="studio-input" data-testid="work-item-evidence-reference"
+                                       placeholder="Reference (optional): a commit, a docs/evidences path, a test"
+                                       @bind="_evidenceReference" @bind:event="oninput" />
+                                @if (_evidenceError is { Length: > 0 } evidenceError)
+                                {
+                                    <div class="work-item-evidence-error" data-testid="work-item-evidence-error">@evidenceError</div>
+                                }
+                                <div class="work-item-form-actions">
+                                    <button type="button" class="studio-btn" data-testid="work-item-evidence-save"
+                                            disabled="@(string.IsNullOrWhiteSpace(_evidenceSummary) || _savingEvidence)"
+                                            @onclick="SaveEvidenceAsync">Save evidence</button>
+                                    <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-evidence-cancel"
+                                            @onclick="CancelEvidence">Cancel</button>
+                                </div>
+                            </div>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+
+    @if (Item.Readiness.Count > 0)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Readiness</h3>
+            <ul class="work-item-list">
+                @foreach (var line in Item.Readiness)
+                {
+                    <li data-testid="work-item-readiness">@(line.Checked ? "done: " : "open: ")@line.Text</li>
+                }
+            </ul>
+        </section>
+    }
+
+    @if (Item.Ambiguity is { } ambiguity)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Ambiguity</h3>
+            <div data-testid="work-item-ambiguity">
+                @ambiguity.Score of 100@(ambiguity.AssessedBy is { Length: > 0 } by ? $", assessed by {by}" : string.Empty)
+            </div>
+        </section>
+    }
+
+    @if (Item.PersonBlockers.Count > 0)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Waiting on people</h3>
+            <ul class="work-item-list">
+                @foreach (var blocker in Item.PersonBlockers)
+                {
+                    <li data-testid="work-item-person-blocker" class="@(blocker.IsActive ? string.Empty : "cleared")">
+                        @blocker.Person: @blocker.Reason@(blocker.IsActive ? string.Empty : " (cleared)")
+                    </li>
+                }
+            </ul>
+        </section>
+    }
+
+    @* Backlog 54: the approved design is the one thing the verifier checks the built result against, so it
+       is shown on its own and as a LINK, not buried in the reference list as a number. *@
+    @if (Item.RefFor(ArtifactRefRole.ApprovedDesign) is { } approved)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Approved design</h3>
+            @if (approved.Kind == ArtifactRefKind.Design && int.TryParse(approved.Target, out var designNumber))
+            {
+                <button type="button" class="studio-link-btn" data-testid="work-item-approved-design"
+                        @onclick="@(() => OpenDesign.InvokeAsync(designNumber))">
+                    @("@" + designNumber) @(approved.Label ?? "the approved design")
+                </button>
+            }
+            else
+            {
+                <div data-testid="work-item-approved-design">@(approved.Label ?? approved.Target)</div>
+            }
+
+            @* Backlog 209: the approved design is PINNED to a version, so an edit after approval cannot
+               silently change what the verifier reads. No version line at all for a reference that predates
+               pinning - there is nothing recorded to compare the document against. *@
+            @if (DesignStanding is { } standing)
+            {
+                @if (standing.ApprovedVersion is { } approvedVersion)
+                {
+                    <div class="work-item-approved-design-standing" data-testid="work-item-approved-design-version">
+                        Approved at version @approvedVersion.
+                    </div>
+                }
+
+                @if (standing.ChangedSinceApproval)
+                {
+                    <div class="work-item-approved-design-changed" data-testid="work-item-approved-design-changed">
+                        <span>The design has changed since (now at version @standing.CurrentVersion).</span>
+                        <button type="button" class="studio-btn studio-btn-alt" data-testid="work-item-reapprove-design"
+                                @onclick="@(() => ReapproveDesign.InvokeAsync())">
+                            Approve the current version
+                        </button>
+                    </div>
+                }
+            }
+        </section>
+    }
+
+    @if (Item.Refs.Count > 0)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">References</h3>
+            <ul class="work-item-list">
+                @foreach (var reference in Item.Refs)
+                {
+                    <li data-testid="work-item-ref">
+                        @reference.Role / @reference.Kind:
+                        @(reference.Label is { Length: > 0 } label ? label : reference.Target)
+                    </li>
+                }
+            </ul>
+        </section>
+    }
+
+    @if (!Item.ChangeBudget.IsEmpty || Item.ScopePatterns.Count > 0)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Guardrails</h3>
+            @if (Item.ChangeBudget.MaxFiles is { } maxFiles)
+            {
+                <div data-testid="work-item-change-budget">At most @maxFiles files in one attempt.</div>
+            }
+            <ul class="work-item-list">
+                @foreach (var pattern in Item.ScopePatterns)
+                {
+                    <li data-testid="work-item-scope-pattern">@pattern.Mode: @pattern.Pattern</li>
+                }
+            </ul>
+        </section>
+    }
+
+    @if (Item.Scenarios.Count > 0)
+    {
+        <section class="work-item-section">
+            <h3 class="work-item-section-title">Test scenarios</h3>
+            @foreach (var scenario in Item.Scenarios)
+            {
+                <div class="work-item-scenario" data-testid="work-item-scenario">
+                    <div class="work-item-scenario-title">@scenario.Title</div>
+                    <ol class="work-item-list">
+                        @foreach (var step in scenario.Steps)
+                        {
+                            <li data-testid="work-item-scenario-step">@step.Action, expecting @step.Expected</li>
+                        }
+                    </ol>
+                </div>
+            }
+        </section>
+    }
+
+    <section class="work-item-section">
+        <h3 class="work-item-section-title">Evidence</h3>
+        @if (Evidence.Count == 0)
+        {
+            <div class="work-item-empty" data-testid="work-item-no-evidence">Nothing has been recorded yet.</div>
+        }
+        else
+        {
+            <ul class="work-item-list">
+                @foreach (var record in Evidence)
+                {
+                    @* A reason for moving to Done without evidence is not a check that passed, so it says what it is
+                       (requested 2026-10-22, evidence on Done). *@
+                    <li data-testid="work-item-evidence" id="@WorkItemRelated.EvidenceAnchor(record)">@(record.Kind == EvidenceKind.NoEvidenceReason
+                            ? "Moved to Done without evidence, because"
+                            : $"{record.Kind} / {record.Result}"): @record.Summary@(record.ArtefactRef is { Length: > 0 } reference ? $" ({reference})" : string.Empty)
+                        <DesignCheckEvidence Record="record" />
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+</div>
+
+<WorkItemRelated Item="Item" Links="Links" KnownItems="KnownItems" Children="Children" Wiki="Wiki"
+                 Attention="Attention" SessionTitles="SessionTitles" Evidence="Evidence" />
+</div>
+</div>
+
+@code {
+    private static readonly WorkItemStatus[] Statuses = Enum.GetValues<WorkItemStatus>();
+
+    /// <summary>The item being shown.</summary>
+    [Parameter, EditorRequired]
+    public WorkItem Item { get; set; } = default!;
+
+    /// <summary>Whether it can start now, and every reason it cannot.</summary>
+    [Parameter, EditorRequired]
+    public StartabilityVerdict Verdict { get; set; } = default!;
+
+    /// <summary>Every edge touching this item, in normal form.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItemLink> Links { get; set; } = [];
+
+    /// <summary>Every item of the project by id, so a related item is shown with its number, title and status.</summary>
+    [Parameter]
+    public IReadOnlyDictionary<WorkItemId, WorkItem> KnownItems { get; set; } =
+        new Dictionary<WorkItemId, WorkItem>();
+
+    /// <summary>The item's children in the hierarchy.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItem> Children { get; set; } = [];
+
+    /// <summary>The wiki documents related to the item (its plan first), for the related-items sidebar.</summary>
+    [Parameter]
+    public IReadOnlyList<WorkItemWikiLink> Wiki { get; set; } = [];
+
+    /// <summary>The evidence recorded against the item, oldest first.</summary>
+    [Parameter]
+    public IReadOnlyList<EvidenceRecord> Evidence { get; set; } = [];
+
+    /// <summary>
+    /// The description rendered to HTML with its references resolved. The page does the resolving, because
+    /// it is a database read and this component renders synchronously.
+    /// </summary>
+    [Parameter]
+    public string Description { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The conversations linked to the item and the operator's attention in each (backlog 244), or null where the
+    /// studio does not count it, which leaves the sidebar's Conversations group out.
+    /// </summary>
+    [Parameter]
+    public Fravashi.Application.Sessions.WorkItemAttention? Attention { get; set; }
+
+    /// <summary>A readable name for each linked conversation; one with none is shown by its id.</summary>
+    [Parameter]
+    public IReadOnlyDictionary<Fravashi.Domain.AgentSessions.AgentSessionId, string> SessionTitles { get; set; } =
+        new Dictionary<Fravashi.Domain.AgentSessions.AgentSessionId, string>();
+
+    /// <summary>Opens a wiki document by its number, for the approved design.</summary>
+    [Parameter]
+    public EventCallback<int> OpenDesign { get; set; }
+
+    /// <summary>What the approved design says about its own version, or null (backlog 209).</summary>
+    [Parameter]
+    public DesignApprovalStanding? DesignStanding { get; set; }
+
+    /// <summary>Approves the design's current version again, shown exactly when it has moved on.</summary>
+    [Parameter]
+    public EventCallback ReapproveDesign { get; set; }
+
+    /// <summary>Opens the edit form for this item.</summary>
+    [Parameter]
+    public EventCallback Edit { get; set; }
+
+    /// <summary>Moves the item to a status; the page performs the transition and shows any refusal.</summary>
+    [Parameter]
+    public EventCallback<WorkItemStatus> Transition { get; set; }
+
+    /// <summary>Marks or unmarks the item for autopilot (ADR 0031 decision 1, backlog 298); the page performs the update.</summary>
+    [Parameter]
+    public EventCallback<bool> MarkForAutopilot { get; set; }
+
+    /// <summary>
+    /// Records evidence against one criterion (follow-up filed 2026-10-22, record evidence against a criterion) and
+    /// answers the refusal in the tracker's words, or null when it was stored. Null hides the action.
+    /// </summary>
+    [Parameter]
+    public Func<CriterionEvidenceDraft, Task<string?>>? RecordEvidence { get; set; }
+
+    private string? _recordingFor;
+    private EvidenceResult _evidenceResult = EvidenceResult.Pass;
+    private string _evidenceSummary = string.Empty;
+    private string _evidenceReference = string.Empty;
+    private string? _evidenceError;
+    private bool _savingEvidence;
+
+    private void BeginEvidence(string criterionId)
+    {
+        _recordingFor = criterionId;
+        _evidenceResult = EvidenceResult.Pass;
+        _evidenceSummary = string.Empty;
+        _evidenceReference = string.Empty;
+        _evidenceError = null;
+    }
+
+    private void CancelEvidence()
+    {
+        _recordingFor = null;
+        _evidenceError = null;
+    }
+
+    private async Task SaveEvidenceAsync()
+    {
+        if (RecordEvidence is null || _recordingFor is not { } criterionId || string.IsNullOrWhiteSpace(_evidenceSummary))
+        {
+            return;
+        }
+
+        _savingEvidence = true;
+        try
+        {
+            var refusal = await RecordEvidence(new CriterionEvidenceDraft(
+                criterionId,
+                _evidenceResult,
+                _evidenceSummary.Trim(),
+                string.IsNullOrWhiteSpace(_evidenceReference) ? null : _evidenceReference.Trim()));
+
+            // A refusal keeps the form open with what was typed, so nothing has to be written twice.
+            if (refusal is { Length: > 0 })
+            {
+                _evidenceError = refusal;
+                return;
+            }
+
+            _recordingFor = null;
+            _evidenceError = null;
+        }
+        finally
+        {
+            _savingEvidence = false;
+        }
+    }
+
+    private static string Label(WorkItemStatus status) => status switch
+    {
+        WorkItemStatus.InProgress => "In progress",
+        WorkItemStatus.InReview => "In review",
+        _ => status.ToString(),
+    };
+
+    private Task OnEdit() => Edit.InvokeAsync();
+
+    private Task OnMarkAutopilot() => MarkForAutopilot.InvokeAsync(true);
+
+    private Task OnUnmarkAutopilot() => MarkForAutopilot.InvokeAsync(false);
+
+    private Task OnTransition(ChangeEventArgs e)
+    {
+        var parsed = StableNames.Parse<WorkItemStatus>(e.Value?.ToString(), "status");
+        return parsed.IsValid ? Transition.InvokeAsync(parsed.Value) : Task.CompletedTask;
+    }
+}

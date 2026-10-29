@@ -1,0 +1,2 @@
+Connection closed by 192.0.2.1 port 22
+fatal: the remote end hung up unexpectedly

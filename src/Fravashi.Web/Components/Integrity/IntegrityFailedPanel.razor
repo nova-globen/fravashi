@@ -1,0 +1,55 @@
+@namespace Fravashi.Web.Components.Integrity
+@using Fravashi.Application.Integrity
+@inject IIntegrityStatusProvider Integrity
+
+@* The loud fail-closed lock (F3 / ADR 0007 #9). When the integrity BackgroundService detects a genuine mismatch
+   between the launcher-recorded expected shape and the running shape while enforcing, every route redirects here
+   and the app then terminates. It lists exactly which checks failed (what was compared) so the state is
+   unmistakable, and it says how a legitimate relaunch recovers - the container stopping is not data loss. *@
+
+<div class="update-lock" role="alert" aria-live="assertive" data-testid="integrity-failed">
+    <div class="update-lock-card">
+        <div class="update-lock-icon" aria-hidden="true">🛑</div>
+        <h1 class="update-lock-title">Integrity check failed</h1>
+        <p class="update-lock-lead">
+            @(ProductName.Short)'s tamper-evidence self-check found that this running container does not match the shape the
+            <code>@(ProductName.Command)</code> launcher recorded when it started it. As a safety measure the app has locked and is
+            stopping. Your data is safe - it lives on the mounted data volume and is untouched.
+        </p>
+
+        @if (Failures.Count > 0)
+        {
+            <div class="update-lock-how">
+                <h2>What did not match</h2>
+                <ul data-testid="integrity-failed-list">
+                    @foreach (var check in Failures)
+                    {
+                        <li>
+                            <strong>@check.Name</strong> - @check.Detail
+                            <span class="studio-muted">(expected <code>@(check.Expected ?? " - ")</code>,
+                                observed <code>@(check.Actual ?? " - ")</code>)</span>
+                        </li>
+                    }
+                </ul>
+            </div>
+        }
+
+        <div class="update-lock-how">
+            <h2>How to recover</h2>
+            <p>On the machine that runs @(ProductName.Short), open a terminal and run:</p>
+            <pre class="update-lock-cmd">@ProductName.Command</pre>
+            <p class="studio-muted">
+                A legitimate relaunch re-verifies the image, re-records the expected shape, and starts a clean
+                container. If the check keeps failing, the image or its runtime has been altered - reinstall from a
+                trusted release.
+            </p>
+        </div>
+    </div>
+</div>
+
+@code {
+    private IntegrityStatus State => Integrity.Current;
+
+    private IReadOnlyList<IntegrityCheck> Failures =>
+        State.Checks.Where(c => c.Status == IntegrityCheckStatus.Fail).ToList();
+}
