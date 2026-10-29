@@ -41,7 +41,7 @@ License as published by the Free Software Foundation, either version 3 of the Li
 version. See [`LICENSE`](LICENSE). `SPDX-License-Identifier: AGPL-3.0-or-later`
 
 The licence carries one additional permission under its section 7, for linking or combining Fravashi with Microsoft's
-WebView2 runtime and SDK. Its exact text is at the top of [`LICENSE`](LICENSE).
+WebView2 runtime and SDK. Its exact text, with the copyright notice, is in [`NOTICE`](NOTICE).
 
 The studio image carries third-party programs under their own licences, listed in each package's notice, and `fravashi.exe`
 uses Microsoft's WebView2 runtime. The image does not carry the Claude Code CLI: at its first start the studio

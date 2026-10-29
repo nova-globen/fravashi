@@ -27,6 +27,9 @@ public sealed class FormerWorktreeTests : IDisposable
             RunGit(_repoRoot, "init", "-b", "main");
             RunGit(_repoRoot, "config", "user.name", "Test");
             RunGit(_repoRoot, "config", "user.email", "test@example.com");
+            // The test compares the bytes a worktree checks out with the bytes committed, so a machine-wide
+            // core.autocrlf=true (GitHub's Windows runners set it) must not turn "\n" into "\r\n" here.
+            RunGit(_repoRoot, "config", "core.autocrlf", "false");
             File.WriteAllText(Path.Combine(_repoRoot, "seed.txt"), "seed\n");
             RunGit(_repoRoot, "add", ".");
             RunGit(_repoRoot, "commit", "-m", "seed");

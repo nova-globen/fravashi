@@ -516,13 +516,15 @@ public class DesignMatcherTests
         ]}]}
         """;
 
+    // A raw string takes the line endings of this file as it was checked out, and the tests below edit it with "\n":
+    // on a checkout with core.autocrlf=true (GitHub's Windows runners) those edits found nothing, so it is normalised.
     private static string NotFoundPage(string home = "link", string report = "button") => $"""
         - heading "Not found" [level=1]
         - paragraph: Sorry, there's nothing at this address.
         - {home} "Go to the start page" [ref=e1]:
           - /url: /
         - {report} "Report this" [ref=e2]
-        """;
+        """.ReplaceLineEndings("\n");
 
     [Fact]
     public void A_designed_link_is_found_as_a_link_by_its_name()
