@@ -30,8 +30,10 @@ public class NoSecretsInTreeTests
 
     private static readonly Regex Dummy = new(@"test|fake|dummy|example|x{4}|0{4}", RegexOptions.IgnoreCase);
 
+    // "/.tmp/" is the CI run's TMPDIR inside the archive's root: its logs are not the tree, and the runtime's
+    // clr-debug-pipe FIFOs there block File.ReadAllBytes forever (a Linux CI run hung on them).
     private static readonly string[] SkippedSegments =
-        ["/bin/", "/obj/", "/node_modules/", "/TestResults/", "/.git/", "/wwwroot/vendor/"];
+        ["/bin/", "/obj/", "/node_modules/", "/TestResults/", "/.git/", "/wwwroot/vendor/", "/.tmp/"];
 
     private static string RepositoryRoot()
     {

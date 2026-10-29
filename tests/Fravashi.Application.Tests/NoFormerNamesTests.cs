@@ -81,7 +81,10 @@ public class NoFormerNamesTests
         (".github/workflows/ci.yml", "(core|" + K + "|bin|game|code)"),
     ];
 
-    private static readonly string[] SkippedSegments = ["/bin/", "/obj/", "/node_modules/", "/TestResults/", "/.git/"];
+    // "/.tmp/" is the CI run's TMPDIR inside the archive's root: its logs are not the tree, and the runtime's
+    // clr-debug-pipe FIFOs there block File.ReadAllBytes forever (a Linux CI run hung on them).
+    private static readonly string[] SkippedSegments =
+        ["/bin/", "/obj/", "/node_modules/", "/TestResults/", "/.git/", "/.tmp/"];
 
     private static string RepositoryRoot()
     {
