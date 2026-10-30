@@ -71,7 +71,8 @@ public sealed class SetupRunTests : IDisposable
         File.ReadAllLines(_scratch.File("argv.txt")).Should().Equal(
             "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
             File.ReadAllText(_scratch.File("engine-path.txt")).Trim(),
-            "-DownloadBase", "https://nova-globen.se/fravashi/updates");
+            "-DownloadBase", "https://nova-globen.se/fravashi/updates",
+            "-NoElevationPrompt");
         log.Should().Contain("from the update channel (https://nova-globen.se/fravashi/updates/latest/)");
         // The engine's own line uses the full name; the verdict, a sentence the person reads, uses the short one.
         log.Should().Contain("Running: ").And.Contain("Verdict: Fravashi 0.9.99 is installed.").And.Contain("exit code 0");

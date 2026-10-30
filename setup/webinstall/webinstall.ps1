@@ -28,6 +28,9 @@ param(
     [string]$Arch = "",
     # Forwarded to install-windows.ps1 (docker | podman | wslc); empty auto-detects there.
     [string]$Runtime = "",
+    # Forwarded to install-windows.ps1: never show the UAC prompt for the firewall rule (backlog 374). The setup EXE
+    # passes it for /quiet; an elevated run still sets the rule.
+    [switch]$NoElevationPrompt,
     # Keep the downloaded files instead of deleting the work folder (debugging a bad download).
     [switch]$KeepDownloads,
     # Resolve the release and print what WOULD be downloaded, then stop. Exists so a change to this
@@ -403,6 +406,7 @@ function Install-ReleaseBundle([string]$launcherPath, [string]$imagePath, [strin
     Write-Host ""
     $installArgs = @{}
     if ($Runtime) { $installArgs.Runtime = $Runtime }
+    if ($NoElevationPrompt) { $installArgs.NoElevationPrompt = $true }
     & (Join-Path $bundle "install-windows.ps1") @installArgs
 }
 

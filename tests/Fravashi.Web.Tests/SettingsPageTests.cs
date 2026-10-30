@@ -45,6 +45,8 @@ public class SettingsPageTests
         ctx.Services.AddSingleton<Fravashi.Application.Persistence.IGitHostStore>(new FakeGitHostStore());
         ctx.Services.AddSingleton<IAgentRuntimeService>(new FakeAgentRuntimeService());
         ctx.Services.AddSingleton<IAgentRuntimeStatusReport>(new InMemoryAgentRuntimeStatusReport());
+        // The runtimes section asks the credential store whether the free tier carries a runtime (backlog 376).
+        ctx.Services.AddSingleton<IAgentRuntimeCredentialStore>(new FakeAgentRuntimeCredentialStore());
 
         // Access probes + suggester the wiki/board/mapping steps inject (any section may render).
         ctx.Services.AddSingleton<IWikiAccessProbe>(new FakeWikiAccessProbe(ProbeResults.Verified));

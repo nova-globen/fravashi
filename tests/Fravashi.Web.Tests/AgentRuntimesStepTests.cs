@@ -22,7 +22,11 @@ public class AgentRuntimesStepTests
 {
     // ── S10/S11/S12 - the runtimes step ──────────────────────────────────────────────────────────────────
 
-    private static BunitContext RuntimesContext(out FakeConfigurationStore config, out FakeAgentRuntimeService runtimes)
+    private static BunitContext RuntimesContext(out FakeConfigurationStore config, out FakeAgentRuntimeService runtimes) =>
+        RuntimesContext(out config, out runtimes, new FakeAgentRuntimeCredentialStore());
+
+    private static BunitContext RuntimesContext(
+        out FakeConfigurationStore config, out FakeAgentRuntimeService runtimes, FakeAgentRuntimeCredentialStore credentials)
     {
         var ctx = new BunitContext();
         ctx.JSInterop.Mode = JSRuntimeMode.Loose;
@@ -32,10 +36,81 @@ public class AgentRuntimesStepTests
         ctx.Services.AddSingleton<IConfigurationStore>(config);
         ctx.Services.AddSingleton<IAgentRuntimeService>(runtimes);
         ctx.Services.AddSingleton<IAgentRuntimeStatusReport>(new InMemoryAgentRuntimeStatusReport());
-        ctx.Services.AddSingleton<IAgentRuntimeCredentialStore>(new FakeAgentRuntimeCredentialStore());
+        ctx.Services.AddSingleton<IAgentRuntimeCredentialStore>(credentials);
         ctx.Services.AddSingleton<IAgentLoginProxy>(new FakeAgentLoginProxy());
         ctx.Services.AddSingleton<IConfigurationReloader>(new FakeConfigurationReloader());
         return ctx;
+    }
+
+    // ── Backlog 376 - the free tier on the runtime card ───────────────────────────────────────────────────
+
+    [Fact]
+    public void A_runtime_the_free_tier_carries_reads_as_free_tier_and_says_a_key_is_optional()
+    {
+        var credentials = new FakeAgentRuntimeCredentialStore();
+        credentials.FreeTier.Add(AgentTool.Claude);
+        using var ctx = RuntimesContext(out var config, out var runtimes, credentials);
+        AgentRuntimeSelection.Write(config, [AgentTool.Claude]);
+        runtimes.Statuses[AgentTool.Claude] = new(AgentTool.Claude, true, "2.1.280", AgentRuntimeAuthState.SignedOut, "no credential");
+
+        var cut = ctx.Render<RuntimesStep>();
+
+        cut.WaitForAssertion(() =>
+        {
+            var badge = cut.Find("[data-testid=runtime-auth-Claude]");
+            Assert.Equal("Free tier", badge.TextContent.Trim());
+            Assert.Contains("rt-badge-ok", badge.ClassName);
+            Assert.Equal(
+                "Conversations run on the free tier: no API key or Anthropic sign-in needed. Your own key or subscription is optional.",
+                badge.GetAttribute("title"));
+            Assert.DoesNotContain("Not signed in", cut.Markup);
+        });
+        var hint = System.Text.RegularExpressions.Regex.Replace(cut.Find("[data-testid=runtime-free-tier-Claude]").TextContent, @"\s+", " ").Trim();
+        Assert.Equal(
+            "Your conversations run on the free tier, which has a daily limit: no API key or Anthropic sign-in is needed. " +
+            "Adding your own key or subscription below is optional; once you do, it is used instead of the free tier.",
+            hint);
+        Assert.DoesNotMatch(@"\d", hint);
+    }
+
+    [Fact]
+    public void Once_a_key_of_ones_own_is_stored_the_free_tier_is_not_claimed()
+    {
+        var credentials = new FakeAgentRuntimeCredentialStore();
+        credentials.FreeTier.Add(AgentTool.Claude);
+        credentials.SaveApiKey(AgentTool.Claude, "sk-test-not-real");
+        using var ctx = RuntimesContext(out var config, out var runtimes, credentials);
+        AgentRuntimeSelection.Write(config, [AgentTool.Claude]);
+        runtimes.Statuses[AgentTool.Claude] = new(AgentTool.Claude, true, "2.1.280", AgentRuntimeAuthState.Authenticated, "stored key");
+
+        var cut = ctx.Render<RuntimesStep>();
+
+        cut.WaitForAssertion(() => Assert.Equal("Authenticated", cut.Find("[data-testid=runtime-auth-Claude]").TextContent.Trim()));
+        Assert.Empty(cut.FindAll("[data-testid=runtime-free-tier-Claude]"));
+    }
+
+    [Fact]
+    public void Without_the_free_tier_a_runtime_with_no_credential_is_still_not_signed_in()
+    {
+        using var ctx = RuntimesContext(out var config, out var runtimes);
+        AgentRuntimeSelection.Write(config, [AgentTool.Claude]);
+        runtimes.Statuses[AgentTool.Claude] = new(AgentTool.Claude, true, "2.1.280", AgentRuntimeAuthState.SignedOut, "no credential");
+
+        var cut = ctx.Render<RuntimesStep>();
+
+        cut.WaitForAssertion(() => Assert.Equal("Not signed in", cut.Find("[data-testid=runtime-auth-Claude]").TextContent.Trim()));
+        Assert.Empty(cut.FindAll("[data-testid=runtime-free-tier-Claude]"));
+    }
+
+    [Fact]
+    public void With_nothing_selected_the_note_counts_the_free_tier_as_usable()
+    {
+        using var ctx = RuntimesContext(out var config, out _);
+        AgentRuntimeSelection.Write(config, []);
+
+        var cut = ctx.Render<RuntimesStep>();
+
+        Assert.Contains("signed in or runs on the free tier", cut.Find("[data-testid=runtime-none-selected]").TextContent);
     }
 
     [Fact]

@@ -17,10 +17,12 @@ public sealed record EngineCommand(string FileName, IReadOnlyList<string> Argume
 
     /// <summary>
     /// <c>powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &lt;engine&gt; -DownloadBase
-    /// &lt;channel&gt; [-Version &lt;x.y.z&gt;]</c>: this build's update channel (<see cref="SetupOptions.DownloadsBase"/>),
-    /// and a version when one was asked for. Bypass because the machine's policy may be Restricted, as the Inno wizard
-    /// already passed it. No <c>-Pause</c>: the wizard shows the output itself, and the engine's stdin is a closed pipe
-    /// (see <see cref="EngineRunner"/>), so it never waits for anybody.
+    /// &lt;channel&gt; [-NoElevationPrompt] [-Version &lt;x.y.z&gt;]</c>: this build's update channel
+    /// (<see cref="SetupOptions.DownloadsBase"/>), and a version when one was asked for. Bypass because the machine's
+    /// policy may be Restricted, as the Inno wizard already passed it. No <c>-Pause</c>: the wizard shows the output
+    /// itself, and the engine's stdin is a closed pipe (see <see cref="EngineRunner"/>), so it never waits for anybody.
+    /// <c>/quiet</c> adds <c>-NoElevationPrompt</c> (backlog 374): a quiet install never shows the UAC prompt for the
+    /// firewall rule, and one run elevated still sets it.
     /// </summary>
     public static EngineCommand For(string powerShell, string scriptPath, SetupOptions options)
     {
@@ -35,6 +37,11 @@ public sealed record EngineCommand(string FileName, IReadOnlyList<string> Argume
             "-DownloadBase",
             SetupOptions.DownloadsBase,
         };
+
+        if (options.Quiet)
+        {
+            arguments.Add("-NoElevationPrompt");
+        }
 
         if (options.Version is { } version)
         {

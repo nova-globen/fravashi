@@ -47,22 +47,27 @@ public class NoFormerNamesTests
     ];
 
     /// <summary>
-    /// PENDING INFRA: names external systems still know by the old value, allowed in any file until infra renames them
-    /// (plan phase 3), and removed from here together then. The C# side of the same names is FormerNames.PendingInfra.
+    /// THE RECORD: names of external systems that existed under the old value and were retired with the rename's last
+    /// infrastructure wave (2026-10-30, the old forge and hosts with it). They may stay ONLY where the tree is a
+    /// record of what happened, the ADRs and the dated evidence (infra's ruling of 2026-10-30), and nowhere else. Until
+    /// then this was a pending list allowed in any file.
     /// </summary>
-    private static readonly string[] PendingInfra =
+    private static readonly string[] RecordOnly =
     [
-        // The product's old host: the broker's deploy workflow and the forge's release workflow, both retired in F1.
+        // The product's old host (the broker, the update channel and the website before F1).
         K + "." + Company,
-        // Infra's workflow that promotes the update channel (release.yml dispatches it).
+        // Infra's workflow that promoted the update channel.
         "pin-" + K + "-update-channel",
-        // The forge Actions secret the live prompt-audit tier reads.
+        // The forge Actions secret the live prompt-audit tier once read.
         "NG_JEV_" + K.ToUpperInvariant() + "_PROMPT_AUDIT",
-        // The broker's site, registry image and role at infra (.forgejo/workflows/deploy-broker.yml, ADR 0026, docs).
+        // The broker's site, registry image and role at infra before F1.
         D + K + "-broker",
-        // A throwaway repository on the forge the delivery proofs push to.
+        // A throwaway repository on the forge the delivery proofs pushed to.
         K + "-delivery-proof",
     ];
+
+    /// <summary>Where the record names may stay: the ADRs and the dated evidence, both records of what happened.</summary>
+    private static readonly string[] RecordFolders = ["docs/adr/", "docs/evidences/"];
 
     /// <summary>
     /// THE TRANSITION LIST: exact (file, token) pairs for files that cannot read FormerNames (scripts, a Dockerfile) and
@@ -140,12 +145,16 @@ public class NoFormerNamesTests
         }
     }
 
-    /// <summary>A line with the pending-infra names and its file's transition tokens taken out, as the guard reads it.</summary>
+    /// <summary>A line with the record names (in a record folder only) and its file's transition tokens taken out, as the
+    /// guard reads it.</summary>
     private static string Stripped(string relative, string line)
     {
-        foreach (var token in PendingInfra)
+        if (RecordFolders.Any(folder => relative.StartsWith(folder, StringComparison.Ordinal)))
         {
-            line = line.Replace(token, string.Empty, StringComparison.Ordinal);
+            foreach (var token in RecordOnly)
+            {
+                line = line.Replace(token, string.Empty, StringComparison.Ordinal);
+            }
         }
 
         foreach (var (file, token) in Transition)
@@ -228,10 +237,13 @@ public class NoFormerNamesTests
     }
 
     [Fact]
-    public void A_pending_infra_name_is_allowed_and_nothing_around_it()
+    public void A_record_name_is_allowed_only_in_the_records_and_nothing_around_it()
     {
-        Former.IsMatch(Stripped("README.md", "the update channel at https://" + K + "." + Company + "/updates/")).Should().BeFalse();
-        Former.IsMatch(Stripped("README.md", "https://" + K + "." + Company + " and " + D + K)).Should().BeTrue();
+        var oldHost = "https://" + K + "." + Company + "/updates/";
+        Former.IsMatch(Stripped("docs/adr/0025-x.md", "the update channel at " + oldHost)).Should().BeFalse();
+        Former.IsMatch(Stripped("docs/evidences/2026-10-09-x/README.md", "minted at " + oldHost)).Should().BeFalse();
+        Former.IsMatch(Stripped("README.md", "the update channel at " + oldHost)).Should().BeTrue("outside the records it is a former name");
+        Former.IsMatch(Stripped("docs/adr/0025-x.md", oldHost + " and " + D + K)).Should().BeTrue("only the named systems are allowed");
         Former.IsMatch(Stripped("README.md", "org." + D + K + ".variant")).Should().BeTrue("a transition token counts only in its own file");
     }
 }

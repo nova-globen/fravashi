@@ -38,6 +38,14 @@ public sealed class EngineCommandTests
     }
 
     [Fact]
+    public void A_quiet_install_never_asks_for_elevation_and_the_wizard_may()
+    {
+        EngineCommand.For("p", Script, new SetupOptions { Quiet = true, Version = "1.0.1" }).Arguments
+            .Should().EndWith(["-DownloadBase", SetupOptions.DownloadsBase, "-NoElevationPrompt", "-Version", "1.0.1"]);
+        EngineCommand.For("p", Script, new SetupOptions()).Arguments.Should().NotContain("-NoElevationPrompt");
+    }
+
+    [Fact]
     public void Pause_is_never_passed_because_nobody_is_at_the_engines_console()
     {
         var command = EngineCommand.For("powershell.exe", Script, new SetupOptions { Quiet = true });

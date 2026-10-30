@@ -6,6 +6,7 @@
 @inject IConfigurationStore Config
 @inject IAgentRuntimeService Runtimes
 @inject IAgentRuntimeStatusReport Report
+@inject IAgentRuntimeCredentialStore Credentials
 
 @* The FIRST onboarding step (S15). Choose which AI coding-agent runtimes Fravashi will use (S10), and
    configure each one (S12): its install/version/auth state is observed live from this environment, a selected
@@ -39,6 +40,9 @@
         var status = _statuses.GetValueOrDefault(tool);
         var selected = _selected.Contains(tool);
         var update = Report.Latest(tool);
+        // Backlog 376: the free tier (D52) carries a runtime with no credential of the person's own, so "Not signed in"
+        // next to a key box read as "you must pay first" on a fresh install (the v1.0.0 drill, 2026-10-30).
+        var freeTier = Credentials.BrokerCarries(tool);
         <section class="rt-card @(selected ? "rt-card-selected" : string.Empty)" data-testid="@($"runtime-card-{tool}")">
             <header class="rt-card-head">
                 <label class="rt-select">
@@ -66,7 +70,7 @@
                                 Pinned v@(descriptor.PinnedVersion)
                             </span>
                         }
-                        @RenderAuthBadge(status)
+                        @RenderAuthBadge(status, freeTier)
                     }
                 </div>
             </header>
@@ -93,6 +97,18 @@
                 </div>
             }
 
+            @if (selected && freeTier && status is { Installed: true })
+            {
+                @* Infra's wording, 2026-10-30: say whose sign-in is NOT needed (the free tier still needs the person signed
+                   in to Nova Globen) and that the tier is limited, with no figure, so the text never goes stale (the site
+                   and the broker carry D54/D54a). *@
+                <p class="ob-hint" data-testid="@($"runtime-free-tier-{tool}")">
+                    Your conversations run on the free tier, which has a daily limit: no API key or @ProviderSignIn(tool)
+                    is needed. Adding your own key or subscription below is optional; once you do, it is used instead of
+                    the free tier.
+                </p>
+            }
+
             @if (selected && status is { Installed: true })
             {
                 <AgentLoginPanel Tool="tool" Status="status" OnAuthChanged="() => RefreshStatusAsync(tool)" />
@@ -110,7 +126,7 @@
     {
         <p class="ob-note" data-testid="runtime-none-selected">
             No runtime selected yet. You can continue and add one later from Settings, but the AI-assisted steps
-            (like suggesting your board mapping) need at least one signed-in runtime.
+            (like suggesting your board mapping) need at least one runtime that is signed in or runs on the free tier.
         </p>
     }
 </div>
@@ -189,22 +205,31 @@
         }
     }
 
-    private static RenderFragment RenderAuthBadge(AgentRuntimeStatus status) => builder =>
+    /// <summary>The sign-in badge. A runtime the free tier carries is not "Not signed in" (an error to a first-time
+    /// user): it works as it is (backlog 376).</summary>
+    private static RenderFragment RenderAuthBadge(AgentRuntimeStatus status, bool freeTier) => builder =>
     {
-        var (cls, text) = status.AuthState switch
+        var (cls, text, title) = status.AuthState switch
         {
-            AgentRuntimeAuthState.Authenticated => ("rt-badge-ok", "Authenticated"),
-            AgentRuntimeAuthState.SignedOut => ("rt-badge-warn", "Not signed in"),
-            AgentRuntimeAuthState.NotInstalled => ("rt-badge-warn", "Not installed"),
-            _ => ("rt-badge-muted", "Auth unknown"),
+            AgentRuntimeAuthState.Authenticated => ("rt-badge-ok", "Authenticated", status.AuthDetail),
+            AgentRuntimeAuthState.SignedOut when freeTier =>
+                ("rt-badge-ok", "Free tier",
+                 $"Conversations run on the free tier: no API key or {ProviderSignIn(status.Tool)} needed. Your own key or subscription is optional."),
+            AgentRuntimeAuthState.SignedOut => ("rt-badge-warn", "Not signed in", status.AuthDetail),
+            AgentRuntimeAuthState.NotInstalled => ("rt-badge-warn", "Not installed", status.AuthDetail),
+            _ => ("rt-badge-muted", "Auth unknown", status.AuthDetail),
         };
         builder.OpenElement(0, "span");
         builder.AddAttribute(1, "class", $"rt-badge {cls}");
         builder.AddAttribute(2, "data-testid", $"runtime-auth-{status.Tool}");
-        builder.AddAttribute(3, "title", status.AuthDetail);
+        builder.AddAttribute(3, "title", title);
         builder.AddContent(4, text);
         builder.CloseElement();
     };
+
+    /// <summary>Whose sign-in the free tier makes unnecessary: the runtime's provider, never the person's sign-in to the
+    /// service, which the free tier needs (backlog 376).</summary>
+    private static string ProviderSignIn(AgentTool tool) => tool == AgentTool.Claude ? "Anthropic sign-in" : "provider sign-in";
 
     /// <summary>
     /// What the pin badge claims. Only Claude has a contract tier driven against its pinned binary

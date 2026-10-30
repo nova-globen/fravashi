@@ -47,6 +47,13 @@ internal sealed class FakeAgentRuntimeCredentialStore : IAgentRuntimeCredentialS
     public bool HasSubscriptionToken(AgentTool tool) => SubscriptionTokens.Contains(tool);
     public void ClearSubscriptionToken(AgentTool tool) => SubscriptionTokens.Remove(tool);
 
+    /// <summary>The runtimes the free-tier broker carries (D52), as the product decides it: only while no credential of the
+    /// person's own is stored for it.</summary>
+    public HashSet<AgentTool> FreeTier { get; } = [];
+
+    public bool BrokerCarries(AgentTool tool) =>
+        FreeTier.Contains(tool) && !Keys.ContainsKey(tool) && !SubscriptionTokens.Contains(tool);
+
     public IReadOnlyDictionary<string, string> EnvironmentFor(AgentTool tool) =>
         Keys.TryGetValue(tool, out var key)
             ? new Dictionary<string, string> { [AgentRuntimeCatalog.For(tool).ApiKeyEnvVar] = key }

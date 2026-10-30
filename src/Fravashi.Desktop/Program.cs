@@ -61,6 +61,14 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
+        // The splash FIRST (backlog 379): everything below (the data-folder move, the former-install migration, which asks
+        // the container engine on every start, and the context's own setup) took 2 to 3 s on a cold start with nothing on
+        // screen. Refresh paints it now, because no message loop runs until Application.Run.
+        var splash = new SplashForm();
+        splash.Show();
+        splash.Refresh();
+        var splashAfter = DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime;
+
         // The rename to Fravashi moves the former data folder to %LOCALAPPDATA%\Fravashi, here: this process holds the
         // single-instance mutex an older fravashi.exe used too, so no older resident is running, and nothing has opened a
         // file in either folder yet. Every path below follows the folder it settles on. Then the internal rename's
@@ -71,7 +79,7 @@ internal static class Program
             initialState: false, EventResetMode.ManualReset, TrayControlNames.ExitEvent);
         // Qualified: the launcher links NetworkFailure as source (backlog 230), so a Fravashi.Application namespace is
         // in scope here and a bare Application would name it.
-        System.Windows.Forms.Application.Run(new DesktopApplicationContext(parsed, exitEvent, activateEvent));
+        System.Windows.Forms.Application.Run(new DesktopApplicationContext(parsed, exitEvent, activateEvent, splash, splashAfter));
         return Environment.ExitCode;
     }
 

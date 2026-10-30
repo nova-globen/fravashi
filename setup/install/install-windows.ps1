@@ -22,7 +22,9 @@
 # first installed engine in the order docker -> podman -> wslc is used.
 param(
     # Force a container runtime (docker|podman|wslc); default: honour a launcher.json pin, else auto-detect.
-    [string]$Runtime = ""
+    [string]$Runtime = "",
+    # Never show the UAC prompt for the firewall rule (FravashiSetup.exe /quiet); an elevated run still sets it.
+    [switch]$NoElevationPrompt
 )
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
@@ -331,6 +333,66 @@ foreach ($dir in $shortcutDirs) {
     $shortcut.IconLocation = $fravashiExe
     $shortcut.Description = 'Nova Globen Fravashi'
     $shortcut.Save()
+}
+
+# --- The firewall rule (backlog 374): the ONE step that needs elevation ------------------------------------------------
+# firewall-rule.ps1 gives fravashi.exe its own inbound rule, so a first start on a locked screen is not silently blocked.
+# Copied beside fravashi.exe so the advice's command works after the bundle is gone. Run directly when this install is
+# already elevated, else through one UAC prompt inside a job with a time limit: an older FravashiSetup.exe (version-
+# agnostic by design) runs this script without -NoElevationPrompt, and an install must never hang on a prompt nobody
+# answers. Nothing here fails the install: without the rule the first start meets Windows' own prompt, as before.
+$firewallScript = Join-Path $target 'firewall-rule.ps1'
+$firewallWhy = $null
+try {
+    Copy-Item (Join-Path $bundleRoot 'firewall-rule.ps1') $firewallScript -Force
+    $env:FRAVASHI_FIREWALL_FUNCTIONS_ONLY = '1'
+    . $firewallScript
+    $env:FRAVASHI_FIREWALL_FUNCTIONS_ONLY = $null
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $firewallArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$firewallScript`" -Program `"$fravashiExe`""
+    switch (Get-FirewallStepMode -Elevated $elevated -NoElevationPrompt $NoElevationPrompt.IsPresent) {
+        'direct' {
+            & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $firewallScript -Program $fravashiExe
+            if ($LASTEXITCODE -ne 0) { $firewallWhy = "it failed with exit code $LASTEXITCODE" }
+        }
+        'skip' { $firewallWhy = 'this install may not ask for administrator rights' }
+        'prompt' {
+            Write-Host "Windows asks once for administrator rights: only to let the Fravashi studio reach fravashi.exe through"
+            Write-Host "Windows Firewall (one inbound rule for fravashi.exe, local networks only). Everything else is already installed."
+            $job = Start-Job -ScriptBlock {
+                param($ps, $arguments)
+                try { (Start-Process -FilePath $ps -ArgumentList $arguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru).ExitCode }
+                catch { 'declined' }
+            } -ArgumentList $windowsPowerShell, $firewallArgs
+            if (Wait-Job $job -Timeout 300) {
+                $outcome = Receive-Job $job
+                # Declined, or never shown: on a locked console Windows refuses the elevation at once (measured on the
+                # test VM, 2026-10-30), with nobody asked.
+                if ($outcome -eq 'declined') { $firewallWhy = 'the administrator prompt was declined or could not be shown' }
+                elseif ($outcome -ne 0) { $firewallWhy = "it failed with exit code $outcome" }
+                else { Write-Host "Added the firewall rule for fravashi.exe." }
+            }
+            else {
+                Stop-Job $job
+                $firewallWhy = 'nobody answered the administrator prompt within five minutes'
+            }
+            Remove-Job $job -Force
+        }
+    }
+}
+catch {
+    $env:FRAVASHI_FIREWALL_FUNCTIONS_ONLY = $null
+    $firewallWhy = "the step failed: $_"
+}
+if ($firewallWhy) {
+    if (Get-Command Get-FirewallAdvice -ErrorAction SilentlyContinue) {
+        Get-FirewallAdvice -Program $fravashiExe -Why $firewallWhy | ForEach-Object { Write-Host $_ }
+    }
+    else {
+        Write-Host "The firewall rule for fravashi.exe was not set ($firewallWhy). If Windows Firewall asks about fravashi.exe at the first start, choose Allow."
+    }
 }
 
 Write-Host ""

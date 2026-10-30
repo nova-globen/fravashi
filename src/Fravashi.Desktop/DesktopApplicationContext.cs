@@ -73,7 +73,10 @@ internal sealed class DesktopApplicationContext : ApplicationContext, IStudioRec
     /// <summary>How long a "is the studio already up" probe waits before we assume it has to be started.</summary>
     private static readonly TimeSpan StudioProbeTimeout = TimeSpan.FromSeconds(2);
 
-    public DesktopApplicationContext(ParsedCommand parsed, EventWaitHandle exitEvent, EventWaitHandle activateEvent)
+    /// <param name="splash">The splash <see cref="Program"/> already showed, before anything slow ran (backlog 379).</param>
+    /// <param name="splashAfter">How long after the process started it was on screen, said once in the launcher log.</param>
+    public DesktopApplicationContext(
+        ParsedCommand parsed, EventWaitHandle exitEvent, EventWaitHandle activateEvent, SplashForm splash, TimeSpan splashAfter)
     {
         _parsed = parsed;
         _exitEvent = exitEvent;
@@ -93,11 +96,11 @@ internal sealed class DesktopApplicationContext : ApplicationContext, IStudioRec
             string.IsNullOrWhiteSpace(storedConfig?.DataDir) ? LauncherApp.DefaultDataDir() : storedConfig!.DataDir!,
             _ => { });
         WindowLog.Init(_launcherLog.Directory);
+        _launcherLog.Line(LaunchTiming.SplashShown(splashAfter));
 
-        _splash = new SplashForm();
-        _splash.Show();
-        // The WinForms context exists once the first control is created; capture it for marshalling
-        // that outlives the splash.
+        _splash = splash;
+        // The WinForms context exists once the first control is created (the splash, in Program); capture it for
+        // marshalling that outlives the splash.
         _ui = SynchronizationContext.Current!;
 
         _exitWait = ThreadPool.RegisterWaitForSingleObject(

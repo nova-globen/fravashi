@@ -108,10 +108,15 @@ echo "3/3  Publishing fravashi.exe (merged launcher + studio window + tray) for 
 # EnableWindowsTargeting to true"). With it, the WindowsDesktop reference and runtime packs are restored
 # from NuGet like any other pack and the publish produces a genuine win-x64 GUI PE. It is a no-op on a
 # Windows host, so it is passed unconditionally rather than probed for.
+# Stamped with the bundle's version (backlog 381): the numeric part as the file version, the whole as the informational
+# one, as setup/release/build-release-local.ps1 does.
 dotnet publish "$repo_root/src/Fravashi.Desktop/Fravashi.Desktop.csproj" \
     -c Release -r "$rid" --self-contained true \
     -p:PublishSingleFile=true \
     -p:EnableWindowsTargeting=true \
+    "-p:Version=${version%%[!0-9.]*}" \
+    "-p:InformationalVersion=$version" \
+    -p:IncludeSourceRevisionInInformationalVersion=false \
     -o "$bundle/launcher"
 
 
@@ -158,5 +163,7 @@ rm -rf "$rg_extract"
 echo "     Bundled ripgrep $rg_version (rg.exe) beside fravashi.exe."
 
 cp "$here/install/install-windows.ps1" "$bundle/"
+# The installer's one elevated step (backlog 374), run from beside it.
+cp "$here/install/firewall-rule.ps1" "$bundle/"
 
 echo "Bundle ready: $bundle"
