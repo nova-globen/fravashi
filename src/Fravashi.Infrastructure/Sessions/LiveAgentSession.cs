@@ -284,6 +284,8 @@ public sealed class LiveAgentSession
                 InputTokens = carried.InputTokens + now.InputTokens,
                 OutputTokens = carried.OutputTokens + now.OutputTokens,
                 CacheReadTokens = carried.CacheReadTokens + now.CacheReadTokens,
+                CacheWriteTokens = carried.CacheWriteTokens + now.CacheWriteTokens,
+                FreeTierUnits = carried.FreeTierUnits + now.FreeTierUnits,
                 CostUsd = carried.CostUsd + now.CostUsd,
                 ToolCalls = carried.ToolCalls + now.ToolCalls,
                 RateLimitHits = carried.RateLimitHits + now.RateLimitHits,

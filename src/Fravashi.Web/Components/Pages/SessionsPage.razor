@@ -79,6 +79,7 @@
 
             @* The running totals sit below the list, spanning every workspace on purpose (backlog 19). *@
             <SessionTotalsStrip Totals="_totals" Limits="Registry.SpendLimits" />
+            <FreeTierUsageLine Version="_usageVersion" />
         </Sidebar>
         <Body>
             @* Backlog 44: gate G1 is only half a feature if the user cannot see what the conversation is
@@ -375,6 +376,7 @@
     protected override async Task OnInitializedAsync()
     {
         Registry.SessionsChanged += OnSessionsChanged;
+        Registry.UsageChanged += OnUsageChanged;
         _titles = new ConversationTitleSource(Services);
         _titles.Changed += OnTitleLinksChanged;
         await LoadImportedAsync();
@@ -473,6 +475,16 @@
             StateHasChanged();
         }
     });
+
+    /// <summary>Backlog 377: a finished turn moves the totals, so they are read again then, not only when a session ends.</summary>
+    private void OnUsageChanged() => InvokeAsync(() =>
+    {
+        _totals = Registry.UsageTotals();
+        _usageVersion++;
+        StateHasChanged();
+    });
+
+    private int _usageVersion;
 
     private void SelectImported(string name)
     {
@@ -628,6 +640,7 @@
         }
 
         Registry.SessionsChanged -= OnSessionsChanged;
+        Registry.UsageChanged -= OnUsageChanged;
         _disposed.Cancel();
         _disposed.Dispose();
     }

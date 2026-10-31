@@ -1,0 +1,20 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Domain.AgentSessions
+
+@* Backlog 377: the free-tier units of one totals row, shown only when the credential broker carried some of its turns.
+   They are not money: the cost beside them already leaves those turns out. *@
+@if (Total.FreeTierUnits > 0)
+{
+    <span class="session-totals-sep" aria-hidden="true">&middot;</span>
+    <span class="session-totals-tokens" data-testid="@TestId" title="@SessionUsageFormat.FreeTierTitle(Total.FreeTierUnits)">
+        @SessionUsageFormat.Units(Total.FreeTierUnits) free
+    </span>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public UsageTotal Total { get; set; } = UsageTotal.Zero;
+
+    [Parameter, EditorRequired]
+    public string TestId { get; set; } = string.Empty;
+}

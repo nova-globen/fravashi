@@ -49,6 +49,15 @@ public sealed partial class ProcessAgentRuntimeService : IAgentRuntimeService
         var descriptor = AgentRuntimeCatalog.For(tool);
         var before = await ReadVersionAsync(descriptor, cancellationToken);
 
+        // Backlog 377's 1.0.2 proof (2026-10-31): a CLI that answers its version AT the pin is left alone. Reinstalling it
+        // at every container start is what broke it on the test VM: npm replaced the package, failed its platform binary
+        // as an optional dependency without a word, ran a postinstall that put a placeholder in its place, and exited 0.
+        if (before is not null && !descriptor.IsOffPin(before))
+        {
+            return new AgentRuntimeUpdateResult(
+                tool, AgentRuntimeUpdateOutcome.Succeeded, before, before, "Already on the pinned version.", DateTimeOffset.UtcNow);
+        }
+
         // Pinned by construction (backlog 61): UpdateArguments carries the exact version, so neither this
         // method nor any caller of it can install whatever the registry happens to be serving today.
         var result = await _runner.RunAsync(
@@ -70,6 +79,24 @@ public sealed partial class ProcessAgentRuntimeService : IAgentRuntimeService
         }
 
         var after = await ReadVersionAsync(descriptor, cancellationToken);
+
+        // npm's success is not the CLI's: an optional platform package it failed is not an error to npm. A CLI that
+        // does not answer its version after a "successful" install is installed once more, and if it still does not,
+        // the pass says so instead of recording a success over a CLI no conversation can start.
+        if (result.Success && !Runs(after))
+        {
+            result = await _runner.RunAsync(
+                new AgentCommand("npm", descriptor.UpdateArguments, UpdateTimeout),
+                cancellationToken);
+            after = await ReadVersionAsync(descriptor, cancellationToken);
+            if (result.Success && !Runs(after))
+            {
+                return new AgentRuntimeUpdateResult(tool, AgentRuntimeUpdateOutcome.Failed, before, null,
+                    "npm reported success, but the CLI does not run afterwards (its platform binary was left out); " +
+                    "this is tried again at the next start.", DateTimeOffset.UtcNow);
+            }
+        }
+
         var now = DateTimeOffset.UtcNow;
 
         if (result.Success)
@@ -212,6 +239,10 @@ public sealed partial class ProcessAgentRuntimeService : IAgentRuntimeService
             cancellationToken);
         return result.Started ? ParseVersion(result.StandardOutput + "\n" + result.StandardError) : null;
     }
+
+    /// <summary>True when a version probe answered something that reads as a version, not an error line.</summary>
+    private static bool Runs(string? version) =>
+        version is not null && System.Text.RegularExpressions.Regex.IsMatch(version, @"^\d+\.\d+");
 
     /// <summary>Extracts a semver-ish version token from CLI version output, or the first non-empty line.</summary>
     public static string? ParseVersion(string output)

@@ -216,6 +216,12 @@ public sealed class LiveSessionRegistry : IDisposable
     /// <summary>Raised when a session starts or ends, for surfaces that list them.</summary>
     public event Action? SessionsChanged;
 
+    /// <summary>
+    /// Raised when a turn has finished and its usage is stored, for surfaces that show what was spent (backlog 377). The
+    /// totals used to refresh only when a session started or ended, so a live conversation read $0.00 there.
+    /// </summary>
+    public event Action? UsageChanged;
+
     /// <summary>Every session this studio process currently holds, most recently active (started or resumed) first.</summary>
     public IReadOnlyList<LiveAgentSession> Sessions =>
         [.. _sessions.Values.OrderByDescending(s => s.ActivatedUtc)];
@@ -1800,6 +1806,7 @@ public sealed class LiveSessionRegistry : IDisposable
 
                 if (e is TurnCompleted turn)
                 {
+                    UsageChanged?.Invoke();
                     lastTurnFailure = NetworkTurnFailure.Of(turn, cliApiError);
                     lastTurnTokenRefused = _credentials is not null && CredentialTurnFailure.Refused(turn, cliApiError);
                     cliApiError = null;

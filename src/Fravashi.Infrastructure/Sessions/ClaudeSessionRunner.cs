@@ -184,7 +184,7 @@ public sealed class ClaudeSessionRunner : IAgentSessionRunner
         // The parser deliberately does NOT know whether a schema went out with the process. It commits
         // every assistant text block where it arrives either way, and the document at the result line is
         // suppressed only when it repeats a bubble already committed, which needs no such flag.
-        var parser = new ClaudeStreamJsonParser(_clock);
+        var parser = new ClaudeStreamJsonParser(_clock, () => _credentials?.BrokerCarries(AgentTool.Claude) == true);
         var errors = new StringBuilder();
         using var pumps = new CancellationTokenSource();
 

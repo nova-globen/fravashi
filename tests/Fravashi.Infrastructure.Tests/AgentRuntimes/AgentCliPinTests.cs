@@ -556,9 +556,22 @@ public class AgentCliPinTests
     /// the Windows host; work item #353 found the real cause, the opening note every new session's first turn carries,
     /// and rewrote that test on 2026-10-23, after which the whole file passed 14 of 14 on the same host.)
     /// </para>
+    /// <para>
+    /// Re-recorded 2026-10-30 for work item #377, verified MECHANICALLY: the previous rendering, regenerated from
+    /// 01db62c in this checkout, hashed to the constant this line replaced (<c>2d029115...</c>), and only the 40
+    /// <c>StatsUpdated</c> lines differ; with <c>CacheWriteTokens</c>, <c>FreeTierUnits</c> and <c>CostUsd</c> removed
+    /// from both, no line differs. The costs that moved: the two single-turn recordings are now priced by the studio at
+    /// exactly the CLI's figure for Haiku 4.5 ($0.0200345 and $0.0197322, where the decimal parse had carried float
+    /// noise), and <c>claude-multi-turn.jsonl</c> goes from $0.0339028 to $0.0187992, because the CLI's
+    /// <c>total_cost_usd</c> is the process's running total and the second turn's was being added on top of the first.
+    /// The fields the parser newly reads (<c>cache_creation_input_tokens</c>, its five-minute and one-hour split,
+    /// <c>iterations</c>) are in the 2.1.280 recordings too; <c>canonicalModel</c> is in no 2.1.280 recording (those are
+    /// error turns with an empty <c>modelUsage</c>), and without it the price is found from the dated model id. No
+    /// transcript text moved; the live tier against 2.1.280 was not re-driven for this record.
+    /// </para>
     /// </summary>
     private const string ParserSurfaceFingerprint =
-        "2d02911513feaf227276f230efb64e6174624e2610cddadca48619589580bb4c";
+        "11ef73e61abe14e8f3b9ff4b83d0541558ad9ffdbeb9fc44224b6c0d96d7d900";
 
     private static string Render(AgentEvent e) =>
         e.GetType().Name + "(" + string.Join(

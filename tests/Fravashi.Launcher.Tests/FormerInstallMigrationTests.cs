@@ -291,6 +291,64 @@ public sealed class FormerInstallMigrationTests : IDisposable
         _engine.RemovedImages.Should().ContainSingle();
     }
 
+    // ---- backlog 384: once nothing is left, a start asks the engine nothing --------------------------------------
+
+    private int _engineAsked;
+
+    private IContainerRuntime CountedEngine(LauncherConfig _)
+    {
+        _engineAsked++;
+        return _engine;
+    }
+
+    [Fact]
+    public void A_healthy_start_that_finds_nothing_former_marks_the_install_and_later_starts_skip_the_engine()
+    {
+        FormerInstallOnDisk();
+        _engine.Images.Add(FormerInstall.Image);
+        new FormerInstallMigration(Store, CountedEngine, _log.Add, () => Now).Run().Complete.Should().BeTrue();
+
+        FormerInstallMigration.RetireFormerImage(Store, CountedEngine, _log.Add).Should().BeTrue();
+        Store.Load()!.FormerNamesRetired.Should().BeTrue();
+        _engine.Images.Should().NotContain(FormerInstall.Image);
+
+        _engineAsked = 0;
+        new FormerInstallMigration(Store, CountedEngine, _log.Add, () => Now).Run().Complete.Should().BeTrue();
+        FormerInstallMigration.RetireFormerImage(Store, CountedEngine, _log.Add).Should().BeTrue();
+        _engineAsked.Should().Be(0, "a start after the mark asks the engine nothing");
+    }
+
+    [Fact]
+    public void The_mark_waits_while_a_former_container_is_left()
+    {
+        Store.Save(new LauncherConfig { Port = 9090, DataDir = Data });
+        _engine.Containers.Add(FormerInstall.VpnContainerName);
+
+        FormerInstallMigration.RetireFormerImage(Store, CountedEngine, _log.Add).Should().BeFalse();
+        Store.Load()!.FormerNamesRetired.Should().BeNull();
+    }
+
+    [Fact]
+    public void A_restored_former_database_runs_the_migration_again_despite_the_mark()
+    {
+        FormerInstallOnDisk();
+        Store.Save(Store.Load()! with
+        {
+            ContainerName = LauncherDefaults.ContainerName,
+            Image = LauncherDefaults.Image,
+            FormerNamesRetired = true,
+        });
+        _engine.Containers.Clear();
+        _engine.Running.Clear();
+        SqliteConnection.ClearAllPools();
+
+        new FormerInstallMigration(Store, CountedEngine, _log.Add, () => Now).Run().Complete.Should().BeTrue();
+
+        _engineAsked.Should().Be(1);
+        File.Exists(FormerDb).Should().BeFalse();
+        Rows(CurrentDb).Should().Be(4);
+    }
+
     /// <summary>An engine that knows containers, networks and images by name, which the shared fake does not.</summary>
     private sealed class NamedEngine : IContainerRuntime
     {

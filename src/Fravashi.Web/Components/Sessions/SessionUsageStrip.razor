@@ -53,11 +53,25 @@
         </span>
     }
 
-    <span class="session-usage-sep" aria-hidden="true">&middot;</span>
-    <span class="session-usage-value" data-testid="session-cost"
-          title="Cost of this conversation so far, as the agent CLI reports it">
-        @SessionUsageFormat.Cost(Stats.CostUsd)
-    </span>
+    @* Backlog 377: a turn the credential broker carried costs nothing, so a conversation that used only the free tier
+       shows the units it used of the day's allowance, never a dollar figure nobody pays. *@
+    @if (Stats.CostUsd > 0m || Stats.FreeTierUnits == 0)
+    {
+        <span class="session-usage-sep" aria-hidden="true">&middot;</span>
+        <span class="session-usage-value" data-testid="session-cost"
+              title="Cost of this conversation so far, priced from the model's published rates">
+            @SessionUsageFormat.Cost(Stats.CostUsd)
+        </span>
+    }
+
+    @if (Stats.FreeTierUnits > 0)
+    {
+        <span class="session-usage-sep" aria-hidden="true">&middot;</span>
+        <span class="session-usage-value" data-testid="session-free-tier"
+              title="@SessionUsageFormat.FreeTierTitle(Stats.FreeTierUnits)">
+            @SessionUsageFormat.Units(Stats.FreeTierUnits) free
+        </span>
+    }
 
     <span class="session-usage-sep" aria-hidden="true">&middot;</span>
     <span class="session-usage-value" data-testid="session-tools">@SessionUsageFormat.Tools(Stats.ToolCalls)</span>

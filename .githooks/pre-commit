@@ -112,8 +112,23 @@ check_no_dashes() {
   done <<< "${files}"
 }
 
+# A checkout may carry its own private check under tools/ci (left out of the public source), run here where it exists.
+check_private() {
+  local check="${repo_root}/tools/ci/check-public-names.py"
+  [ -f "${check}" ] || return 0
+  local python
+  python="$(command -v python || command -v python3 || true)"
+  if [ -z "${python}" ]; then
+    echo "pre-commit: tools/ci/check-public-names.py needs Python, which is not on PATH." >&2
+    failed=1
+    return 0
+  fi
+  "${python}" -I "${check}" || failed=1
+}
+
 check_licenses
 check_npm_licenses
 check_no_dashes
+check_private
 
 exit "${failed}"

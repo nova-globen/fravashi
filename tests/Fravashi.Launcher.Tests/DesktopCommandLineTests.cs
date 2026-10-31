@@ -25,6 +25,7 @@ public sealed class DesktopCommandLineTests
     [InlineData(new[] { "version" }, DesktopVerb.Version)]
     [InlineData(new[] { "--version" }, DesktopVerb.Version)]
     [InlineData(new[] { "STATUS" }, DesktopVerb.Status)] // case-insensitive
+    [InlineData(new[] { "uninstall" }, DesktopVerb.Uninstall)]
     public void Parse_ResolvesVerb(string[] args, DesktopVerb expected)
         => DesktopCommandLine.Parse(args).Verb.Should().Be(expected);
 
@@ -42,8 +43,36 @@ public sealed class DesktopCommandLineTests
     [InlineData(DesktopVerb.Update, false)]
     [InlineData(DesktopVerb.Repin, false)]
     [InlineData(DesktopVerb.Unknown, false)]
+    [InlineData(DesktopVerb.Uninstall, false)]
     public void IsWindowVerb_SplitsGuiVerbsFromConsoleVerbs(DesktopVerb verb, bool expected)
         => DesktopCommandLine.IsWindowVerb(verb).Should().Be(expected);
+
+    [Fact]
+    public void Uninstall_keeps_the_data_unless_asked_and_asks_unless_told_yes()
+    {
+        // Backlog 375.
+        DesktopCommandLine.Parse(["uninstall"]).Should().BeEquivalentTo(new ParsedCommand(DesktopVerb.Uninstall));
+        DesktopCommandLine.Parse(["uninstall", "--remove-data"]).RemoveData.Should().BeTrue();
+        DesktopCommandLine.Parse(["uninstall", "--yes"]).Yes.Should().BeTrue();
+        DesktopCommandLine.Parse(["uninstall", "-y", "--remove-data"]).Should().BeEquivalentTo(
+            new ParsedCommand(DesktopVerb.Uninstall, RemoveData: true, Yes: true));
+    }
+
+    [Fact]
+    public void Uninstall_through_the_shared_dispatcher_says_it_needs_the_installed_executable()
+    {
+        var said = new List<string>();
+        var code = DesktopCommandLine.Execute(new ParsedCommand(DesktopVerb.Uninstall), null!, said.Add);
+
+        code.Should().Be(ExitCodes.UsageError);
+        said.Should().ContainSingle().Which.Should().Contain("uninstall").And.Contain("fravashi.exe");
+    }
+
+    [Fact]
+    public void Help_names_uninstall_and_that_the_data_is_kept()
+    {
+        DesktopCommandLine.HelpText.Should().Contain("uninstall").And.Contain("data is KEPT").And.Contain("--remove-data");
+    }
 
     [Fact]
     public void Parse_OpenOption_CarriesTheFolderOnWindowVerbs()

@@ -66,6 +66,24 @@ public sealed class FirewallRuleScriptTests
     }
 
     [PwshFact]
+    public void On_uninstall_every_rule_for_the_program_goes_a_persons_allow_included_and_no_other_programs()
+    {
+        // Backlog 375.
+        var output = Run($$"""
+            $rules = @(
+              [pscustomobject]@{ Name = 'Fravashi-Inbound'; Action = 'Allow'; Program = '{{Exe}}' },
+              [pscustomobject]@{ Name = 'Somebody allowed it'; Action = 'Allow'; Program = '{{Exe.ToLowerInvariant()}}' },
+              [pscustomobject]@{ Name = 'TCP Query User{A}x'; Action = 'Block'; Program = '{{Exe}}' },
+              [pscustomobject]@{ Name = 'Another app'; Action = 'Allow'; Program = 'c:\other\app.exe' },
+              [pscustomobject]@{ Name = 'Fravashi-Inbound'; Action = 'Allow'; Program = $null }
+            )
+            (Select-RulesForUninstall -Rules $rules -Program '{{Exe}}' | ForEach-Object Name | Sort-Object -Unique) -join '|'
+            """);
+
+        output.Split('|').Should().BeEquivalentTo("Fravashi-Inbound", "Somebody allowed it", "TCP Query User{A}x");
+    }
+
+    [PwshFact]
     public void The_rule_is_inbound_tcp_for_the_program_from_the_local_networks_and_pins_no_port()
     {
         var spec = JsonDocument.Parse(Run($"New-RuleSpec '{Exe}' | ConvertTo-Json -Compress")).RootElement;
@@ -112,6 +130,12 @@ public sealed class FirewallRuleScriptTests
         installer.Should().Contain("Wait-Job $job -Timeout", "a prompt nobody answers must not hang the install");
 
         File.ReadAllText(Path.Combine(Root(), "setup", "build-bundle.sh")).Should().Contain("install/firewall-rule.ps1");
+
+        // Backlog 375: the Apps & Features entry, under the key the uninstall removes, starting the uninstall.
+        installer.Should().Contain(@"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Fravashi");
+        installer.Should().Contain("uninstall --yes");
+        File.ReadAllText(Path.Combine(Root(), "src", "Fravashi.Desktop", "WindowsUninstallHost.cs"))
+            .Should().Contain(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\Fravashi", "the uninstall removes the key the installer writes");
         File.ReadAllText(Path.Combine(Root(), "setup", "webinstall", "webinstall.ps1"))
             .Should().Contain("$installArgs.NoElevationPrompt = $true");
     }

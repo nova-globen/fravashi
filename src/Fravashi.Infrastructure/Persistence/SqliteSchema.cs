@@ -50,7 +50,7 @@ public static class SqliteSchema
     /// <c>work_item_scenarios</c> and <c>work_item_scenario_steps</c>, all created empty. v14 (backlog 37,
     /// increment C2) adds <c>work_item_evidence</c>, the append-only record of what was checked, also empty.
     /// </summary>
-    public const int CurrentVersion = 49;
+    public const int CurrentVersion = 50;
 
     // --- Per-version deltas -------------------------------------------------------------------------
     // Each constant is exactly the DDL/DML that a single shipped schema bump added. They are split out of
@@ -351,6 +351,7 @@ public static class SqliteSchema
         new(47, (c, t) => AddReleases(c, t)),
         new(48, (c, t) => UnbindDefaultFolders(c, t)),
         new(49, (c, t) => RenameFormerStoredNames(c, t)),
+        new(50, (c, t) => AddCacheWritesAndFreeTierUnits(c, t)),
     ];
 
     // Schema step 48 (item #373, docs/plans/first-open-setup.md): NO SHARED BUCKET. A folder nobody put in a project
@@ -379,6 +380,28 @@ public static class SqliteSchema
         DROP TABLE workspaces;
         ALTER TABLE workspaces_v48 RENAME TO workspaces;
         """;
+
+    /// <summary>
+    /// Schema step 50 (backlog 377): the usage summary counts cache writes and the credential broker's free-tier units.
+    /// Cache writes are most of a first turn's cost and were not recorded; a brokered turn costs the person nothing and is
+    /// counted in the broker's units instead, by the day it was used, so the day's allowance can be shown. Every existing
+    /// row recorded neither, so both start at zero and nothing is backfilled. Each column is probed before it is added,
+    /// and a table this database does not have (a partial schema a migration test builds) is left alone.
+    /// </summary>
+    private static void AddCacheWritesAndFreeTierUnits(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        void AddColumn(string table, string name)
+        {
+            if (TableExists(connection, table) && !ColumnExists(connection, table, name))
+            {
+                SchemaMigrator.Execute(connection, transaction, $"ALTER TABLE {table} ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0;");
+            }
+        }
+
+        AddColumn("agent_sessions", "cache_write_tokens");
+        AddColumn("agent_sessions", "free_tier_units");
+        AddColumn("agent_session_usage_days", "free_tier_units");
+    }
 
     /// <summary>
     /// Schema step 49 (the bridge release of the internal rename, <c>docs/plans/rename-internal-names.md</c> phase 2): the

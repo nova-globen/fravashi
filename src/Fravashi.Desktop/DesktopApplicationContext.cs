@@ -238,8 +238,9 @@ internal sealed class DesktopApplicationContext : ApplicationContext, IStudioRec
 
         else
         {
-            // The bridge release: once the studio under the new names answers healthy, the former image tag goes.
-            FormerInstallMigration.RetireFormerImage(ContainerRuntimeDetector.Detect(_configStore.Load()), _launcherLog.Line);
+            // The bridge release: once the studio under the new names answers healthy, the former image tag goes, and once
+            // nothing of the former names is left launcher.json says so and later starts ask the engine nothing (#384).
+            FormerInstallMigration.RetireFormerImage(_configStore, ContainerRuntimeDetector.Detect, _launcherLog.Line);
         }
 
         _splash.SetPhase(LaunchPhase.Ready);

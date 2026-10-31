@@ -73,7 +73,7 @@ public sealed record BackupManifest
     /// which is the only place the two halves can be compared: the launcher cannot see the schema code.
     /// </para>
     /// </summary>
-    public const int KnownSchemaVersion = 49;
+    public const int KnownSchemaVersion = 50;
 }
 
 /// <summary>One configured provider recorded at backup time - what to check after moving machines.</summary>

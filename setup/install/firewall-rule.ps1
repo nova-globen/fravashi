@@ -18,7 +18,9 @@
 # the functions alone (FirewallRuleScriptTests). Runs under Windows PowerShell 5.1, so keep to its syntax.
 param(
     # The installed fravashi.exe the rule is for.
-    [string]$Program = ""
+    [string]$Program = "",
+    # The uninstall (backlog 375): remove every inbound rule for the program, its own rule included, and add none.
+    [switch]$Remove
 )
 
 $script:RuleName = 'Fravashi-Inbound'
@@ -39,6 +41,14 @@ function Select-RulesToRemove {
             $_.Program -and (Get-NormalizedProgram $_.Program) -eq $target -and (
                 $_.Action -eq 'Block' -or $_.Name -like '*Query User*' -or $_.Name -eq $script:RuleName)
         })
+}
+
+function Select-RulesForUninstall {
+    <# On uninstall (backlog 375) every inbound rule for this program goes, an Allow a person made included: the program
+       it lets in is being removed. Rules for any other program stay. #>
+    param([object[]]$Rules, [string]$Program)
+    $target = Get-NormalizedProgram $Program
+    @($Rules | Where-Object { ($_.Program -and (Get-NormalizedProgram $_.Program) -eq $target) -or $_.Name -eq $script:RuleName })
 }
 
 function New-RuleSpec([string]$Program) {
@@ -93,9 +103,20 @@ try {
                 [pscustomobject]@{ Name = $rule.Name; Action = [string]$rule.Action; Program = $_.Program; DisplayName = $rule.DisplayName }
             }
         })
-    foreach ($rule in (Select-RulesToRemove -Rules $inbound -Program $Program)) {
+    $selected = if ($Remove) {
+        # The script's own rule by name too, in case its program path was written differently.
+        $own = @(Get-NetFirewallRule -Name $script:RuleName -ErrorAction SilentlyContinue |
+            ForEach-Object { [pscustomobject]@{ Name = $_.Name; Action = [string]$_.Action; Program = $null; DisplayName = $_.DisplayName } })
+        Select-RulesForUninstall -Rules ($inbound + $own) -Program $Program
+    }
+    else { Select-RulesToRemove -Rules $inbound -Program $Program }
+    foreach ($rule in @($selected | Sort-Object Name -Unique)) {
         Remove-NetFirewallRule -Name $rule.Name
         Write-Host "Removed the firewall rule '$($rule.DisplayName)' ($($rule.Action))."
+    }
+    if ($Remove) {
+        Write-Host "Removed $(@($selected).Count) firewall rule(s) for fravashi.exe."
+        exit 0
     }
     $spec = New-RuleSpec $Program
     New-NetFirewallRule @spec | Out-Null

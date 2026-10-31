@@ -153,6 +153,8 @@ public static class AgentEventJson
                 payload["contextTokens"] = stats.Stats.ContextTokens;
                 payload["contextWindow"] = stats.Stats.ContextWindow;
                 payload["baselineTokens"] = stats.Stats.BaselineTokens;
+                payload["cacheWriteTokens"] = stats.Stats.CacheWriteTokens;
+                payload["freeTierUnits"] = stats.Stats.FreeTierUnits;
                 break;
             case TurnCompleted turn:
                 payload["resultText"] = turn.ResultText;
@@ -307,7 +309,10 @@ public static class AgentEventJson
                 // older row simply has no fixed-prefix split to offer.
                 Integer(payload, "contextTokens"),
                 Integer(payload, "contextWindow"),
-                Integer(payload, "baselineTokens"))),
+                Integer(payload, "baselineTokens"),
+                // Backlog 377: an older row recorded neither, and reads as none.
+                Integer(payload, "cacheWriteTokens"),
+                Integer(payload, "freeTierUnits"))),
             "turn_completed" => new TurnCompleted(
                 timestamp,
                 Text(payload, "resultText"),

@@ -175,6 +175,59 @@ public class ProcessAgentRuntimeServiceTests
     }
 
     [Fact]
+    public async Task A_cli_already_on_the_pin_is_not_reinstalled()
+    {
+        // The 1.0.2 proof on the test VM: reinstalling a working pinned CLI at a container start left it broken.
+        var pinned = AgentRuntimeCatalog.For(AgentTool.Claude).PinnedVersion;
+        var runner = new FakeAgentCommandRunner { Handler = cmd => Ok($"{pinned} (Claude Code)") };
+
+        var result = await Build(runner, new FakeSecretStore()).InstallOrUpdateAsync(AgentTool.Claude);
+
+        result.Outcome.Should().Be(AgentRuntimeUpdateOutcome.Succeeded);
+        result.ToVersion.Should().Be(pinned);
+        runner.Calls.Should().NotContain(c => c.FileName == "npm");
+    }
+
+    [Fact]
+    public async Task An_install_npm_calls_a_success_but_that_leaves_no_runnable_cli_is_retried_once_then_failed()
+    {
+        // npm exits 0 when it drops the platform binary as a failed optional dependency; the CLI then answers nothing.
+        var installs = 0;
+        var runner = new FakeAgentCommandRunner
+        {
+            Handler = cmd => cmd.FileName == "npm"
+                ? Ok($"installed {++installs}")
+                : new AgentCommandResult(true, 1, string.Empty, "Error: claude native binary not installed.", false),
+        };
+
+        var result = await Build(runner, new FakeSecretStore()).InstallOrUpdateAsync(AgentTool.Claude);
+
+        installs.Should().Be(2);
+        result.Outcome.Should().Be(AgentRuntimeUpdateOutcome.Failed);
+        result.Message.Should().Contain("does not run afterwards");
+    }
+
+    [Fact]
+    public async Task A_retry_that_makes_the_cli_run_is_a_success()
+    {
+        var pinned = AgentRuntimeCatalog.For(AgentTool.Claude).PinnedVersion;
+        var installs = 0;
+        var runner = new FakeAgentCommandRunner
+        {
+            Handler = cmd => cmd.FileName == "npm"
+                ? Ok(++installs == 1 ? "installed" : "installed again")
+                : installs >= 2 ? Ok($"{pinned} (Claude Code)")
+                : new AgentCommandResult(true, 1, string.Empty, "Error: claude native binary not installed.", false),
+        };
+
+        var result = await Build(runner, new FakeSecretStore()).InstallOrUpdateAsync(AgentTool.Claude);
+
+        installs.Should().Be(2);
+        result.Outcome.Should().Be(AgentRuntimeUpdateOutcome.Succeeded);
+        result.ToVersion.Should().Be(pinned);
+    }
+
+    [Fact]
     public async Task Update_failure_is_reported_not_thrown()
     {
         var runner = new FakeAgentCommandRunner

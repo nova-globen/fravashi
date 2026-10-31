@@ -96,6 +96,13 @@ public sealed class FormerInstallMigration
             failures.Add($"launcher.json still names the former container or image ({namesFailed})");
         }
 
+        // Backlog 384: an install a healthy start already found clean asks the engine nothing. The database's former name
+        // is a file on this machine, so a restore that brings it back is still noticed, and then the full migration runs.
+        if (config.FormerNamesRetired == true && failures.Count == 0 && !FormerDatabaseExists(config))
+        {
+            return new FormerInstallResult(true, failures);
+        }
+
         IContainerRuntime? runtime = null;
         var containersGone = false;
         if (Step(FormerInstallStep.Containers, () =>
@@ -122,6 +129,40 @@ public sealed class FormerInstallMigration
         }
 
         return new FormerInstallResult(failures.Count == 0, failures);
+    }
+
+    /// <summary>
+    /// <see cref="RetireFormerImage(IContainerRuntime, Action{string})"/> for this install, after a healthy start: skipped
+    /// without asking the engine anything once launcher.json is marked <see cref="LauncherConfig.FormerNamesRetired"/>,
+    /// and the mark is written when the former image tag is gone and no former container or sidecar is left (backlog 384).
+    /// </summary>
+    public static bool RetireFormerImage(LauncherConfigStore store, Func<LauncherConfig, IContainerRuntime> runtimeFor, Action<string> log)
+    {
+        try
+        {
+            if (store.Load() is not { } config || config.FormerNamesRetired == true)
+            {
+                return true;
+            }
+
+            var runtime = runtimeFor(config);
+            if (!RetireFormerImage(runtime, log)
+                || runtime.ContainerExists(FormerNames.ContainerName)
+                || runtime.ContainerExists(FormerNames.VpnContainerName)
+                || FormerDatabaseExists(config))
+            {
+                return false;
+            }
+
+            store.Save(config with { FormerNamesRetired = true });
+            log($"Nothing of {ProductName.Short}'s former names is left; later starts no longer look for them.");
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            log($"Whether the former names are gone could not be recorded ({ex.Message}); this is tried again at the next start.");
+            return false;
+        }
     }
 
     /// <summary>
@@ -330,6 +371,9 @@ public sealed class FormerInstallMigration
             + $"integrity check, and the copy taken first is in {backupDir}.");
         return null;
     }
+
+    private static bool FormerDatabaseExists(LauncherConfig config) =>
+        !string.IsNullOrWhiteSpace(config.DataDir) && File.Exists(Path.Combine(config.DataDir, FormerNames.DatabaseFileName));
 
     private string? Step(FormerInstallStep step, Func<string?> body)
     {

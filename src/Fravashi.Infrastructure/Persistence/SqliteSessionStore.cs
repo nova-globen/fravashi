@@ -144,7 +144,8 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
             {
                 latestUsage = stats.Stats;
                 ledger ??= LedgerFor(connection, transaction, id);
-                ledger?.Observe(stats.Timestamp, stats.Stats.CostUsd, stats.Stats.InputTokens, stats.Stats.OutputTokens);
+                ledger?.Observe(
+                    stats.Timestamp, stats.Stats.CostUsd, stats.Stats.InputTokens, stats.Stats.OutputTokens, stats.Stats.FreeTierUnits);
             }
 
             if (AgentEventJson.KindOf(e) is not { } eventKind)
@@ -172,11 +173,12 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT cost_usd, input_tokens, output_tokens FROM agent_sessions WHERE id = $s;";
+        command.CommandText =
+            "SELECT cost_usd, input_tokens, output_tokens, free_tier_units FROM agent_sessions WHERE id = $s;";
         command.Parameters.AddWithValue("$s", id.ToString());
         using var reader = command.ExecuteReader();
         return reader.Read()
-            ? new SessionUsageLedger(ParseCost(reader, 0), reader.GetInt64(1), reader.GetInt64(2))
+            ? new SessionUsageLedger(ParseCost(reader, 0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3))
             : null;
     }
 
@@ -193,11 +195,14 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
         command.Transaction = transaction;
         command.CommandText =
             "UPDATE agent_sessions SET cost_usd = $cost, input_tokens = $in, output_tokens = $out, " +
-            "cache_read_tokens = $cache, tool_calls = $tools WHERE id = $s;";
+            "cache_read_tokens = $cache, cache_write_tokens = $write, free_tier_units = $units, tool_calls = $tools " +
+            "WHERE id = $s;";
         command.Parameters.AddWithValue("$cost", usage.CostUsd.ToString(CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$in", usage.InputTokens);
         command.Parameters.AddWithValue("$out", usage.OutputTokens);
         command.Parameters.AddWithValue("$cache", usage.CacheReadTokens);
+        command.Parameters.AddWithValue("$write", usage.CacheWriteTokens);
+        command.Parameters.AddWithValue("$units", usage.FreeTierUnits);
         command.Parameters.AddWithValue("$tools", usage.ToolCalls);
         command.Parameters.AddWithValue("$s", id.ToString());
         command.ExecuteNonQuery();
@@ -220,6 +225,7 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
 
         decimal dayCost = 0m, monthCost = 0m, allCost = 0m;
         long dayTokens = 0, monthTokens = 0, allTokens = 0;
+        long dayUnits = 0, monthUnits = 0, allUnits = 0;
         var allSessions = 0;
         var daySessions = new HashSet<string>(StringComparer.Ordinal);
         var monthSessions = new HashSet<string>(StringComparer.Ordinal);
@@ -227,7 +233,7 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
         using (var command = connection.CreateCommand())
         {
             command.CommandText =
-                "SELECT id, started_utc, cost_usd, input_tokens, output_tokens FROM agent_sessions;";
+                "SELECT id, started_utc, cost_usd, input_tokens, output_tokens, free_tier_units FROM agent_sessions;";
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
@@ -235,6 +241,7 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
                 allCost += ParseCost(reader, 2);
                 // Billed tokens moved in and out; cache reads are counted separately and are not billed.
                 allTokens += (reader.IsDBNull(3) ? 0L : reader.GetInt64(3)) + (reader.IsDBNull(4) ? 0L : reader.GetInt64(4));
+                allUnits += reader.GetInt64(5);
                 allSessions++;
 
                 // Backlog 62: independent comparisons, not nested. A caller may pass a day outside the month.
@@ -253,7 +260,7 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
         using (var command = connection.CreateCommand())
         {
             command.CommandText =
-                "SELECT d.session_id, d.day_utc, d.cost_usd, d.input_tokens, d.output_tokens " +
+                "SELECT d.session_id, d.day_utc, d.cost_usd, d.input_tokens, d.output_tokens, d.free_tier_units " +
                 "FROM agent_session_usage_days d JOIN agent_sessions s ON s.id = d.session_id;";
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -261,11 +268,13 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
                 var dayStart = DayStart(reader.GetString(1));
                 var cost = ParseCost(reader, 2);
                 var tokens = reader.GetInt64(3) + reader.GetInt64(4);
+                var units = reader.GetInt64(5);
 
                 if (dayStart >= monthStartUtc)
                 {
                     monthCost += cost;
                     monthTokens += tokens;
+                    monthUnits += units;
                     monthSessions.Add(reader.GetString(0));
                 }
 
@@ -273,15 +282,16 @@ public sealed class SqliteSessionStore(ISqliteConnectionFactory factory) : ISess
                 {
                     dayCost += cost;
                     dayTokens += tokens;
+                    dayUnits += units;
                     daySessions.Add(reader.GetString(0));
                 }
             }
         }
 
         return new SessionUsageTotals(
-            new UsageTotal(dayCost, dayTokens, daySessions.Count),
-            new UsageTotal(monthCost, monthTokens, monthSessions.Count),
-            new UsageTotal(allCost, allTokens, allSessions));
+            new UsageTotal(dayCost, dayTokens, daySessions.Count, dayUnits),
+            new UsageTotal(monthCost, monthTokens, monthSessions.Count, monthUnits),
+            new UsageTotal(allCost, allTokens, allSessions, allUnits));
     }
 
     private static DateTimeOffset DayStart(string dayKey) =>

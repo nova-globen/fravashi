@@ -10,6 +10,8 @@ public sealed class AgentRunStats
     private long _inputTokens;
     private long _outputTokens;
     private long _cacheReadTokens;
+    private long _cacheWriteTokens;
+    private long _freeTierUnits;
     private decimal _costUsd;
     private int _toolCalls;
     private int _rateLimitHits;
@@ -18,12 +20,18 @@ public sealed class AgentRunStats
     private long _contextWindow;
     private long _baselineTokens;
 
-    /// <summary>Fold one turn's reported usage into the totals.</summary>
-    public void AddTurn(long inputTokens, long outputTokens, long cacheReadTokens, decimal costUsd)
+    /// <summary>
+    /// Fold one turn's reported usage into the totals. A turn the credential broker carried costs nothing and reports
+    /// the broker's <paramref name="freeTierUnits"/> instead (backlog 377).
+    /// </summary>
+    public void AddTurn(
+        long inputTokens, long outputTokens, long cacheReadTokens, decimal costUsd, long cacheWriteTokens = 0, long freeTierUnits = 0)
     {
         _inputTokens += Math.Max(0, inputTokens);
         _outputTokens += Math.Max(0, outputTokens);
         _cacheReadTokens += Math.Max(0, cacheReadTokens);
+        _cacheWriteTokens += Math.Max(0, cacheWriteTokens);
+        _freeTierUnits += Math.Max(0, freeTierUnits);
         _costUsd += costUsd > 0 ? costUsd : 0m;
         _turns++;
     }
@@ -78,7 +86,9 @@ public sealed class AgentRunStats
             _turns,
             _contextTokens,
             _contextWindow,
-            _baselineTokens);
+            _baselineTokens,
+            _cacheWriteTokens,
+            _freeTierUnits);
 }
 
 /// <summary>An immutable point-in-time copy of <see cref="AgentRunStats"/> for streaming to the UI.</summary>
@@ -98,6 +108,14 @@ public sealed class AgentRunStats
 /// exclude, the first user message. A surface uses it to split "fixed prefix" from "conversation" so a
 /// large percentage after two short turns can explain itself.
 /// </param>
+/// <param name="CacheWriteTokens">
+/// Tokens written to the prompt cache (backlog 377). Billed at more than an input token, and most of a first turn's
+/// cost; zero in rows persisted before it was recorded.
+/// </param>
+/// <param name="FreeTierUnits">
+/// What the credential broker's free tier counted for the turns it carried, in its own units (infra D54). Those turns
+/// cost the person nothing, so <see cref="CostUsd"/> leaves them out.
+/// </param>
 public sealed record AgentStatsSnapshot(
     long InputTokens,
     long OutputTokens,
@@ -108,7 +126,9 @@ public sealed record AgentStatsSnapshot(
     int Turns,
     long ContextTokens = 0,
     long ContextWindow = 0,
-    long BaselineTokens = 0)
+    long BaselineTokens = 0,
+    long CacheWriteTokens = 0,
+    long FreeTierUnits = 0)
 {
     public static AgentStatsSnapshot Empty { get; } = new(0, 0, 0, 0m, 0, 0, 0);
 

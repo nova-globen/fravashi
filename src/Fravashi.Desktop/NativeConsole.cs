@@ -18,16 +18,18 @@ internal static class NativeConsole
     private const int StdOutputHandle = -11;
     private const uint FileTypeUnknown = 0x0000;
 
-    public static void AttachToParent()
+    /// <returns>True when output reaches someone (a redirected stdout or a parent console); false when the verb was
+    /// started with neither (Explorer, Run, Windows Settings), so a verb that must be seen says it in a window instead.</returns>
+    public static bool AttachToParent()
     {
         var stdout = GetStdHandle(StdOutputHandle);
         if (stdout != IntPtr.Zero && stdout != new IntPtr(-1) && GetFileType(stdout) != FileTypeUnknown)
         {
             // stdout is redirected (pipe/file): Console.WriteLine already reaches it.
-            return;
+            return true;
         }
 
-        _ = AttachConsole(AttachParentProcess);
+        return AttachConsole(AttachParentProcess);
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]

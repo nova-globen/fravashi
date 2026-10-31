@@ -19,6 +19,7 @@ public enum DesktopVerb
     Update,
     Repin,
     Restore,
+    Uninstall,
     Unknown,
 }
 
@@ -36,6 +37,8 @@ public enum DesktopVerb
 /// The folder from <c>fravashi --open PATH</c> (plan 2a): the GUI path registers it as a bridge
 /// workspace. Parsed for any verb; console verbs simply ignore it.
 /// </param>
+/// <param name="RemoveData"><c>fravashi uninstall --remove-data</c>: the data folder goes too, after it is copied out.</param>
+/// <param name="Yes"><c>--yes</c>: answer the uninstall's question in advance (a script, or the Apps &amp; Features entry).</param>
 public sealed record ParsedCommand(
     DesktopVerb Verb,
     string? ConfigPath = null,
@@ -43,7 +46,9 @@ public sealed record ParsedCommand(
     int Tail = 200,
     string? UnknownToken = null,
     string? VerbArgument = null,
-    string? OpenPath = null)
+    string? OpenPath = null,
+    bool RemoveData = false,
+    bool Yes = false)
 {
     /// <summary>The verb argument read under the name <c>fravashi broker</c> gives it.</summary>
     public string? BrokerUrl => VerbArgument;
@@ -68,12 +73,20 @@ public static class DesktopCommandLine
         string? verbToken = null;
         string? verbArg = null;
         string? openPath = null;
+        var removeData = false;
+        var yes = false;
 
         for (var i = 0; i < args.Length; i++)
         {
             var arg = args[i];
             switch (arg)
             {
+                case "--remove-data":
+                    removeData = true;
+                    break;
+                case "--yes" or "-y":
+                    yes = true;
+                    break;
                 case "--config" when i + 1 < args.Length:
                     configPath = args[++i];
                     break;
@@ -106,7 +119,8 @@ public static class DesktopCommandLine
         var verb = ResolveVerb(verbToken);
         return verb == DesktopVerb.Unknown
             ? new ParsedCommand(DesktopVerb.Unknown, configPath, containerName, tail, verbToken, OpenPath: openPath)
-            : new ParsedCommand(verb, configPath, containerName, tail, VerbArgument: verbArg, OpenPath: openPath);
+            : new ParsedCommand(verb, configPath, containerName, tail, VerbArgument: verbArg, OpenPath: openPath,
+                RemoveData: removeData, Yes: yes);
     }
 
     private static DesktopVerb ResolveVerb(string? token) => token?.ToLowerInvariant() switch
@@ -120,6 +134,7 @@ public static class DesktopCommandLine
         "update" => DesktopVerb.Update,
         "repin" => DesktopVerb.Repin,
         "restore" => DesktopVerb.Restore,
+        "uninstall" => DesktopVerb.Uninstall,
         "website" => DesktopVerb.Website,
         "logs" => DesktopVerb.Logs,
         "broker" => DesktopVerb.Broker,
@@ -164,6 +179,11 @@ public static class DesktopCommandLine
                 return app.SetBroker(command.BrokerUrl);
             case DesktopVerb.Restore:
                 return app.Restore(command.ArchivePath);
+            case DesktopVerb.Uninstall:
+                // fravashi.exe runs it itself (it holds the Windows parts, IUninstallHost); reaching here means a host
+                // that cannot.
+                output($"`{ProductName.Command} uninstall` runs only from the installed {ProductName.Executable} on Windows.");
+                return ExitCodes.UsageError;
             case DesktopVerb.Help:
                 output(HelpText);
                 return ExitCodes.Success;
@@ -205,6 +225,10 @@ public static class DesktopCommandLine
                         first, stops {ProductName.Short}, MOVES the current database, key ring and agent sessions
                         into <data dir>/backups/pre-restore-<stamp> (never deletes them), unpacks, and
                         starts {ProductName.Short} again. Asks before it changes anything.
+          uninstall     Remove {ProductName.Short}: its container, image and network (current and former names), the
+                        shortcuts, the context menu, the PATH entry, the firewall rule and the program folder. Your
+                        data is KEPT; reinstalling picks it up again. Asks first (--yes answers in advance).
+                        --remove-data also removes the data, after copying it to your Documents folder.
           website       Open the product website in the browser.
           logs          Print the container's recent logs (use --tail N; default 200).
           broker URL    Point this studio at a credential broker (corp-broker tier, ADR 0010);

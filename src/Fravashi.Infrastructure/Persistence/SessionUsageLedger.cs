@@ -12,13 +12,18 @@ namespace Fravashi.Infrastructure.Persistence;
 /// A snapshot LOWER than the previous one is a process that started counting from zero again (a conversation
 /// resumed before its usage was carried forward), so the whole of it is new spending rather than a negative.
 /// </para>
+/// <para>
+/// Free-tier units (backlog 377) are credited the same way: a brokered turn costs nothing, and the units are what it used
+/// of the day's allowance.
+/// </para>
 /// </summary>
-internal sealed class SessionUsageLedger(decimal costUsd, long inputTokens, long outputTokens)
+internal sealed class SessionUsageLedger(decimal costUsd, long inputTokens, long outputTokens, long freeTierUnits = 0)
 {
-    private readonly Dictionary<string, (decimal Cost, long Input, long Output)> _days = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (decimal Cost, long Input, long Output, long Units)> _days = new(StringComparer.Ordinal);
     private decimal _cost = costUsd;
     private long _input = inputTokens;
     private long _output = outputTokens;
+    private long _units = freeTierUnits;
 
     /// <summary>The UTC calendar day a stamp falls on, in the text form the table keys by.</summary>
     public static string DayKey(DateTimeOffset at) =>
@@ -26,24 +31,27 @@ internal sealed class SessionUsageLedger(decimal costUsd, long inputTokens, long
 
     public static string DayKey(DateOnly day) => day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-    public void Observe(DateTimeOffset at, decimal costUsd, long inputTokens, long outputTokens)
+    public void Observe(DateTimeOffset at, decimal costUsd, long inputTokens, long outputTokens, long freeTierUnits = 0)
     {
-        var restarted = costUsd < _cost || inputTokens < _input || outputTokens < _output;
+        var restarted = costUsd < _cost || inputTokens < _input || outputTokens < _output || freeTierUnits < _units;
         var cost = restarted ? costUsd : costUsd - _cost;
         var input = restarted ? inputTokens : inputTokens - _input;
         var output = restarted ? outputTokens : outputTokens - _output;
+        var units = restarted ? freeTierUnits : freeTierUnits - _units;
         _cost = costUsd;
         _input = inputTokens;
         _output = outputTokens;
+        _units = freeTierUnits;
 
-        if (cost <= 0m && input <= 0 && output <= 0)
+        if (cost <= 0m && input <= 0 && output <= 0 && units <= 0)
         {
             return;
         }
 
         var key = DayKey(at);
-        var running = _days.TryGetValue(key, out var day) ? day : (0m, 0L, 0L);
-        _days[key] = (running.Item1 + Math.Max(cost, 0m), running.Item2 + Math.Max(input, 0), running.Item3 + Math.Max(output, 0));
+        var running = _days.GetValueOrDefault(key);
+        _days[key] = (running.Cost + Math.Max(cost, 0m), running.Input + Math.Max(input, 0),
+            running.Output + Math.Max(output, 0), running.Units + Math.Max(units, 0));
     }
 
     /// <summary>Adds what was observed to the session's day rows, inside the caller's transaction.</summary>
@@ -84,6 +92,21 @@ internal sealed class SessionUsageLedger(decimal costUsd, long inputTokens, long
             write.Parameters.AddWithValue("$in", existingInput + spent.Input);
             write.Parameters.AddWithValue("$out", existingOutput + spent.Output);
             write.ExecuteNonQuery();
+
+            // Schema step 50's column. Written only when there is something to add: step 12 replays this ledger on a
+            // database that does not have the column yet, and the turns it replays never carried units.
+            if (spent.Units > 0)
+            {
+                using var units = connection.CreateCommand();
+                units.Transaction = transaction;
+                units.CommandText =
+                    "UPDATE agent_session_usage_days SET free_tier_units = free_tier_units + $units " +
+                    "WHERE session_id = $s AND day_utc = $d;";
+                units.Parameters.AddWithValue("$units", spent.Units);
+                units.Parameters.AddWithValue("$s", sessionId);
+                units.Parameters.AddWithValue("$d", day);
+                units.ExecuteNonQuery();
+            }
         }
     }
 }

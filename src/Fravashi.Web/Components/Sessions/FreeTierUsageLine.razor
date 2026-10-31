@@ -1,0 +1,36 @@
+@namespace Fravashi.Web.Components.Sessions
+@using Fravashi.Application.AgentRuntimes.Broker
+@using Fravashi.Infrastructure.AgentRuntimes.Broker
+@using Fravashi.Web.Services
+@inject IServiceProvider Services
+
+@* Backlog 377: the free tier's usage as the credential broker itself counts it (website 2.9.5), under the totals. Shown
+   only while the broker carries this install's turns; the studio never computes a running total of its own, because the
+   broker's counter is the one that limits, and it starts again when the broker restarts. *@
+@if (_line is { } line)
+{
+    <div class="session-totals-row studio-muted" data-testid="free-tier-usage">@line</div>
+}
+
+@code {
+    /// <summary>Changed by the page when a turn has finished, so the line is read again.</summary>
+    [Parameter]
+    public int Version { get; set; }
+
+    private int _readFor = -1;
+    private string? _line;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_readFor == Version || Services.GetService<IBrokerUsageReader>() is not { } reader)
+        {
+            return;
+        }
+
+        _readFor = Version;
+        var read = await reader.ReadAsync();
+        var zone = PersonTimeZone.Of(Services)?.Zone;
+        var now = (Services.GetService<TimeProvider>() ?? TimeProvider.System).GetUtcNow();
+        _line = BrokerUsageReader.Describe(read, at => PersonTime.Format(at, zone, now));
+    }
+}

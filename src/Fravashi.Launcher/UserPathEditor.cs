@@ -56,6 +56,23 @@ public static class UserPathEditor
         return changed;
     }
 
+    /// <summary>
+    /// The PATH without <paramref name="directory"/> (backlog 375, the uninstall), by the same comparison as
+    /// <see cref="Ensure"/>: every copy of it goes, every other segment stays in its order, empty segments included.
+    /// </summary>
+    /// <returns><c>Changed</c> is false when the directory was not there (the input comes back unchanged).</returns>
+    public static (string NewPath, bool Changed) Remove(string? currentPath, string directory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+
+        var normalizedTarget = Normalize(directory);
+        var segments = (currentPath ?? string.Empty).Split(';', StringSplitOptions.None);
+        var kept = segments.Where(segment => segment.Length == 0 || Normalize(segment) != normalizedTarget).ToArray();
+        return kept.Length == segments.Length
+            ? (currentPath ?? string.Empty, Changed: false)
+            : (string.Join(';', kept), Changed: true);
+    }
+
     private static string Normalize(string segment) =>
         segment.Trim().TrimEnd('/', '\\').ToUpperInvariant();
 }

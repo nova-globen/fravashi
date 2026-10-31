@@ -22,6 +22,15 @@ public static class SessionUsageFormat
         _ => (tokens / 1_000_000d).ToString("0.##", CultureInfo.InvariantCulture) + "M",
     };
 
+    /// <summary>Free-tier units (backlog 377), abbreviated like tokens: "13.7k units".</summary>
+    public static string Units(long units) => Tokens(units) + (units == 1 ? " unit" : " units");
+
+    /// <summary>What a free-tier figure means, for its tooltip.</summary>
+    public static string FreeTierTitle(long units) =>
+        $"{units.ToString("N0", CultureInfo.InvariantCulture)} free-tier units, as this studio counted them. The free tier's " +
+        $"daily limit is {FreeTierUnits.DailyLimit.ToString("N0", CultureInfo.InvariantCulture)} units, counted by the credential " +
+        "broker. These turns cost you nothing and never count against your spending limits.";
+
     /// <summary>
     /// The cost so far. Two decimals is the strip's width budget, and a run that has cost something but
     /// less than a cent reads as "&lt;$0.01" rather than as the "$0.00" that would say it was free.

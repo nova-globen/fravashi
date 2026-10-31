@@ -54,6 +54,17 @@ public static class AgentRuntimesServiceCollectionExtensions
         // and what the refresher, the conversations waiting for a token and the Settings card all read.
         services.TryAddSingleton(sp => new BrokerTokenHealth(sp.GetRequiredService<TimeProvider>()));
         services.AddHttpClient<IBrokerTokenService, BrokerTokenService>();
+
+        // Backlog 377: this person's free-tier usage, as the broker counts it, asked only while the broker carries the CLI.
+        services.AddHttpClient<IBrokerUsageReader, BrokerUsageReader>((http, sp) =>
+        {
+            var credentials = sp.GetService<IAgentRuntimeCredentialStore>();
+            return new BrokerUsageReader(
+                sp.GetRequiredService<ISecretStore>(),
+                sp.GetService<BrokerOptions>() ?? BrokerOptions.Disabled,
+                http,
+                () => credentials?.BrokerCarries(Fravashi.Domain.AgentSessions.AgentTool.Claude) == true);
+        });
         services.AddHostedService<BrokerTokenRefreshHostedService>();
 
         services.AddSingleton<IAgentRuntimeService, ProcessAgentRuntimeService>();

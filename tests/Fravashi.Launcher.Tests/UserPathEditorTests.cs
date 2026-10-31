@@ -9,6 +9,31 @@ public sealed class UserPathEditorTests
     private const string Dir = @"C:\Users\me\AppData\Local\Programs\Fravashi";
 
     [Fact]
+    public void Remove_TakesOutEveryCopy_ByTheSameComparison_AndKeepsTheRestInOrder()
+    {
+        // Backlog 375: the uninstall's PATH step.
+        var (newPath, changed) = UserPathEditor.Remove(@"C:\bin;" + Dir + @"\;C:\tools;" + Dir.ToUpperInvariant(), Dir);
+
+        changed.Should().BeTrue();
+        newPath.Should().Be(@"C:\bin;C:\tools");
+    }
+
+    [Fact]
+    public void Remove_WhenAbsent_ChangesNothing()
+    {
+        var (newPath, changed) = UserPathEditor.Remove(@"C:\bin;;C:\tools", Dir);
+
+        changed.Should().BeFalse();
+        newPath.Should().Be(@"C:\bin;;C:\tools", "an empty segment someone left is not ours to tidy");
+    }
+
+    [Fact]
+    public void Remove_OfTheOnlyEntry_LeavesAnEmptyPath()
+    {
+        UserPathEditor.Remove(Dir, Dir).Should().Be((string.Empty, true));
+    }
+
+    [Fact]
     public void Ensure_AppendsToEmptyPath()
     {
         var (newPath, changed) = UserPathEditor.Ensure("", Dir);

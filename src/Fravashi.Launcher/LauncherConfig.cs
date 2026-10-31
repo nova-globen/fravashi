@@ -182,6 +182,14 @@ public sealed record LauncherConfig
     /// a launcher.json from before it existed, which is not evidence of a move.
     /// </summary>
     public string? DataDirBaked { get; init; }
+
+    /// <summary>
+    /// True once a healthy start found nothing of the former names left on the container engine: no former container or
+    /// VPN sidecar, and the former image tag gone (backlog 384). From then on <see cref="FormerInstallMigration"/> asks
+    /// the engine nothing at a start, which each start used to do for names that were long gone. Null in every
+    /// launcher.json from before it, which is not evidence of anything and runs the migration as before.
+    /// </summary>
+    public bool? FormerNamesRetired { get; init; }
 }
 
 /// <summary>

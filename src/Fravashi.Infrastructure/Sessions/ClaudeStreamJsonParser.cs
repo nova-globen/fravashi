@@ -48,7 +48,11 @@ namespace Fravashi.Infrastructure.Sessions;
 /// </para>
 /// </summary>
 /// <param name="clock">Where a line with no timestamp of its own gets one.</param>
-public sealed class ClaudeStreamJsonParser(Func<DateTimeOffset>? clock = null)
+/// <param name="brokered">
+/// Asked at each turn's result line: true while the credential broker carries the CLI, whose free tier the person
+/// does not pay for, so the turn costs nothing and is counted in the broker's units instead (backlog 377).
+/// </param>
+public sealed class ClaudeStreamJsonParser(Func<DateTimeOffset>? clock = null, Func<bool>? brokered = null)
 {
     /// <summary>Tool OUTPUT is allowed more room than the subject, but not an unbounded amount.</summary>
     private const int MaxResultLength = 2000;
@@ -107,13 +111,20 @@ public sealed class ClaudeStreamJsonParser(Func<DateTimeOffset>? clock = null)
     private long _contextTokens;
 
     /// <summary>
-    /// The <c>modelUsage</c> totals the previous result line of THIS process reported. That block is
-    /// cumulative for the whole CLI process, not per turn (the multi-turn capture's second result line says
-    /// 41602 cache-read tokens where its own usage block says 24066, and 41602 is 17536 + 24066), so a turn's
-    /// share of it is the difference from here. Null until a result line carried one, and reset with the
-    /// process by <see cref="ExpectRestart"/>, because a restarted child counts from zero again.
+    /// The <c>modelUsage</c> and <c>total_cost_usd</c> the previous result line of THIS process reported. Both
+    /// are cumulative for the whole CLI process, not per turn (the multi-turn capture's second result line says
+    /// 41602 cache-read tokens where its own usage block says 24066, and 41602 is 17536 + 24066; its cost says
+    /// $0.0187992, both turns together), so a turn's share of either is the difference from here. Null until a
+    /// result line was read, and reset with the process by <see cref="ExpectRestart"/>, because a restarted
+    /// child counts from zero again.
     /// </summary>
-    private (long Input, long Output, long CacheRead, decimal CostUsd)? _processModelUsage;
+    private ProcessUsage? _processUsage;
+
+    /// <summary>The largest main-thread request's prompt this turn, from the assistant lines; reset at each result line.</summary>
+    private long _turnLargestRequest;
+
+    /// <summary>Whether the credential broker carries this session's turns (backlog 377): then they cost the person nothing.</summary>
+    private readonly Func<bool> _brokered = brokered ?? (() => false);
 
     /// <summary>The CLI's own session id, once its init line has been seen.</summary>
     public string? ProviderSessionId => _providerSessionId;
@@ -128,7 +139,7 @@ public sealed class ClaudeStreamJsonParser(Func<DateTimeOffset>? clock = null)
     public void ExpectRestart()
     {
         _providerSessionId = null;
-        _processModelUsage = null;
+        _processUsage = null;
     }
 
     /// <summary>
@@ -287,6 +298,7 @@ public sealed class ClaudeStreamJsonParser(Func<DateTimeOffset>? clock = null)
         if (!IsSidechain(root) && Context(root) is { } occupied)
         {
             _stats.ObserveContext(occupied);
+            _turnLargestRequest = Math.Max(_turnLargestRequest, occupied);
 
             // Only when it MOVED: the CLI repeats one request's usage on every content block of the
             // message it produced, and a stats row per block would be four rows saying one thing.
@@ -444,55 +456,58 @@ public sealed class ClaudeStreamJsonParser(Func<DateTimeOffset>? clock = null)
     private IReadOnlyList<AgentEvent> Result(JsonElement root, DateTimeOffset timestamp)
     {
         var isError = root.TryGetProperty("is_error", out var errorFlag) && errorFlag.ValueKind == JsonValueKind.True;
-        long input = 0, output = 0, cacheRead = 0;
+        long input = 0, output = 0, cacheRead = 0, cacheWrite = 0;
+        var oneHourShare = 1m;
+        long largestPrompt = 0;
         if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
         {
             input = Number(usage, "input_tokens");
             output = Number(usage, "output_tokens");
             cacheRead = Number(usage, "cache_read_input_tokens");
+            cacheWrite = Number(usage, "cache_creation_input_tokens");
+            oneHourShare = OneHourShare(usage);
+            largestPrompt = LargestPrompt(usage, _turnLargestRequest);
         }
 
-        var cost = root.TryGetProperty("total_cost_usd", out var costElement)
-            && costElement.TryGetDecimal(out var parsed)
-            ? parsed
-            : 0m;
+        _turnLargestRequest = 0;
+
+        var process = ProcessUsage.Read(root);
+        var previous = _processUsage;
+        _processUsage = process;
 
         // Outcome iv (ADR 0022, measured 2026-08-06): a turn that ran out of budget reports a usage block of
         // ZEROES, and that ceiling was measured being overshot by about 10x. Reading the zeroed block would
         // under-report exactly the turn that cost the most, and the spend guard (backlog 62) sums these
         // figures, so whenever the usage block says nothing was used, the turn is accounted from modelUsage
-        // instead (decided 2026-09-14). modelUsage is CUMULATIVE for the process, though, and
-        // --max-budget-usd is a whole-invocation ceiling, so exhaustion typically lands on a later turn of a
-        // long conversation: taking the block as it stands would add every earlier turn a second time into
-        // stats that already sum per turn. The turn's share is what moved since this process's previous
-        // result line. An ordinary turn is untouched: its usage block is the per-turn sum the rest of the
-        // studio was built on, and its modelUsage is still remembered so the next turn's share is right.
-        var processUsage = ModelUsage(root);
-        if (input == 0 && output == 0 && cacheRead == 0 && processUsage is { } total)
+        // instead (decided 2026-09-14), as its share since this process's previous result line. An ordinary
+        // turn's tokens are its usage block, the per-turn sum the rest of the studio was built on.
+        if (input == 0 && output == 0 && cacheRead == 0 && cacheWrite == 0 && process.Models.Count > 0)
         {
-            var previous = _processModelUsage ?? (0, 0, 0, 0m);
-            input = Math.Max(0, total.Input - previous.Input);
-            output = Math.Max(0, total.Output - previous.Output);
-            cacheRead = Math.Max(0, total.CacheRead - previous.CacheRead);
-            var spent = total.CostUsd - previous.CostUsd;
-            if (spent > 0m)
-            {
-                cost = spent;
-            }
-            else if (_processModelUsage is not null)
-            {
-                // total_cost_usd rides the same process-wide total, so with nothing new in modelUsage there
-                // is no per-turn figure to fall back to and zero is the honest share.
-                cost = 0m;
-            }
+            var share = process.Total - (previous?.Total ?? default);
+            (input, output, cacheRead, cacheWrite) = (share.Input, share.Output, share.CacheRead, share.CacheWrite);
         }
 
-        if (processUsage is not null)
+        // Backlog 377: the turn's cost is ITS share of the process's spending, priced by the studio wherever it knows
+        // the model. Adding total_cost_usd as it stands counted every earlier turn of the process again on each
+        // result line, and the pinned CLI predates the newer models and priced a Haiku 5.5 turn some fifty times over.
+        var turnUsage = (process.Models.Count > 0
+            ? process.Total - (previous?.Total ?? default)
+            : new Tokens(input, output, cacheRead, cacheWrite)).Split(oneHourShare);
+        long freeTierUnits = 0;
+        decimal cost;
+        if (_brokered())
         {
-            _processModelUsage = processUsage;
+            // A brokered turn is the free tier: nobody pays for it, so it never counts against the spending limits,
+            // and what it used is shown in the broker's own units.
+            cost = 0m;
+            freeTierUnits = FreeTierUnits.Of(turnUsage, largestPrompt);
+        }
+        else
+        {
+            cost = TurnCost(process, previous, oneHourShare, largestPrompt);
         }
 
-        _stats.AddTurn(input, output, cacheRead, cost);
+        _stats.AddTurn(input, output, cacheRead, cost, cacheWrite, freeTierUnits);
         _stats.ObserveContextWindow(ContextWindow(root));
 
         // THE rule of the typed read path (ADR 0022, measured): the presence of structured_output is the
@@ -561,40 +576,146 @@ public sealed class ClaudeStreamJsonParser(Func<DateTimeOffset>? clock = null)
     }
 
     /// <summary>
-    /// What the result line's per-model usage adds up to, or null when it carries no tokens and no cost at
-    /// all. Summed across models because a turn that delegated to a subagent on another model is billed for
-    /// both.
+    /// What this turn cost: each model's share of the process's usage since the previous result line, priced from
+    /// <see cref="ModelPrices"/> where the table lists the model and at the CLI's own figure for that model where it
+    /// does not. With no <c>modelUsage</c> at all, the share of the CLI's process-wide <c>total_cost_usd</c>.
     /// </summary>
-    private static (long Input, long Output, long CacheRead, decimal CostUsd)? ModelUsage(JsonElement root)
+    private static decimal TurnCost(ProcessUsage process, ProcessUsage? previous, decimal oneHourShare, long largestPrompt)
     {
-        if (!root.TryGetProperty("modelUsage", out var models) || models.ValueKind != JsonValueKind.Object)
+        if (process.Models.Count == 0)
         {
-            return null;
+            return Math.Max(0m, process.ReportedCost - (previous?.ReportedCost ?? 0m));
         }
 
-        long input = 0, output = 0, cacheRead = 0;
         var cost = 0m;
-        foreach (var model in models.EnumerateObject())
+        foreach (var (id, model) in process.Models)
         {
-            if (model.Value.ValueKind != JsonValueKind.Object)
-            {
-                continue;
-            }
+            var before = previous?.Models.GetValueOrDefault(id);
+            var tokens = model.Tokens - (before?.Tokens ?? default);
+            var cliCost = Math.Max(0m, model.CostUsd - (before?.CostUsd ?? 0m));
+            cost += ModelPrices.For(model.PriceId) is { } price
+                ? price.Cost(tokens.Split(oneHourShare), largestPrompt)
+                : cliCost;
+        }
 
-            input += Math.Max(0, Number(model.Value, "inputTokens"));
-            output += Math.Max(0, Number(model.Value, "outputTokens"));
-            cacheRead += Math.Max(0, Number(model.Value, "cacheReadInputTokens"));
-            if (model.Value.TryGetProperty("costUSD", out var modelCost)
-                && modelCost.TryGetDecimal(out var value)
-                && value > 0m)
+        return cost;
+    }
+
+    /// <summary>
+    /// The share of the turn's cache writes that went to the one-hour cache, from the usage block's
+    /// <c>cache_creation</c> split. Every capture writes to the one-hour cache only, so a block without the split is
+    /// read the same way.
+    /// </summary>
+    private static decimal OneHourShare(JsonElement usage)
+    {
+        if (!usage.TryGetProperty("cache_creation", out var split) || split.ValueKind != JsonValueKind.Object)
+        {
+            return 1m;
+        }
+
+        var fiveMinutes = Number(split, "ephemeral_5m_input_tokens");
+        var oneHour = Number(split, "ephemeral_1h_input_tokens");
+        return fiveMinutes + oneHour > 0 ? (decimal)oneHour / (fiveMinutes + oneHour) : 1m;
+    }
+
+    /// <summary>
+    /// The largest single request's prompt this turn (input, cache reads and cache writes), which picks a
+    /// long-context price tier. The usage block's <c>iterations</c> carry each request; where they are missing or empty
+    /// (the pinned 2.1.280 writes an empty list), the largest request the turn's own assistant lines reported. Never
+    /// the turn's SUM: the broker and the price list judge each request alone, and the sum of a few ordinary requests
+    /// crossed 100,000 tokens on the 1.0.3 proof and counted the turn five times over (377.4k units against the
+    /// broker's 75,481).
+    /// </summary>
+    private static long LargestPrompt(JsonElement usage, long largestRequestSeen)
+    {
+        if (!usage.TryGetProperty("iterations", out var iterations) || iterations.ValueKind != JsonValueKind.Array)
+        {
+            return largestRequestSeen;
+        }
+
+        long largest = 0;
+        foreach (var request in iterations.EnumerateArray())
+        {
+            if (request.ValueKind == JsonValueKind.Object)
             {
-                cost += value;
+                largest = Math.Max(largest, Number(request, "input_tokens") + Number(request, "cache_read_input_tokens")
+                                            + Number(request, "cache_creation_input_tokens"));
             }
         }
 
-        return input == 0 && output == 0 && cacheRead == 0 && cost == 0m
-            ? null
-            : (input, output, cacheRead, cost);
+        return largest > 0 ? largest : largestRequestSeen;
+    }
+
+    /// <summary>Tokens as <c>modelUsage</c> counts them: cache writes are one figure there, not split by lifetime.</summary>
+    private readonly record struct Tokens(long Input, long Output, long CacheRead, long CacheWrite)
+    {
+        public static Tokens operator +(Tokens a, Tokens b) =>
+            new(a.Input + b.Input, a.Output + b.Output, a.CacheRead + b.CacheRead, a.CacheWrite + b.CacheWrite);
+
+        /// <summary>The difference, never below zero in any kind.</summary>
+        public static Tokens operator -(Tokens a, Tokens b) =>
+            new(Math.Max(0, a.Input - b.Input), Math.Max(0, a.Output - b.Output),
+                Math.Max(0, a.CacheRead - b.CacheRead), Math.Max(0, a.CacheWrite - b.CacheWrite));
+
+        public TokenUsage Split(decimal oneHourShare)
+        {
+            var oneHour = (long)Math.Round(CacheWrite * oneHourShare, MidpointRounding.AwayFromZero);
+            return new TokenUsage(Input, Output, CacheRead, CacheWrite - oneHour, oneHour);
+        }
+    }
+
+    private sealed record ModelTotals(string PriceId, Tokens Tokens, decimal CostUsd);
+
+    /// <summary>
+    /// What a result line says the whole PROCESS has used so far: <c>modelUsage</c> per model (summed across models,
+    /// because a turn that delegated to a subagent on another model is billed for both) and <c>total_cost_usd</c>.
+    /// </summary>
+    private sealed record ProcessUsage(IReadOnlyDictionary<string, ModelTotals> Models, decimal ReportedCost)
+    {
+        public Tokens Total => Models.Values.Aggregate(default(Tokens), (sum, m) => sum + m.Tokens);
+
+        public static ProcessUsage Read(JsonElement root)
+        {
+            var reported = root.TryGetProperty("total_cost_usd", out var costElement)
+                && costElement.TryGetDecimal(out var parsed) && parsed > 0m
+                ? parsed
+                : 0m;
+
+            var models = new Dictionary<string, ModelTotals>(StringComparer.Ordinal);
+            if (root.TryGetProperty("modelUsage", out var usage) && usage.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var model in usage.EnumerateObject())
+                {
+                    if (model.Value.ValueKind != JsonValueKind.Object)
+                    {
+                        continue;
+                    }
+
+                    var tokens = new Tokens(
+                        Math.Max(0, Number(model.Value, "inputTokens")),
+                        Math.Max(0, Number(model.Value, "outputTokens")),
+                        Math.Max(0, Number(model.Value, "cacheReadInputTokens")),
+                        Math.Max(0, Number(model.Value, "cacheCreationInputTokens")));
+                    var cost = model.Value.TryGetProperty("costUSD", out var modelCost)
+                        && modelCost.TryGetDecimal(out var value) && value > 0m
+                        ? value
+                        : 0m;
+                    if (tokens == default && cost == 0m)
+                    {
+                        continue;
+                    }
+
+                    // The CLI names the model's family in canonicalModel ("claude-haiku-4-5" for the dated id).
+                    var priceId = model.Value.TryGetProperty("canonicalModel", out var canonical)
+                        && canonical.ValueKind == JsonValueKind.String
+                        ? canonical.GetString() ?? model.Name
+                        : model.Name;
+                    models[model.Name] = new ModelTotals(priceId, tokens, cost);
+                }
+            }
+
+            return new ProcessUsage(models, reported);
+        }
     }
 
     /// <summary>

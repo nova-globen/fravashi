@@ -99,14 +99,31 @@ public sealed class LauncherSignInTests
             wait ?? TimeSpan.FromSeconds(10),
             CancellationToken.None);
 
+    /// <summary>
+    /// A sign-in on a port that was free a moment ago. Another test running at the same time can take that port between
+    /// <see cref="FreePort"/> and the listener (seen once in CI, 2026-10-30: "port 36089 is in use"), and then the
+    /// sign-in stops before it fetches or opens anything, so it is simply tried again on another port.
+    /// </summary>
+    private static async Task<(LauncherSignInResult Result, int Port)> SignInOnFreePort(
+        StubIdp idp, Action<string> browser, TimeSpan? wait = null)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var port = FreePort();
+            var result = await SignIn(idp, browser, port, wait);
+            if (attempt == 5 || result.Session is not null || !result.Outcome.Contains($"port {port} is in use", StringComparison.Ordinal))
+            {
+                return (result, port);
+            }
+        }
+    }
+
     [Fact]
     public async Task A_completed_browser_sign_in_ends_in_a_session_for_the_studio()
     {
         var idp = Idp();
         var opened = new List<string>();
-        var port = FreePort();
-
-        var result = await SignIn(idp, Browser(idp, q => $"code=the-code&state={q["state"]}", opened), port);
+        var (result, port) = await SignInOnFreePort(idp, Browser(idp, q => $"code=the-code&state={q["state"]}", opened));
 
         result.Session.Should().NotBeNull(result.Outcome);
         result.Session!.AccessToken.Should().Be("access-1");
@@ -125,9 +142,7 @@ public sealed class LauncherSignInTests
     {
         var idp = Idp();
         string? challenge = null;
-        var port = FreePort();
-
-        await SignIn(idp, Browser(idp, q => { challenge = q["code_challenge"]; return $"code=c&state={q["state"]}"; }), port);
+        await SignInOnFreePort(idp, Browser(idp, q => { challenge = q["code_challenge"]; return $"code=c&state={q["state"]}"; }));
 
         var verifier = Uri.UnescapeDataString(idp.TokenForm!.Split('&').Single(p => p.StartsWith("code_verifier=", StringComparison.Ordinal))["code_verifier=".Length..]);
         LauncherSignIn.Challenge(verifier).Should().Be(challenge);
@@ -138,7 +153,7 @@ public sealed class LauncherSignInTests
     {
         var idp = Idp();
 
-        var result = await SignIn(idp, Browser(idp, _ => "code=c&state=forged"), FreePort());
+        var (result, _) = await SignInOnFreePort(idp, Browser(idp, _ => "code=c&state=forged"));
 
         result.Session.Should().BeNull();
         result.Outcome.Should().Contain("state");
@@ -150,7 +165,7 @@ public sealed class LauncherSignInTests
     {
         var idp = Idp();
 
-        var result = await SignIn(idp, Browser(idp, q => $"error=access_denied&state={q["state"]}"), FreePort());
+        var (result, _) = await SignInOnFreePort(idp, Browser(idp, q => $"error=access_denied&state={q["state"]}"));
 
         result.Session.Should().BeNull();
         result.Outcome.Should().Contain("access_denied");
@@ -161,7 +176,7 @@ public sealed class LauncherSignInTests
     {
         var idp = Idp(status: HttpStatusCode.BadRequest);
 
-        var result = await SignIn(idp, Browser(idp, q => $"code=c&state={q["state"]}"), FreePort());
+        var (result, _) = await SignInOnFreePort(idp, Browser(idp, q => $"code=c&state={q["state"]}"));
 
         result.Session.Should().BeNull();
         result.Outcome.Should().Contain("400");
@@ -172,7 +187,7 @@ public sealed class LauncherSignInTests
     {
         var idp = Idp(nonceMatches: false);
 
-        var result = await SignIn(idp, Browser(idp, q => $"code=c&state={q["state"]}"), FreePort());
+        var (result, _) = await SignInOnFreePort(idp, Browser(idp, q => $"code=c&state={q["state"]}"));
 
         result.Session.Should().BeNull();
         result.Outcome.Should().Contain("nonce");
@@ -183,7 +198,7 @@ public sealed class LauncherSignInTests
     {
         var idp = Idp();
 
-        var result = await SignIn(idp, _ => { }, FreePort(), TimeSpan.FromMilliseconds(300));
+        var (result, _) = await SignInOnFreePort(idp, _ => { }, TimeSpan.FromMilliseconds(300));
 
         result.Session.Should().BeNull();
         result.Outcome.Should().Contain("within");

@@ -1805,4 +1805,10 @@ public static class ExitCodes
     /// unknown. Nothing was installed, and what the last successful check recorded (a required update included) stands.
     /// </summary>
     public const int UpdateChannelUnreachable = 9;
+
+    /// <summary>
+    /// <c>fravashi uninstall</c> (backlog 375) removed what it could, but a step failed (said on its own line): something
+    /// of the install is left, and the data is kept if its copy did not complete.
+    /// </summary>
+    public const int UninstallIncomplete = 10;
 }

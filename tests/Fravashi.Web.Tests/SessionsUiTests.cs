@@ -1468,6 +1468,48 @@ public class SessionsUiTests : IDisposable
         Assert.Equal("9.9M tokens", cut.Find("[data-testid=session-totals-alltime-tokens]").TextContent.Trim());
     }
 
+    [Fact]
+    public void The_totals_strip_shows_free_tier_units_only_where_the_broker_carried_turns()
+    {
+        // Backlog 377: units are not money, so they stand beside the cost rather than in it.
+        using var ctx = new BunitContext();
+        var totals = new SessionUsageTotals(
+            new UsageTotal(0m, 600, 1, FreeTierUnits: 13_743),
+            new UsageTotal(0.42m, 1_230_000, 3, FreeTierUnits: 13_743),
+            new UsageTotal(0.42m, 1_230_000, 3));
+
+        var cut = ctx.Render<SessionTotalsStrip>(p => p.Add(c => c.Totals, totals));
+
+        Assert.Equal("13.7k units free", cut.Find("[data-testid=session-totals-today-free]").TextContent.Trim());
+        Assert.Equal("$0.00", cut.Find("[data-testid=session-totals-today-cost]").TextContent.Trim());
+        Assert.Single(cut.FindAll("[data-testid=session-totals-month-free]"));
+        Assert.Empty(cut.FindAll("[data-testid=session-totals-alltime-free]"));
+    }
+
+    [Fact]
+    public void A_free_tier_conversation_shows_its_units_and_no_dollar_figure()
+    {
+        using var ctx = new BunitContext();
+
+        var cut = ctx.Render<SessionUsageStrip>(p => p.Add(
+            c => c.Stats, new AgentStatsSnapshot(20, 121, 41_602, 0m, 0, 0, 2, FreeTierUnits: 13_743)));
+
+        Assert.Equal("13.7k units free", cut.Find("[data-testid=session-free-tier]").TextContent.Trim());
+        Assert.Empty(cut.FindAll("[data-testid=session-cost]"));
+    }
+
+    [Fact]
+    public void A_paid_conversation_shows_its_cost_and_no_units()
+    {
+        using var ctx = new BunitContext();
+
+        var cut = ctx.Render<SessionUsageStrip>(p => p.Add(
+            c => c.Stats, new AgentStatsSnapshot(20, 121, 41_602, 0.0188m, 0, 0, 2)));
+
+        Assert.Equal("$0.02", cut.Find("[data-testid=session-cost]").TextContent.Trim());
+        Assert.Empty(cut.FindAll("[data-testid=session-free-tier]"));
+    }
+
     // ---- spend against the configured ceilings (backlog 62) -----------------------------------
 
     [Fact]

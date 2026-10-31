@@ -553,10 +553,11 @@ public class AgentRuntimeDriftLoggingTests
     }
 
     [Fact]
-    public async Task A_failed_update_of_an_on_pin_install_claims_no_drift()
+    public async Task An_on_pin_install_is_left_alone_and_claims_no_drift()
     {
-        // The mechanism seen to fail the other way: the same failed npm run, but the prefix already holds the
-        // pinned copy, so the only honest line is the failure itself.
+        // Once, npm ran here even when the prefix already held the pinned copy (and could fail, offline). Since the 1.0.2
+        // proof (a reinstall at a container start left the CLI broken) an on-pin CLI is not reinstalled at all, so npm
+        // never runs, nothing fails, and nothing is claimed about drift.
         var (sut, logger) = Build(Runner(
             OfflineNpm(),
             cmd => new AgentCommandResult(
@@ -566,7 +567,7 @@ public class AgentRuntimeDriftLoggingTests
         await sut.RunUpdatesAsync(CancellationToken.None);
 
         logger.Warnings.Should().NotContain(w => w.Contains("the product pins", StringComparison.Ordinal));
-        logger.Warnings.Should().Contain(w => w.Contains("did not succeed", StringComparison.Ordinal));
+        logger.Warnings.Should().NotContain(w => w.Contains("did not succeed", StringComparison.Ordinal));
     }
 
     [Fact]

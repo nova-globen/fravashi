@@ -317,6 +317,25 @@ foreach ($shellBase in @('Software\Classes\Directory\shell', 'Software\Classes\D
 }
 Write-Host "Added the 'Open with Fravashi' folder context menu."
 
+# --- The Apps & Features entry (backlog 375): HKCU only, no elevation ----------------------------------------------------
+# Windows Settings asks "This app and its related info will be uninstalled" before it runs the entry, so the entry
+# answers fravashi's own question with --yes. The uninstall keeps the data (the owner, 2026-10-30) and removes this key.
+$uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Fravashi'
+New-Item -Path $uninstallKey -Force | Out-Null
+$exeVersion = (Get-Item $fravashiExe).VersionInfo.FileVersion
+foreach ($pair in @(
+        @('DisplayName', 'Nova Globen Fravashi'),
+        @('DisplayVersion', $(if ($exeVersion) { $exeVersion } else { '' })),
+        @('Publisher', 'Nova Globen AB'),
+        @('InstallLocation', $target),
+        @('DisplayIcon', $fravashiExe),
+        @('UninstallString', "`"$fravashiExe`" uninstall --yes"))) {
+    Set-ItemProperty -Path $uninstallKey -Name $pair[0] -Value $pair[1]
+}
+Set-ItemProperty -Path $uninstallKey -Name 'NoModify' -Value 1 -Type DWord
+Set-ItemProperty -Path $uninstallKey -Name 'NoRepair' -Value 1 -Type DWord
+Write-Host "Added Nova Globen Fravashi to Settings > Apps (uninstall there, or run 'fravashi uninstall')."
+
 # --- Shortcuts: target fravashi.exe (a WinExe, so launching from a shortcut shows no console window) --------------------
 # Named for the product, which since the rename is also the command (Fravashi). Written over each run, so an upgrade
 # never leaves two.

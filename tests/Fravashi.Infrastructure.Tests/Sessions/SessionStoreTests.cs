@@ -491,6 +491,25 @@ public class SessionStoreTests : IDisposable
     }
 
     [Fact]
+    public void Free_tier_units_are_totalled_by_the_day_they_were_used_and_cost_nothing()
+    {
+        // Backlog 377: a brokered conversation's turns cost $0 and count the broker's units; they are summed into the
+        // windows like cost, from the day each snapshot was taken, and never into the money.
+        var dayStart = new DateTimeOffset(2026, 10, 30, 0, 0, 0, TimeSpan.Zero);
+        var id = AgentSessionId.New();
+        _store.Save(Record(id, started: dayStart.AddHours(-2)));
+        _store.Append(id, [new StatsUpdated(dayStart.AddHours(-2), new AgentStatsSnapshot(10, 50, 0, 0m, 0, 0, 1, FreeTierUnits: 400, CacheWriteTokens: 30))]);
+        _store.Append(id, [new StatsUpdated(dayStart.AddHours(3), new AgentStatsSnapshot(20, 90, 0, 0m, 0, 0, 2, FreeTierUnits: 1000, CacheWriteTokens: 40))]);
+
+        var totals = _store.ReadUsageTotals(dayStart, dayStart.AddDays(-29));
+
+        totals.Today.FreeTierUnits.Should().Be(600, "400 of the 1000 were used yesterday");
+        totals.Month.FreeTierUnits.Should().Be(1000);
+        totals.AllTime.FreeTierUnits.Should().Be(1000);
+        totals.AllTime.CostUsd.Should().Be(0m);
+    }
+
+    [Fact]
     public void The_month_total_counts_only_sessions_started_this_month_while_all_time_counts_both()
     {
         var monthStart = new DateTimeOffset(2026, 8, 1, 0, 0, 0, TimeSpan.Zero);

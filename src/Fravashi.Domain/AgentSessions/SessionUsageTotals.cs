@@ -5,8 +5,12 @@ namespace Fravashi.Domain.AgentSessions;
 /// tokens they moved, plus how many sessions the figure is over. Cost stays <see cref="decimal"/> like
 /// every other money value in the studio, so a total is the exact sum of the per-session costs it is
 /// built from and reconciles with them to the cent.
+/// <para>
+/// <see cref="FreeTierUnits"/> is what the credential broker's free tier counted (backlog 377). Those turns cost the
+/// person nothing, so they are not in <see cref="CostUsd"/> and never meet a spending limit.
+/// </para>
 /// </summary>
-public sealed record UsageTotal(decimal CostUsd, long TotalTokens, int Sessions)
+public sealed record UsageTotal(decimal CostUsd, long TotalTokens, int Sessions, long FreeTierUnits = 0)
 {
     public static UsageTotal Zero { get; } = new(0m, 0, 0);
 }

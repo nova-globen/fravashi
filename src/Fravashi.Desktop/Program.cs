@@ -1,3 +1,4 @@
+using Fravashi.Domain;
 using Fravashi.Launcher;
 using Fravashi.Launcher.Releases;
 
@@ -190,7 +191,11 @@ internal static class Program
 
     private static int RunConsoleVerb(ParsedCommand parsed)
     {
-        NativeConsole.AttachToParent();
+        var seen = NativeConsole.AttachToParent();
+        if (parsed.Verb == DesktopVerb.Uninstall)
+        {
+            return RunUninstall(parsed, seen);
+        }
 
         var configPath = parsed.ConfigPath ?? LauncherConfigStore.DefaultPath;
         var configStore = new LauncherConfigStore(configPath);
@@ -224,5 +229,95 @@ internal static class Program
             residentUpgrade: new HttpResidentUpgrade(configStore.ConfigDirectory, () => configStore.Load()?.UpgradePort));
 
         return DesktopCommandLine.Execute(parsed, app, launcherLog.Line);
+    }
+
+    /// <summary>
+    /// <c>fravashi uninstall</c> (backlog 375). Runs only from the installed program folder, never from a build output,
+    /// because it removes the folder it runs from. Asks first unless <c>--yes</c> (Windows Settings asks before it starts
+    /// the Apps &amp; Features entry, which passes it); with no console it asks and reports in a window. With
+    /// <c>--remove-data</c> nothing is written to the launcher log, which lives in the data folder being removed.
+    /// </summary>
+    private static int RunUninstall(ParsedCommand parsed, bool seen)
+    {
+        var programFolder = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
+        var installed = Path.Combine(ProductHome.LocalAppData, "Programs", ProductName.Short);
+        if (!string.Equals(Path.GetFullPath(programFolder), Path.GetFullPath(installed), StringComparison.OrdinalIgnoreCase))
+        {
+            Say(seen, $"`{ProductName.Command} uninstall` runs only from the installed {ProductName.Executable} ({installed}); " +
+                      $"this one runs from {programFolder}. Nothing was changed.");
+            return ExitCodes.UsageError;
+        }
+
+        var dataFolder = ProductHome.Current;
+        var config = new LauncherConfigStore(ProductHome.ConfigPath(dataFolder)).Load();
+        var target = new UninstallTarget(
+            programFolder,
+            dataFolder,
+            string.IsNullOrWhiteSpace(config?.ContainerName) ? LauncherDefaults.ContainerName : config!.ContainerName!,
+            string.IsNullOrWhiteSpace(config?.Image) ? LauncherDefaults.Image : config!.Image!,
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+
+        var question = parsed.RemoveData
+            ? $"Remove {ProductName.Full} AND its data ({dataFolder})? The data is copied to {target.BackupFolder} first."
+            : $"Remove {ProductName.Full}? Your data ({dataFolder}) is kept, and a reinstall picks it up again.";
+        if (!parsed.Yes && !Confirm(seen, question))
+        {
+            Say(seen, "Nothing was changed.");
+            return ExitCodes.Success;
+        }
+
+        var said = new List<string>();
+        var log = parsed.RemoveData
+            ? null
+            : new LauncherLog(string.IsNullOrWhiteSpace(config?.DataDir) ? ProductHome.DataDir(dataFolder) : config!.DataDir!, _ => { });
+        void Line(string text)
+        {
+            said.Add(text);
+            if (seen)
+            {
+                Console.WriteLine(text);
+            }
+
+            log?.Line("uninstall: " + text);
+        }
+
+        var ok = new Uninstaller(ContainerRuntimeDetector.Detect(config), new WindowsUninstallHost(), Line, () => DateTimeOffset.Now)
+            .Run(target, parsed.RemoveData);
+        var summary = (ok ? $"{ProductName.Full} is removed." : $"{ProductName.Full} is removed, except where a line says FAILED.")
+                      + Environment.NewLine + Environment.NewLine + string.Join(Environment.NewLine, said);
+        if (seen)
+        {
+            Console.WriteLine(ok ? $"{ProductName.Full} is removed." : "Some steps FAILED; see the lines above.");
+        }
+        else
+        {
+            MessageBox.Show(summary, ProductName.Full, MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        }
+
+        return ok ? ExitCodes.Success : ExitCodes.UninstallIncomplete;
+    }
+
+    private static bool Confirm(bool seen, string question)
+    {
+        if (!seen)
+        {
+            return MessageBox.Show(question, ProductName.Full, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes;
+        }
+
+        Console.Write(question + " [y/N] ");
+        var answer = Console.ReadLine();
+        return answer is not null && answer.Trim().StartsWith('y');
+    }
+
+    private static void Say(bool seen, string text)
+    {
+        if (seen)
+        {
+            Console.WriteLine(text);
+        }
+        else
+        {
+            MessageBox.Show(text, ProductName.Full, MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
     }
 }

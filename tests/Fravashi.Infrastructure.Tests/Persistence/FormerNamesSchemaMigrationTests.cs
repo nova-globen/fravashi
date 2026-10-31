@@ -118,7 +118,8 @@ public sealed class FormerNamesSchemaMigrationTests : IDisposable
     [Fact]
     public void The_launcher_knows_the_schema_the_studio_now_writes()
     {
-        SqliteSchema.CurrentVersion.Should().Be(49);
+        // At least the step that renames the stored names; a later step moves it on (backlog 377 made it 50).
+        SqliteSchema.CurrentVersion.Should().BeGreaterThanOrEqualTo(49);
     }
 
     [Fact]
